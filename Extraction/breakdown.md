@@ -1,0 +1,1 @@
+Often the daily note that we might have at night might not be a single thing, they could be multiple different pieces of info, which are logically separate and not related, we would have split them properly for things to work better.

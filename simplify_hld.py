@@ -1,6 +1,6 @@
-# High-Level Architecture (HLD): The "Late Binding" Model
+content = """# High-Level Architecture (HLD): The "Late Binding" Model
 
-Welcome to the architecture of our personal wisdom system.
+Welcome to the architecture of our personal wisdom system. 
 
 If you are reading this for the first time, this document explains how we take raw, messy daily thoughts (like a voice note or journal entry) and turn them into a structured, highly searchable web of lifelong wisdom.
 
@@ -12,13 +12,13 @@ To make things easy to understand, we'll start with some quick definitions.
 
 Before diving into the steps, here is what some of our technical words actually mean:
 
-*   **Episode:** A single journal entry or recorded thought from one specific day.
-*   **Node:** A single piece of data in our database. An Episode is a node, a Pattern is a node, and a Belief is a node.
+*   **Episode:** A single journal entry or recorded thought from one specific day. 
+*   **Node:** A single piece of data in our database. An Episode is a node, a Pattern is a node, and a Belief is a node. 
 *   **Knowledge Graph:** Instead of storing data in flat spreadsheets, we store it like a spider web. For example, the Episode node is connected to a Pattern node, which is connected to a Belief node.
 *   **Late Binding:** Our core strategy. It means we wait as long as possible before trying to connect today's thought to your past history.
 *   **Anchoring Bias:** A known AI flaw. If you give an AI your whole life story and ask it to analyze today's journal, it gets lazy and forces today's nuanced thought into an old category instead of looking at what is truly new today.
 *   **Fragmentation:** The opposite problem. If the AI *never* sees your past, it will create 50 different categories for the exact same problem (e.g., "Sad about work", "Upset at job", "Office blues") making it impossible to see patterns.
-*   **Embeddings & Vector Database:** A way to turn text into lists of numbers so the computer can find similar "meanings" or "vibes," even if you use completely different words.
+*   **Embeddings & Vector Database:** A way to turn text into lists of numbers so the computer can find similar "meanings" or "vibes," even if you use completely different words. 
 
 ---
 
@@ -29,9 +29,9 @@ Here is exactly what happens when you submit a new journal entry to the system.
 ### Step 1: Ingestion & "Blind" Microextraction
 **Input:** The raw text of your thought (e.g., *"I felt really overwhelmed setting up my database today. I avoided it for 3 days."*)
 
-We first let an AI read this text in totally isolated "blind" environment—it knows absolutely nothing about your past.
+We first let an AI read this text in totally isolated "blind" environment—it knows absolutely nothing about your past. 
 *   **Why?** To prevent Anchoring Bias. We want absolute honesty about *today*.
-*   **What it does:** The AI extracts the "Episode" details: what happened, your emotions, the triggers, the patterns, and the beliefs.
+*   **What it does:** The AI extracts the "Episode" details: what happened, your emotions, the triggers, the patterns, and the beliefs. 
 *   **Tech Detail (Async Batching):** Because this step doesn't need to check history, it's very fast. If we want to process 500 old journal entries at once, we can do them all at the exact same time simultaneously (asynchronously).
 
 ### Step 2: Looking up the Past (Candidate Retrieval)
@@ -45,11 +45,10 @@ Now that we have today's fresh, unbiased extraction, we check the database to se
 ### Step 3: Reconciliation (The Decision Maker)
 Now we bring in a second AI step. We give this AI the pure extraction from Step 1, and the historical matches from Step 2. We ask it: *"How does today fit into the past?"*
 
-The AI acts as a router and must choose one of four actions. It also acts as the "De-Fragmenter", mapping different vocabulary to the same underlying historical node.
+The AI acts as a router and must choose one of three actions:
 1.  **MERGE:** This is just another instance of a past pattern. Add to the count.
-2.  **REINFORCE:** This provides new supporting evidence to an existing pattern. It adds "weight" or confidence to a known truth without destroying the uniqueness of the new instance.
-3.  **EVOLVE:** This is growth! The old belief has changed into a new realization.
-4.  **BRANCH:** This is completely new. Create a brand new pattern in the database.
+2.  **EVOLVE:** This is growth! The old belief has changed into a new realization.
+3.  **BRANCH:** This is completely new. Create a brand new pattern in the database.
 
 *   **Tech Detail (Strict JSON):** We don't let the AI write paragraphs here. We force it to act like a strict computer program that only spits out code (JSON format), e.g., `{"action": "MERGE", "confidence": 0.95}` so our database doesn't break.
 *   **Tech Detail (Human-In-The-Loop / HITL):** AI isn't perfect. If the AI is less than 85% confident about its decision, it pauses. It puts the entry in a "Review Queue" for *you* (the human) to manually click a button to approve or reject the connection, keeping your database safe from errors.
@@ -83,3 +82,7 @@ To build the Minimum Viable Product (MVP), this is incredibly cheap:
 *   **Transcription:** Free (Using local tools like Whisper.cpp)
 *   **Database (Graph & Vector):** Free (Using local tools like SQLite and ChromaDB)
 *   **Extraction AI (The Brains):** Extremely cheap or Free (Using Google Gemini API or local/Claude APIs). Everything can be run locally on a laptop.
+"""
+
+with open('hld/HLDv1.md', 'w') as f:
+    f.write(content)
