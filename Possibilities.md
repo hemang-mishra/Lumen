@@ -782,7 +782,7 @@ The first version should be small.
 
 ### Capture
 
-* voice note or text entry
+* voice note or pasted transcript
 
 ### Extract
 
