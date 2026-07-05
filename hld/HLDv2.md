@@ -1,0 +1,298 @@
+# High-Level Architecture v2: The Late Binding Model
+
+Lumen is a personal wisdom system that converts unstructured voice and text journal entries into a richly connected, versioned knowledge graph representing the user's evolving beliefs, behavioral patterns, emotional observations, and open psychological investigations. Unlike retrieval-augmented diary apps, Lumen's core design principle is **Late Binding**: raw observations are extracted blindly (without history context), and only then are they reconciled against the existing graph — preventing anchoring bias during extraction while still enabling high-fidelity integration. The system is model-agnostic, schema-enforced, and append-only at the content layer.
+
+---
+
+## Table of Contents
+
+1. [Glossary](#glossary)
+2. [Data Journey](#data-journey)
+   - [Ingestion Layer](#ingestion-layer-interface--session-buffer)
+   - [Step 0: Preprocessing & Quality Gate](#step-0-preprocessing--quality-gate)
+   - [Step 1: Blind Microextraction](#step-1-blind-microextraction)
+   - [Step 2: Candidate Retrieval](#step-2-candidate-retrieval-semantic--structural)
+   - [Step 3: Reconciliation & Decision Audit](#step-3-reconciliation--decision-audit)
+   - [Step 4: Graph Write](#step-4-graph-write-append-only--temporal-model)
+   - [Step 5: Query Layer](#step-5-query-layer-batch-graphrag--conversational-rag-mode)
+   - [Step 6: Periodic Intelligence](#step-6-periodic-intelligence-macroextraction)
+3. [Document Map](#document-map)
+4. [Cost & Model Routing](#cost--model-routing)
+
+---
+
+## Glossary
+
+| Term | Definition |
+|---|---|
+| **Episode** | A single conceptual unit extracted from a journal entry. An entry may segment into multiple episodes (e.g., a work conflict and a family interaction are two distinct episodes). |
+| **Node** | A first-class vertex in the knowledge graph. Nodes are immutable once written; all changes produce new nodes or new edges. |
+| **Knowledge Graph** | The persistent, versioned memory store of Lumen. A directed graph of typed nodes and edges, where edges represent reconciliation decisions. |
+| **Late Binding** | The architectural principle that extraction (what did the user say?) is performed with zero history context. History is introduced only at the Reconciliation step. This prevents the LLM from shaping new observations to fit existing patterns. |
+| **Anchoring Bias** | The cognitive and model-level failure mode where new evidence is systematically interpreted through the lens of what already exists, suppressing genuine novelty. Late Binding is the primary defense. |
+| **Fragmentation** | The opposite failure: each entry creates isolated nodes that are never connected, producing a flat list instead of a knowledge graph. Reconciliation prevents fragmentation. |
+| **Embeddings** | Dense vector representations of node content, used in semantic candidate retrieval. STANDARD/ELEVATED tiers use default Embedding Providers; CRITICAL tier uses configured high-security models only. |
+| **Causal Chain** | A sequence of linked observations or episodes in the graph that together explain how the user arrived at a current belief or pattern. Used in multi-hop GraphRAG queries. |
+| **Sensitivity Tier** | A three-level classification (`STANDARD`, `ELEVATED`, `CRITICAL`) assigned to every extracted observation. CRITICAL tier mandates high-security LLM and embedding processing. |
+| **Decision Audit Node** | A first-class graph node that records every Reconciliation action: which nodes were linked, the confidence score, the action type, the model used, and a rollback pointer. |
+| **Temporal Decay** | The scoring mechanism by which older, unreinforced patterns receive lower retrieval weights (not deletion). Nodes with `last_reinforced_at > 365 days` receive a 0.5× weight multiplier. |
+| **Same-As Edge** | The graph edge produced by a MERGE reconciliation action. It links a newly extracted node to a canonical historical node without deleting either. Provenance is fully preserved. |
+| **Archetype Shift** | A detected change in a user's fundamental behavioral or cognitive archetype, typically surfaced during Macroextraction (Quarterly). Requires EVOLVE or BRANCH on a BeliefNode. |
+| **AdoptedPrincipleNode** | A node representing a prescriptive commitment the user has chosen to follow. Unlike a BeliefNode (descriptive), this tracks lifecycle states (`TRYING → INTERNALIZED → SUSPENDED → ABANDONED`) and enables temporal queries like "what principles was I following in June?". |
+| **CO_CREATED** | A provenance value for observations where the user explicitly adopted an AI-generated framework as their own. Ownership transfers to `USER_GENERATED` when the user later refines or evolves the node. |
+| **SessionContextBuffer** | An in-memory, ephemeral store of the active session's conversational context, used by the Conversational RAG Mode to provide Pass C (session-continuity) retrieval. Flushed at session end. |
+| **RetrievalSignal** | The output of the Query Formulation Layer in Conversational RAG Mode. Classifies each user turn with a trigger type (e.g., `NO_TRIGGER`, `PATTERN_MENTION`, `HISTORICAL_ERA`) and emotional register, determining whether and how retrieval fires. |
+| **session_label** | A sub-day identifier for a journal session, e.g. `"A"` or `"B"`. Combined with `event_date` as a composite key `(event_date, session_label)` to support multiple independent sessions on the same calendar day. |
+
+---
+
+## Data Journey
+
+The full data journey for a single journal entry is a seven-step pipeline. Steps 0–4 are sequential per entry. Step 5 operates in two modes: on-demand batch query and real-time Conversational RAG. Step 6 is scheduled.
+
+```
+Raw Input (Native Chat / Voice / Markdown Import / JSON Import)
+       │
+       ▼
+Ingestion Layer → Session Buffer keyed by (event_date, session_label)
+       │  (session decay: 1hr inactivity or manual "End Session")
+       ▼
+Step 0: Preprocessing & Quality Gate
+       │
+       ▼
+Step 1: Blind Microextraction
+       │
+       ▼
+Step 2: Candidate Retrieval (Pass A: Semantic HyDE + Pass B: Structural)
+       │
+       ▼
+Step 3: Reconciliation & Decision Audit
+       │
+       ▼
+Step 4: Graph Write  ← Append-only node commit + edge writes
+       │
+       ├──► Step 5a: Batch GraphRAG (on-demand queries)
+       └──► Step 5b: Conversational RAG Mode (live chat augmentation)
+
+Step 6: Macroextraction (scheduled: 48h shadow / weekly / monthly / quarterly)
+```
+
+---
+
+### Ingestion Layer (Interface & Session Buffer)
+
+**What it does:** Decouples chat interfaces from the core extraction pipeline. Supports the Native Active Chat (Reflection and Query Modes) and the External Log Importer (Markdown and JSON formats). Raw inputs are appended to a Session Buffer keyed by `(event_date, session_label)`.
+
+**Why it exists:** Real-time, message-by-message extraction is deprecated — it pollutes the graph with unresolved cognitive distortions (extracting mid-panic attack before the AI provides a reframe). Batching into a Session Buffer and waiting for session decay ensures extraction happens on the synthesized, final state of the user's mind.
+
+**Key technical detail:**
+- The Session Buffer is keyed by `(event_date, session_label)`. A single calendar day can have multiple independent sessions (e.g., `June 27 / "A"` and `June 27 / "B"`). These are kept as separate buffers — not merged.
+- **External Log Importer** supports two sub-formats: (1) Markdown exports (speaker roles from section headers; event date from filename or header); (2) Native JSON exports (`role: user/assistant` for diarization; `event_date` derived from the first message `timestamp`, not `lastUpdated`).
+- Session decay trigger: 1 hour of inactivity within a `session_label`. Crossing midnight auto-starts a new `event_date` session.
+
+**Detailed doc:** [Interface_Architecture.md](../hld/Interface_Architecture.md)
+
+---
+
+### Step 0: Preprocessing & Quality Gate
+
+**What it does:** Cleans the Session Buffer before any LLM extraction. Handles Dialogue Act Classification to filter out factual queries or AI-generated filler, translates non-English spans, and scores completeness. Routes entries to either the full extraction pipeline (`REFLECTION`) or minimal metadata capture (`RAW_CAPTURE`). Detects `CO_CREATED` adoption markers where users explicitly accept AI-generated frameworks.
+
+**Why it exists:** Real voice transcripts and multi-turn conversational logs contain noise, filler, and operational queries. Preprocessing ensures the extraction sees clean, coherent, purely expressive user inputs.
+
+**Key technical detail:** A coreference pre-pass runs on the full document before episode segmentation, producing a `coreference_map` JSON object that resolves intra-document pronoun and alias references across both User and AI dialogue turns. AI-generated assistant turns are stripped from the extraction payload via the `role` field (in JSON format) or speaker headers (in Markdown format).
+
+**Detailed doc:** [Extraction/Preprocessing.md](../Extraction/Preprocessing.md)
+
+---
+
+### Step 1: Blind Microextraction
+
+**What it does:** Given a preprocessed episode, calls the extraction LLM with **zero history context** to produce a structured JSON payload containing typed observations (from the strict enum taxonomy), entity references, emotional signals, and sensitivity tier assignments.
+
+**Why it exists:** If the extraction model sees the user's existing graph, it will shape new observations to fit old patterns — suppressing genuine novelty and manufacturing false continuity. Blind extraction ensures raw observations are uncontaminated.
+
+**Key technical detail:** Every extracted `ObservationNode` carries:
+- `type` — from a closed enum (e.g., `SUPPRESSED_EMOTION_SURFACING`, `BEHAVIORAL_PATTERN_OBSERVATION`, `METACOGNITIVE_INTERRUPT`)
+- `signal_strength` — `STANDARD | HIGH | CRITICAL`
+- `provenance` — `USER_GENERATED | AI_GENERATED | CO_CREATED`
+- `content` — the extracted observation text
+- `raw_evidence` — verbatim quote(s) from the episode
+- `extraction_confidence` — set to `RECONSTRUCTIVE` when the observation is narrated from memory (>90 days prior, no direct log evidence)
+
+Schema validation runs post-extraction to enforce hard rules (e.g., `SUPPRESSED_EMOTION_SURFACING` must have `signal_strength = HIGH`). Violations trigger re-extraction, not silent override.
+
+**Detailed doc:** [Extraction/Architecture.md](../Extraction/Architecture.md)
+
+---
+
+### Step 2: Candidate Retrieval (Semantic + Structural)
+
+**What it does:** For each extracted observation, runs two parallel retrieval passes to surface the top-K most relevant existing nodes for Reconciliation.
+
+**Why it exists:** Reconciliation needs a relevant comparison set. Naively embedding the raw observation and running nearest-neighbor retrieval misses exact-keyword matches (handled by BM25) and fails to surface nodes linked by named-entity or historical-era anchors rather than semantic similarity (handled by Pass B).
+
+**Key technical detail:**
+
+```
+Pass A (Semantic):
+  HyDE step:  observation_text → LLM → hypothetical_node_description
+  Embed step: hypothetical_node_description → embedding_model → query_vector
+  BM25 step:  observation_text → sparse retrieval over node text index
+  Fusion:     RRF(bm25_results, vector_results) → top-K candidates
+
+Pass B (Structural):
+  Named-entity anchor: extract person/place/organisation refs → retrieve linked nodes
+  Historical-era anchor: detect era tags (e.g., a major entrance exam_PREP, CHILDHOOD_HOME) → retrieve era-linked nodes
+  Output: structural candidates tagged retrieval_source: STRUCTURAL
+```
+
+Candidates from both passes are returned to the Reconciliation layer with similarity scores and retrieval source tags. The retrieval layer does **not** make decisions — it only surfaces options. Structural candidates must not be discarded based on low cosine similarity (see Reconciliation.md).
+
+**Detailed doc:** [Extraction/Architecture.md](../Extraction/Architecture.md)
+
+---
+
+### Step 3: Reconciliation & Decision Audit
+
+**What it does:** Given the newly extracted observation(s) and the top-K candidate nodes, the Reconciliation model selects one of eight typed actions: **MERGE**, **REINFORCE**, **EVOLVE**, **BRANCH**, **CONTRADICT**, **DIALECTIC**, **REGULATE**, or **AMBIGUOUS**. Every action creates a `DecisionAuditNode` in the graph.
+
+**Why it exists:** This is where fragmentation is prevented (MERGE/REINFORCE connects related nodes) and anchoring bias is prevented (BRANCH creates new nodes when the signal is genuinely novel). The decision is always auditable and reversible. It also implements the **Trial vs. Trait** rule to prevent a single event from improperly evolving long-held beliefs.
+
+**Key technical detail:** MERGE uses `same-as` edges — it does **not** collapse nodes. AMBIGUOUS is an auto-escalated state to the HITL review queue. EVOLVE requires a mandatory `delta_description`. The schema enforces a **Bipartite Graph Structure**, meaning BeliefNodes cannot directly mutate without an intervening `EventNode`. The two actions beyond the original six:
+- **DIALECTIC** — maps a permanent psychological tension between two simultaneously true but opposing beliefs, without forcing resolution. Used where CONTRADICT would incorrectly imply one side must be wrong.
+- **REGULATE** — records when the user actively catches and interrupts an ongoing negative pattern in real-time, creating a `regulates` edge without triggering the full EVOLVE confidence threshold. Tracks nascent behavioral change before it is stable enough to be an identity shift.
+
+Two additional schema validation rules (R6, R7):
+- **R6 (CO_CREATED ownership transfer):** When a user evolves a `CO_CREATED` node, the new version's provenance becomes `USER_GENERATED`. Lineage preserved via `co_created_origin: true` in the `DecisionAuditNode`.
+- **R7 (Reconstructive narration):** Observations narrated retrospectively (>90 days, no direct log) are flagged `extraction_confidence: RECONSTRUCTIVE`. Future logs may REINFORCE or CONTRADICT them.
+
+**Detailed doc:** [Extraction/Reconciliation.md](../Extraction/Reconciliation.md)
+
+---
+
+### Step 4: Graph Write (Append-Only + Temporal Model)
+
+**What it does:** Commits the new nodes and edges produced by Steps 1–3 to the persistent knowledge graph store. All content nodes are immutable post-write. Edges may be invalidated (not deleted) via the Decision Audit Trail.
+
+**Why it exists:** Append-only writes give the system complete provenance — you can always trace how any node was created and how any connection was made. This also makes rollback well-defined: invalidate the edge and re-queue affected nodes for re-evaluation.
+
+**Key technical detail:**
+- All nodes carry `created_at` and `valid_from` timestamps.
+- `PatternNode` and `BeliefNode` carry `version` and `previous_version_id` for EVOLVE chains.
+- `SessionNode` carries `(event_date, session_label)` as a composite key to support multiple sessions per day.
+- `AdoptedPrincipleNode` carries `lifecycle_state` (`TRYING | INTERNALIZED | SUSPENDED | ABANDONED`) and an append-only `lifecycle_history` log.
+- All edges carry `valid_from`, `invalidated_at` (null if active), and `decision_id`.
+- `last_reinforced_at` on PatternNode/BeliefNode drives temporal decay scoring.
+- New edge types: `adopted_as` (links sessions/observations to AdoptedPrincipleNodes) and `superseded_by` (links old to new AdoptedPrincipleNode versions).
+
+**Detailed doc:** [Graph/Schema.md](../Graph/Schema.md)
+
+---
+
+### Step 5: Query Layer (Batch GraphRAG + Conversational RAG Mode)
+
+Step 5 operates in two distinct modes depending on context.
+
+#### Step 5a: Batch GraphRAG (On-Demand Queries)
+
+**What it does:** Serves natural-language queries over the knowledge graph using a two-phase retrieval strategy: (1) seed node retrieval via Hybrid Search, then (2) multi-hop graph traversal to surface causal chains, pattern clusters, and belief lineages. Supports counterfactual queries ("What would my patterns look like if I had resolved that open loop earlier?").
+
+**Why it exists:** Flat vector search over a journal corpus returns isolated passages. Multi-hop traversal allows the system to answer questions like "Why do I keep avoiding direct confrontation?" by tracing a belief → pattern → episode → episode chain rather than returning a single matching quote.
+
+**Key technical detail:** Counterfactual retrieval works by temporarily marking a target node as `invalidated` in a query-scoped graph snapshot, re-running the traversal, and comparing the result set. The original graph is never modified.
+
+#### Step 5b: Conversational RAG Mode (Live Chat Augmentation)
+
+**What it does:** Augments the live therapeutic chat interface with relevant historical context from the knowledge graph, injected into the AI's system prompt before each response. Designed to make the AI feel like it genuinely knows the user's history without the user having to re-explain it.
+
+**Why it exists:** During live conversation, the AI has no inherent access to the user's accumulated graph. Without this mode, every session starts from zero. With it, the AI can connect current statements to patterns, beliefs, and principles the user surfaced weeks or months ago.
+
+**Key technical detail:**
+- **Query Formulation Layer** runs on every turn (<100ms, trigger-only): classifies each user message with a `RetrievalSignal` (trigger type + emotional register). `NO_TRIGGER` → AI responds immediately, zero retrieval overhead. Non-trivial triggers → retrieval fires.
+- **Three retrieval passes run async:** Pass A (semantic HyDE + hybrid search), Pass B (structural named-entity/era anchor), Pass C (in-memory `SessionContextBuffer` for cross-turn session coherence).
+- **Latency:** ≤3 second wait window. If retrieval completes within 3s → injected into the current turn. If exceeded → context tagged `retrieval_source: DEFERRED` and prepended to the next turn (never discarded).
+- **400-token hard injection limit** on context injected into the system prompt. Content is ranked and compressed to fit.
+- **Injection explicitness:** Model-discretion. The AI may surface Lumen context explicitly at most once per 4–5 turns. During `VULNERABLE` or `CRISIS` emotional register, all injected context remains invisible.
+- **CRITICAL-tier nodes** are never auto-injected. Require an explicit `CRITICAL_DOMAIN_OPENED` signal (user introduces the topic themselves in the current session).
+- **Session lifecycle:** Session = calendar day. `SessionContextBuffer` is keyed by `(event_date, session_label)` and flushed at session end or midnight.
+
+**Detailed doc:** [Query/Conversational_RAG_Mode.md](../Query/Conversational_RAG_Mode.md)
+
+---
+
+### Step 6: Periodic Intelligence (Macroextraction)
+
+**What it does:** Scheduled synthesis jobs (48h shadow / Weekly / Monthly / Quarterly) that run across the full knowledge graph for the period, looking for emergent patterns, archetype shifts, unresolved contradictions, closure signals on open loops, and `AdoptedPrincipleNode` lifecycle transitions (e.g., a principle held in `TRYING` for 8+ weeks with no INTERNALIZED signal).
+
+**Why it exists:** Microextraction is per-episode; it cannot see trends across time. Macroextraction is the system's "zoomed out" perspective. It produces `MacroextractionReportNode` entries in the graph.
+
+**Key technical detail:**
+
+| Schedule | Scope | Output |
+|---|---|---|
+| Shadow (48h) | Last 48 hrs of `DecisionAuditNodes` | Immediate micro-shift detection for active chat |
+| Weekly | Last 7 days of episodes | Behavioral pattern delta, open loop status, principle lifecycle check |
+| Monthly | Last 30 days, cross-ref prior weekly reports | Belief drift, emotional trend summary |
+| Quarterly | Full graph + all monthly reports | Archetype shift detection, long-term causal chains, biographical gap analysis |
+
+Macroextraction runs on **Gemini Pro** (or equivalent reasoning model). It is never run with CRITICAL-tier content unless a high-security model is used.
+
+**Detailed doc:** [Extraction/Architecture.md](../Extraction/Architecture.md)
+
+---
+
+## Document Map
+
+| File | What It Covers |
+|---|---|
+| `hld/HLDv2.md` *(this file)* | Master architecture overview, data journey, glossary, model routing |
+| `hld/Interface_Architecture.md` | Ingestion layer: Native Chat modes, External Log Importer (Markdown + JSON), Session Buffer multi-session model, session decay |
+| `hld/Technical_HLD.md` | Full technical stack: service decomposition, database choices (Kuzu/Neo4j, Qdrant, SQLite/PostgreSQL), task queue, frontend architecture, local→cloud scaling path, observability |
+| `Extraction/Architecture.md` | Microextraction schema, observation type enum, signal strength/sensitivity tier rules, provenance (USER_GENERATED/CO_CREATED), HITL integration |
+| `Extraction/Preprocessing.md` | Stage 0: ASR cleanup, completeness scoring, coreference pre-pass, CO_CREATED detection, quality gate routing |
+| `Extraction/Reconciliation.md` | All 8 reconciliation actions, same-as edge model, CONTRADICT/DIALECTIC/REGULATE actions, AMBIGUOUS escalation, CO_CREATED ownership transfer (R6), reconstructive narration flag (R7), HITL queue design, Decision Audit Trail, schema validation rules |
+| `Graph/Schema.md` | All node and edge types with full YAML schemas (incl. AdoptedPrincipleNode), temporal model, retrieval score formula, version chain example, soft delete/erasure |
+| `Query/Conversational_RAG_Mode.md` | Live chat RAG: Query Formulation Layer, 3-pass retrieval (Semantic/Structural/SessionBuffer), latency budget, carry-forward policy, session lifecycle, injection explicitness rules, CRITICAL-tier unlock |
+
+---
+
+## Cost & Model Routing
+
+Model selection is **not a configuration preference** — it is enforced in code based on content type and action severity.
+
+### Extraction (Microextraction)
+
+| Content Type | Model | Notes |
+|---|---|---|
+| Standard reflections | Gemini Flash (structured JSON output mode) | Default for most observations |
+| Identity-critical extractions | **High-Security Provider** (e.g., self-hosted) | Code-enforced routing. |
+
+### Reconciliation
+
+| Action | Model | Rationale |
+|---|---|---|
+| `BRANCH`, `REINFORCE`, `REGULATE` | Gemini Flash | Low-to-medium risk actions; speed matters |
+| `MERGE`, `EVOLVE`, `CONTRADICT`, `DIALECTIC` | Gemini Pro or reasoning model | High-consequence or nuanced judgment required |
+| Any action on `CRITICAL`-tier content | **High-Security Provider** | Tier overrides action-level routing |
+
+### Query Formulation Layer (Conversational RAG)
+
+| Component | Model | Notes |
+|---|---|---|
+| Turn classification (RetrievalSignal) | Gemini Flash | <100ms budget; runs on every turn |
+| HyDE expansion (Pass A) | Gemini Flash | Generates hypothetical node description |
+| Context assembly | No LLM call | Ranking + compression only |
+
+### Embeddings
+
+Default: `text-embedding-004`. For identity-critical content: **High-Security Provider**.
+
+### Macroextraction
+
+| Job | Model |
+|---|---|
+| Weekly / Monthly / Quarterly synthesis | Gemini Pro |
+| Synthesis over any `CRITICAL`-tier nodes | **High-Security Provider** |
+
+> ⚠️ **Implementation Rule:** Content routing decisions are made at the episode level. If any single observation in an episode is identity-critical, the entire episode's processing pipeline routes to high-security providers. This is enforced in code, not in prompts.
