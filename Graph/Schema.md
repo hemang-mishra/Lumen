@@ -2,7 +2,7 @@
 
 The knowledge graph is the persistent memory of the Lumen system. It stores every observation, pattern, belief, lesson, person entity, decision, and synthesis report as a typed node, with typed edges representing the relationships between them.
 
-Two rules govern the graph at the implementation layer:
+Three rules govern the graph at the implementation layer:
 
 1. **Content nodes are immutable (append-only).** Once written, a node's `content` fields are never updated. Changes produce new versioned nodes with `evolved_from` edges.
 2. **Only connections are modifiable — and only via the Decision Audit Trail.** Edges carry `invalidated_at` timestamps. An invalidated edge is a soft-delete: it is retained in the graph for audit purposes but excluded from active traversal.
@@ -38,17 +38,22 @@ entry_id: entry_2026_06_11_raw
 occurred_at: "2025-01-18T10:30:00Z"      # Logical Event Date
 created_at: "2025-01-18T10:31:00Z"       # System Extraction Date
 valid_from: "2025-01-18T10:31:00Z"
-source_modality: VOICE_NOTE          # VOICE_NOTE | TEXT_ENTRY
-entry_class: REFLECTION              # REFLECTION | RAW_CAPTURE
-language_tags: ["en"]                # always English after Stage 0 normalization
+event_date: "2025-01-18"                 # Calendar date of the session (part of composite key)
+session_label: "A"                       # Sub-day session identifier (part of composite key with event_date)
+source_modality: VOICE_NOTE              # VOICE_NOTE | TEXT_ENTRY
+entry_class: REFLECTION                  # REFLECTION | RAW_CAPTURE
+language_tags: ["en"]                    # always English after Stage 0 normalization
 episode_summary: "User reflects on a slow, deliberate decision-making approach when confronting a career pivot"
-historical_era: "a major entrance exam_PREP"           # Optional. Anchors the episode to a specific past life chapter if explicitly referenced
-episode_index: 1                     # ordinal position within the entry
+historical_era: "a major entrance exam_PREP"   # Optional. Anchors the episode to a specific past life chapter
+overarching_themes: ["career_decision", "information_gathering"]   # High-level tags spanning the entry
+episode_index: 1                         # ordinal position within the entry
 total_episodes_in_entry: 2
 coreference_map_id: coref_2026_06_11_001
-reconciliation_status: COMPLETE      # COMPLETE | SUSPENDED | PENDING_RERECONCILIATION
-raw_text_hash: "sha256:a3f..."       # hash of cleaned episode text for deduplication
+reconciliation_status: COMPLETE          # COMPLETE | SUSPENDED | PENDING_RERECONCILIATION
+raw_text_hash: "sha256:a3f..."           # hash of cleaned episode text for deduplication
 ```
+
+**Composite key:** `(event_date, session_label)` uniquely identifies the originating session. A single calendar day can have sessions `"A"`, `"B"`, etc. Episodes from the same session share the same `(event_date, session_label)` and are linked via `follows_from` edges to preserve intra-session narrative flow.
 
 ---
 
@@ -63,25 +68,32 @@ episode_id: ep_2026_06_11_001
 occurred_at: "2025-01-18T10:30:00Z"      # Logical Event Date inherited from Episode
 created_at: "2025-01-18T10:31:45Z"       # System Extraction Date
 valid_from: "2025-01-18T10:31:45Z"
-type: BEHAVIORAL_PATTERN_OBSERVATION  # from closed enum (see Extraction/Architecture.md)
+type: BEHAVIORAL_PATTERN_OBSERVATION     # from closed enum (see Extraction/Microextraction.md)
 content: "User consistently defers major decisions until they have gathered significantly more information than peers deem necessary"
 raw_evidence:
   - "I just can't pull the trigger until I feel like I've exhausted every angle"
   - "everyone else was ready to decide weeks ago"
-signal_strength: HIGH               # STANDARD | HIGH | CRITICAL
-provenance: USER_GENERATED          # USER_GENERATED | AI_GENERATED | CO_CREATED
-person_refs: []
-open_loop_ref: null
-status: ACTIVE                      # ACTIVE | RAW_CAPTURE | EXTRACTION_FAILED | SUSPENDED
+signal_strength: HIGH                    # STANDARD | HIGH | CRITICAL
+provenance: USER_GENERATED               # USER_GENERATED | AI_GENERATED | CO_CREATED
+person_refs: []                          # array of PersonEntityNode IDs referenced by this observation
+open_loop_ref: null                      # ID of an OpenLoopNode this observation directly addresses or raises
+extraction_confidence: STANDARD          # STANDARD | RECONSTRUCTIVE
+status: ACTIVE                           # ACTIVE | RAW_CAPTURE | EXTRACTION_FAILED | SUSPENDED
 extraction_model: gemini-2.0-flash
-extraction_attempt: 1               # increments on validation failure re-extract
+extraction_attempt: 1                    # increments on validation failure re-extract
 ```
+
+**`person_refs`:** An array of `PersonEntityNode` IDs. Each entry generates a `mentions` edge during graph write.
+
+**`extraction_confidence`:** Set to `RECONSTRUCTIVE` when the user narrates an event from memory more than 90 days after it occurred with no direct log evidence. `RECONSTRUCTIVE` nodes are valid but tagged for potential revision.
+
+**`open_loop_ref`:** Set to an `OpenLoopNode` ID when this observation directly addresses or raises a specific open psychological question. Null when no open loop is implicated.
 
 ---
 
 ### 3. EventNode
 
-A discrete, objective occurrence that anchors psychological shifts. Events are concrete actions or occurrences (e.g., "Ate alone at cafe", "Received promotion", "Moved to the user's work city"). They serve as the causal bridge between beliefs in the bipartite graph schema.
+A discrete, objective occurrence that anchors psychological shifts. Events are concrete actions or occurrences (e.g., "Ate alone at cafe", "Received promotion"). They serve as the causal bridge between beliefs in the bipartite graph schema.
 
 ```yaml
 node_type: EventNode
@@ -94,7 +106,7 @@ event_summary: "Went to a local cafe alone to eat, breaking a long-standing patt
 raw_evidence:
   - "I just went out to a local cafe alone without the fear"
 person_refs: []
-signal_strength: HIGH
+signal_strength: HIGH                    # STANDARD | HIGH | CRITICAL
 status: ACTIVE
 ```
 
@@ -111,19 +123,72 @@ episode_id: ep_example_002
 occurred_at: "2025-02-08T20:11:00Z"      # Logical Event Date
 created_at: "2025-02-08T21:00:00Z"       # System Extraction Date
 valid_from: "2025-02-08T21:00:00Z"
+event_date: "2025-02-08"                 # Calendar date (part of composite key)
+session_label: "A"                       # Sub-day session identifier (part of composite key)
 session_summary: "Deep conversational breakthrough resolving an identity fusion conflict through dialogue."
 participant_entities:
   - user
   - ai_facilitator
-signal_strength: HIGH
+signal_strength: HIGH                    # STANDARD | HIGH | CRITICAL
 status: ACTIVE
+```
+
+---
+
+### 3.2. CausalChainNode
+
+A first-class node representing a multi-step causal sequence extracted from an episode. Causal chains capture the "how" of an experience — the sequence of trigger, internal states, actions, outcomes, and lessons. One episode may contain multiple distinct causal chains.
+
+```yaml
+node_type: CausalChainNode
+node_id: chain_2026_06_11_001
+episode_id: ep_2026_06_11_001
+created_at: "2025-01-18T10:32:00Z"
+valid_from: "2025-01-18T10:32:00Z"
+chain_summary: "Headache-triggered slowdown leading to full energy restoration"
+is_anticipatory: false                   # true if the chain describes a hypothetical/feared outcome, not an event that actually occurred
+step_count: 6
+status: ACTIVE
+```
+
+The actual steps are stored as `CausalStepNode` instances linked via `chain_contains` edges, making individual steps traversable for counterfactual retrieval queries.
+
+---
+
+### 3.3. CausalStepNode
+
+A single typed step within a `CausalChainNode`. Steps are ordered. A chain may branch (one action producing two different outcomes at different time points), in which case parallel steps carry a `branch_id`.
+
+```yaml
+node_type: CausalStepNode
+node_id: step_2026_06_11_001_s3
+chain_id: chain_2026_06_11_001
+step_index: 3                            # ordinal position within the chain (1-indexed)
+step_type: ACTION                        # TRIGGER | INTERNAL_STATE | ACTION | OUTCOME | LESSON
+content: "Relieved all expectations, went at very slow pace"
+branch_id: null                          # non-null when this step is part of a parallel branch from the same action step
+created_at: "2025-01-18T10:32:00Z"
+```
+
+#### Cypher — Counterfactual Retrieval Example
+
+```cypher
+-- "What worked before when I was overwhelmed?"
+MATCH (ep:EpisodeNode)-[:contains]->(chain:CausalChainNode)
+      -[:chain_contains]->(s_state:CausalStepNode {step_type: "INTERNAL_STATE"})
+WHERE s_state.content CONTAINS "overwhelmed"
+WITH chain
+MATCH (chain)-[:chain_contains]->(s_action:CausalStepNode {step_type: "ACTION"})
+MATCH (chain)-[:chain_contains]->(s_outcome:CausalStepNode {step_type: "OUTCOME"})
+RETURN s_state.content, s_action.content, s_outcome.content
+ORDER BY ep.occurred_at DESC
 ```
 
 ---
 
 ### 4. PatternNode
 
-A recurring behavioral or cognitive pattern that has been identified across multiple episodes. PatternNodes are versioned: EVOLVE actions create new versions. Must be linked to an EventNode when evolving.
+A recurring behavioral or cognitive pattern identified across multiple episodes. PatternNodes are versioned: EVOLVE actions create new versions. Must be anchored to an EventNode when evolving.
 
 ```yaml
 node_type: PatternNode
@@ -131,24 +196,26 @@ node_id: pat_decision_saturation
 version: 2
 previous_version_id: pat_decision_saturation_v1
 created_at: "2024-08-01T08:00:00Z"
-valid_from: "2025-01-18T10:34:00Z"   # valid_from updates on EVOLVE
+valid_from: "2025-01-18T10:34:00Z"       # valid_from updates on EVOLVE
 last_reinforced_at: "2025-01-18T10:34:00Z"
 pattern_name: "Deliberate Information Saturation Before Decision"
 pattern_description: "User systematically over-collects information before committing to any significant decision, prioritizing certainty over speed. In v2, pattern extends to interpersonal confrontations, not just strategic decisions."
-domain: COGNITIVE_STYLE             # COGNITIVE_STYLE | EMOTIONAL | BEHAVIORAL | RELATIONAL | CAREER | HEALTH
-signal_strength: HIGH
+domain: COGNITIVE_STYLE                  # COGNITIVE_STYLE | EMOTIONAL | BEHAVIORAL | RELATIONAL | CAREER | HEALTH
+signal_strength: HIGH                    # STANDARD | HIGH | CRITICAL
 provenance: USER_GENERATED
-evidence_count: 7                   # count of ObservationNodes linked via reinforces or same_as edges
+evidence_count: 7                        # count of ObservationNodes linked via reinforces or same_as edges
 archetype_tags: ["high_conscientiousness", "risk_averse"]
+era_tag: null                            # Optional historical era anchor (e.g. "a major entrance exam_PREP"). Used by Pass B structural retrieval.
+query_frequency: 0                       # Incremented each time this node is surfaced in a user query. Retrieval boost: +0.1x per query hit, max 1.5x total.
 is_canonical: true
-status: ACTIVE                      # ACTIVE | SUPERSEDED | SUPPRESSED
+status: ACTIVE                           # ACTIVE | SUPERSEDED | SUPPRESSED
 ```
 
 ---
 
 ### 5. BeliefNode
 
-An underlying worldview rule — a first-person statement of how the user believes the world works, how they see themselves, or what they value. Versioned identically to PatternNode. Must be linked to an EventNode when evolving.
+An underlying worldview rule — a first-person statement of how the user believes the world works, how they see themselves, or what they value. Versioned identically to PatternNode.
 
 ```yaml
 node_type: BeliefNode
@@ -161,12 +228,14 @@ last_reinforced_at: "2024-10-05T09:10:00Z"
 belief_statement: "I am an introvert who needs solitude to recharge after social interaction"
 belief_source_summary: "Expressed explicitly in entry e_2025_11_03 and reinforced in 4 subsequent entries"
 domain: SELF_CONCEPT
-signal_strength: HIGH
+signal_strength: HIGH                    # STANDARD | HIGH | CRITICAL
 provenance: USER_GENERATED
 evidence_count: 5
-is_contradicted: true               # true if linked to an active ContradictionNode
+era_tag: null                            # Optional historical era anchor for Pass B structural retrieval.
+query_frequency: 0                       # retrieval frequency counter (see PatternNode for semantics)
+is_contradicted: true                    # true if linked to an active ContradictionNode
 contradiction_node_id: con_example_001
-version_delta: null                 # plain-language description of change (populated on EVOLVE)
+version_delta: null                      # plain-language description of change (populated on EVOLVE)
 status: ACTIVE
 ```
 
@@ -186,8 +255,8 @@ evidence_episodes:
   - ep_example_006
   - ep_example_005
 domain: CAREER
-signal_strength: HIGH
-lesson_confidence: 0.84             # extraction-time confidence in lesson validity
+signal_strength: HIGH                    # STANDARD | HIGH | CRITICAL
+lesson_confidence: 0.84                  # extraction-time confidence in lesson validity
 status: ACTIVE
 ```
 
@@ -195,30 +264,28 @@ status: ACTIVE
 
 ### 7. AdoptedPrincipleNode
 
-A prescriptive commitment the user has explicitly chosen to follow — a rule, framework, or operating principle they intend to practice. Unlike a `BeliefNode` (which is *descriptive* — "I tend to do X"), an `AdoptedPrincipleNode` is *prescriptive* — "I am committing to doing Y."
-
-This distinction enables the query: *"At a specific point in time, what principles was I actively trying to follow?"* and supports fetching the logs around that period.
+A prescriptive commitment the user has explicitly chosen to follow. Unlike a `BeliefNode` (descriptive — "I tend to do X"), an `AdoptedPrincipleNode` is prescriptive — "I am committing to doing Y."
 
 ```yaml
 node_type: AdoptedPrincipleNode
 node_id: prin_work_relationship_001
 created_at: "2025-01-15T10:00:00Z"
-valid_from: "2025-01-15T10:00:00Z"        # when the user first articulated this commitment
-adopted_at: "2025-01-15T10:00:00Z"        # same as valid_from on first adoption
+valid_from: "2025-01-15T10:00:00Z"
+adopted_at: "2025-01-15T10:00:00Z"
 principle_statement: "Before every work session, perform an autotelic shift: ask why this work is worth doing in itself, and what my current relationship with it is."
 principle_name: "Autotelic Shift + Relationship Check"
 domain: PRODUCTIVITY                        # PRODUCTIVITY | HEALTH | RELATIONAL | COGNITIVE | IDENTITY
 lifecycle_state: TRYING                     # TRYING | INTERNALIZED | SUSPENDED | ABANDONED
 lifecycle_updated_at: "2025-01-15T10:00:00Z"
-lifecycle_history:                          # append-only log of state transitions
+lifecycle_history:
   - state: TRYING
     at: "2025-01-15T10:00:00Z"
     reason: "User explicitly committed to this in a recent journal entry"
 source_session_id: "session-id-example"
-provenance: CO_CREATED                      # USER_GENERATED | CO_CREATED (adopted from AI framing)
-parent_belief_ids: []                       # BeliefNodes or ConceptualReframes this principle operationalizes
-supersedes_id: null                         # ID of a prior AdoptedPrincipleNode this replaces
-last_referenced_at: "2025-01-15T10:00:00Z" # updated when user mentions/applies this principle
+provenance: CO_CREATED                      # USER_GENERATED | CO_CREATED
+parent_belief_ids: []
+supersedes_id: null
+last_referenced_at: "2025-01-15T10:00:00Z"
 evidence_count: 1
 status: ACTIVE
 ```
@@ -227,43 +294,27 @@ status: ACTIVE
 
 | State | Meaning | Transition Triggers |
 |---|---|---|
-| `TRYING` | User has committed to this principle but hasn't internalized it. Following it requires conscious effort. | Initial adoption |
-| `INTERNALIZED` | User describes applying it naturally, without deliberate effort. Appears in logs as implicit behavior. | Macroextraction or explicit journal statement |
+| `TRYING` | User has committed to this principle but has not internalized it. Following it requires conscious effort. | Initial adoption |
+| `INTERNALIZED` | User describes applying it naturally, without deliberate effort. | Macroextraction or explicit journal statement |
 | `SUSPENDED` | User has acknowledged they stopped following it temporarily (not abandonment). | Journal entry saying "I've been neglecting this" |
-| `ABANDONED` | User explicitly says this principle didn't work or they've moved on. | EVOLVE action on the node, or explicit journal disavowal |
+| `ABANDONED` | User explicitly says this principle did not work or they have moved on. | EVOLVE action on the node, or explicit journal disavowal |
 
 #### Query Pattern — Principles Active at Time T
 
 ```cypher
--- "What principles was I following in early 2025?"
 MATCH (p:AdoptedPrincipleNode)
 WHERE p.valid_from <= "2026-06-30"
   AND (p.lifecycle_state IN ["TRYING", "INTERNALIZED"]
        OR p.lifecycle_updated_at > "2026-06-01")
 RETURN p.principle_name, p.lifecycle_state, p.adopted_at
 ORDER BY p.adopted_at
-
--- "Fetch episodes from around the same period"
-MATCH (e:EpisodeNode)
-WHERE e.occurred_at >= "2026-06-01" AND e.occurred_at <= "2026-06-30"
-RETURN e.episode_summary, e.occurred_at
-ORDER BY e.occurred_at
-
--- "Which episodes directly reference this principle?"
-MATCH (p:AdoptedPrincipleNode {node_id: "prin_work_relationship_001"})
-      <-[:adopted_as]-(obs:ObservationNode)
-      <-[:contains]-(ep:EpisodeNode)
-RETURN ep.episode_summary, ep.occurred_at, obs.content
-ORDER BY ep.occurred_at
 ```
-
-The third query is the most powerful: traverse from the principle backward through the observations that reinforced, suspended, or abandoned it — showing you the full life of that principle through your own logs.
 
 ---
 
 ### 8. PersonEntityNode
 
-A named person who appears across one or more journal entries. PersonEntityNodes are the target of `mentions` edges from ObservationNodes. Cross-entry coreference produces `alias_of` edges between variant PersonEntityNodes.
+A named person who appears across one or more journal entries.
 
 ```yaml
 node_type: PersonEntityNode
@@ -276,24 +327,28 @@ aliases:
 first_mentioned_at: "2024-03-01T00:00:00Z"
 last_mentioned_at: "2025-01-18T00:00:00Z"
 mention_count: 12
-relationship_to_user: COLLEAGUE     # COLLEAGUE | FRIEND | FAMILY | MANAGER | PARTNER | OTHER | UNKNOWN
-relationship_sentiment_trend: NEUTRAL_TO_NEGATIVE   # aggregated across mentions
+relationship_to_user: COLLEAGUE          # COLLEAGUE | FRIEND | FAMILY | MANAGER | PARTNER | OTHER | UNKNOWN
+relationship_sentiment_trend: NEUTRAL_TO_NEGATIVE   # POSITIVE | NEUTRAL | NEUTRAL_TO_NEGATIVE | NEGATIVE | MIXED | UNKNOWN
+linked_observation_types:               # observation types that have appeared in mentions of this person
+  - RELATIONAL_DYNAMIC
+  - GRATITUDE_APPRECIATION
+  - OTHER_PERSON_MODEL
 is_canonical: true
-merged_from: []                     # list of node_ids that alias_of to this node
+merged_from: []
 status: ACTIVE
 ```
 
 ---
 
-### 8. DecisionAuditNode
+### 9. DecisionAuditNode
 
-A first-class node recording every Reconciliation action. Every edge in the graph is traceable to exactly one `DecisionAuditNode`. See [Reconciliation.md](../Extraction/Reconciliation.md) for full behavioral documentation.
+A first-class node recording every Reconciliation action. Every Reconciliation-produced edge is traceable to exactly one `DecisionAuditNode`. See [Reconciliation.md](../Extraction/Reconciliation.md) for full behavioral documentation.
 
 ```yaml
 node_type: DecisionAuditNode
 node_id: d_2026_06_11_001
 created_at: "2025-01-18T10:34:17Z"
-action: MERGE                       # MERGE | REINFORCE | EVOLVE | BRANCH | CONTRADICT | AMBIGUOUS
+action: MERGE                            # MERGE | REINFORCE | EVOLVE | BRANCH | CONTRADICT | DIALECTIC | REGULATE | AMBIGUOUS
 source_observation_id: obs_2026_06_11_004
 target_node_id: pat_decision_saturation
 edge_type_created: same_as
@@ -301,24 +356,40 @@ edge_id: edge_2026_06_11_009
 confidence: 0.91
 confidence_runner_up: 0.83
 runner_up_action: REINFORCE
-delta_description: null             # required and non-null only for action == EVOLVE
+delta_description: null                  # required and non-null only for action == EVOLVE
 model_used: gemini-2.0-flash
-routing_tier: STANDARD
+routing_tier: STANDARD                   # STANDARD | HIGH_SECURITY
 hitl_resolved: false
 hitl_resolution_timestamp: null
-hitl_resolution_user_choice: null   # "ACTION_A" | "ACTION_B" | "CREATE_NEW" | "AUTO_BRANCH_AFTER_SNOOZE"
+hitl_resolution_user_choice: null        # "ACTION_A" | "ACTION_B" | "CREATE_NEW" | "AUTO_BRANCH_AFTER_SNOOZE"
+snooze_count: 0                          # number of times the user has snoozed this HITL item
+last_snoozed_at: null
+candidate_retrieval_source: SEMANTIC     # SEMANTIC | STRUCTURAL
+structural_anchor_type: null            # NAMED_PERSON | HISTORICAL_ERA — populated when candidate_retrieval_source == STRUCTURAL
+structural_anchor_value: null           # the anchor value (person node ID or era tag string)
+co_created_origin: false                # true when the source node carried provenance: CO_CREATED and action == EVOLVE (Rule R6 ownership transfer)
 rollback_pointer:
   edge_to_invalidate: edge_2026_06_11_009
   nodes_to_requeue:
     - obs_2026_06_11_004
-status: ACTIVE                      # ACTIVE | ROLLED_BACK
+status: ACTIVE                           # ACTIVE | ROLLED_BACK | PENDING_HITL | BELOW_THRESHOLD | SUSPENDED_QUEUE_FULL | EXTRACTION_FAILED
 ```
+
+**`routing_tier`:** Two values only. `STANDARD` = default Gemini Flash / Pro routing. `HIGH_SECURITY` = locally-run model (e.g. Ollama) for observations identified as identity-critical. There is no intermediate tier.
+
+**`status` lifecycle:**
+- `ACTIVE` — decision executed and live in the graph
+- `ROLLED_BACK` — edge invalidated; affected nodes re-queued
+- `PENDING_HITL` — awaiting user resolution (AMBIGUOUS tie detected)
+- `BELOW_THRESHOLD` — model confidence fell below action threshold; in HITL queue
+- `SUSPENDED_QUEUE_FULL` — HITL queue at 20-item cap; item waiting to enter
+- `EXTRACTION_FAILED` — observation failed validation 3 times; graph write skipped
 
 ---
 
-### 9. ContradictionNode
+### 10. ContradictionNode
 
-Represents two simultaneously-held, logically incompatible beliefs. Created by the CONTRADICT Reconciliation action. Persists until explicitly resolved.
+Represents two simultaneously-held, logically incompatible beliefs. Created by the CONTRADICT Reconciliation action.
 
 ```yaml
 node_type: ContradictionNode
@@ -329,45 +400,38 @@ belief_a_id: bel_introvert_001
 belief_b_id: bel_2026_06_11_expressive_social
 contradiction_summary: "User holds simultaneous beliefs about being introverted and thriving in expressive, high-attention social environments"
 decision_id: d_2026_06_11_003
-resolution_status: UNRESOLVED       # UNRESOLVED | RESOLVED_EVOLVE | RESOLVED_USER | RESOLVED_MACRO
+resolution_status: UNRESOLVED            # UNRESOLVED | RESOLVED_EVOLVE | RESOLVED_USER | RESOLVED_MACRO
 resolved_at: null
 resolution_decision_id: null
 ```
 
 ---
 
-### 10. MacroextractionReportNode
+### 11. MacroextractionReportNode
 
-An immutable synthesis report produced by a Periodic Intelligence (Macroextraction) job. Covers a defined time window and scope.
+An immutable synthesis report produced by a Periodic Intelligence (Macroextraction) job.
+
+> This node stores the **graph-queryable envelope fields** only. The full report content (pattern analytics, belief changes, archetype shift details, proof chains, emotional valence, prospective memory, etc.) is stored in the `report_content` JSON field. The schema for that JSON blob is defined in [Extraction/Macroextraction.md](../Extraction/Macroextraction.md).
 
 ```yaml
 node_type: MacroextractionReportNode
 node_id: macro_2026_06_01_weekly
 created_at: "2026-06-01T06:00:00Z"
-report_type: WEEKLY                 # WEEKLY | MONTHLY | QUARTERLY
+report_type: WEEKLY                      # SHADOW | WEEKLY | MONTHLY | QUARTERLY
 period_start: "2026-05-25T00:00:00Z"
 period_end: "2026-06-01T00:00:00Z"
 episodes_analyzed: 14
-patterns_referenced:
-  - pat_decision_saturation
-  - pat_conflict_avoidance_007
-beliefs_referenced:
-  - bel_introvert_001
-open_loops_status:
-  - { open_loop_id: loop_2026_04_15_001, status: STILL_OPEN }
-unresolved_contradictions:
-  - con_example_001
-behavioral_delta_summary: "Conflict avoidance pattern showed reduced frequency this week; slow decision pattern remains stable"
 archetype_shift_detected: false
 model_used: gemini-2.0-pro
+report_content: { ... }                  # Full report JSON — see Extraction/Macroextraction.md for schema
 status: IMMUTABLE
 ```
 
 ---
 
-### 11. OpenLoopNode
+### 12. OpenLoopNode
 
-An unresolved psychological investigation — a question the user is actively working through, a commitment without resolution, or a recurring theme that hasn't crystallized into a stable belief or pattern. This node can be explicitly stated by the user, or automatically generated by the AI if a conversational session ends with a profound, unanswered question (`provenance: AI_GENERATED`).
+An unresolved psychological investigation — a question the user is actively working through, or a recurring theme that has not crystallized into a stable belief or pattern.
 
 ```yaml
 node_type: OpenLoopNode
@@ -375,15 +439,15 @@ node_id: loop_2026_04_15_001
 created_at: "2026-04-15T20:14:00Z"
 valid_from: "2026-04-15T20:14:00Z"
 loop_description: "Am I staying in this role because I genuinely find meaning in it, or because I'm avoiding the uncertainty of a transition?"
-loop_category: CAREER_IDENTITY      # CAREER_IDENTITY | RELATIONSHIP | SELF_CONCEPT | VALUES | HEALTH | OTHER
-provenance: AI_GENERATED            # USER_GENERATED | AI_GENERATED | CO_CREATED
+loop_category: CAREER_IDENTITY           # CAREER_IDENTITY | RELATIONSHIP | SELF_CONCEPT | VALUES | HEALTH | OTHER
+provenance: AI_GENERATED                 # USER_GENERATED | AI_GENERATED | CO_CREATED
 source_episode_id: ep_2026_04_15_002
 linked_patterns:
   - pat_decision_saturation
   - pat_conflict_avoidance_007
 linked_beliefs:
   - bel_introvert_001
-resolution_status: OPEN             # OPEN | RESOLVED | DISSOLVED
+resolution_status: OPEN                  # OPEN | RESOLVED | DISSOLVED
 resolved_at: null
 resolution_summary: null
 last_referenced_at: "2026-06-01T06:00:00Z"
@@ -395,26 +459,71 @@ last_referenced_at: "2026-06-01T06:00:00Z"
 
 | Edge Type | From | To | Reversible | Description |
 |---|---|---|---|---|
-| `contains` | `EpisodeNode` | `ObservationNode` / `EventNode` / `SessionNode` | No | An episode structurally contains its observations and events. Written once; never invalidated. |
+| `contains` | `EpisodeNode` | `ObservationNode` / `EventNode` / `SessionNode` / `CausalChainNode` | No | An episode structurally contains its observations, events, and causal chains. Written once; never invalidated. |
+| `chain_contains` | `CausalChainNode` | `CausalStepNode` | No | A causal chain contains its ordered steps. Written once; never invalidated. |
 | `same_as` | `ObservationNode` / `PatternNode` | `PatternNode` (canonical) | Yes (via audit) | MERGE result. Links new node to canonical. Neither node is deleted. |
 | `reinforces` | `ObservationNode` / `EventNode` | `PatternNode` / `BeliefNode` | Yes (via audit) | REINFORCE result. Adds evidential weight to existing node. |
 | `evolved_from` | `PatternNode` v2 / `BeliefNode` v2 | `PatternNode` v1 / `BeliefNode` v1 | No (append-only) | EVOLVE result. The prior version is immutably preserved. The new version points backward. |
-| `caused_by` | `PatternNode` / `BeliefNode` (new version) | `EventNode` / `SessionNode` | Yes (via audit) | Establishes the causal anchor for an EVOLVE or BRANCH action in the bipartite graph. |
+| `caused_by` | `PatternNode` / `BeliefNode` (new version) | `EventNode` / `SessionNode` | Yes (via audit) | Causal anchor for EVOLVE or BRANCH in the bipartite graph. |
 | `branches_to` | `ObservationNode` / `EventNode` / `SessionNode` | `PatternNode` (new) | Yes (via audit) | BRANCH result. Documents provenance of the new independent node. |
 | `contradicts` | `ContradictionNode` | `BeliefNode` (both sides) | Yes (via audit) | CONTRADICT result. Two edges per ContradictionNode — one to each belief. |
-| `dialectic` | `BeliefNode` / `PatternNode` | `BeliefNode` / `PatternNode` | Yes (via audit) | DIALECTIC result. Links two simultaneously true but conflicting nodes. Represents psychological tension/paradox. |
-| `mentions` | `ObservationNode` / `EventNode` / `SessionNode` | `PersonEntityNode` | No | Created when an observation, event, or session references a named person. Provenance link; not a Reconciliation product. |
+| `dialectic` | `BeliefNode` / `PatternNode` | `BeliefNode` / `PatternNode` | Yes (via audit) | DIALECTIC result. Links two simultaneously true but conflicting nodes. |
+| `regulates` | `SessionNode` / `ObservationNode` | `PatternNode` | Yes (via audit) | REGULATE result. Marks when a user actively catches and interrupts a negative pattern. Bypasses EVOLVE confidence threshold. |
+| `mentions` | `ObservationNode` / `EventNode` / `SessionNode` | `PersonEntityNode` | No | Created when an observation, event, or session references a named person. |
 | `decided_by` | any Reconciliation edge above | `DecisionAuditNode` | N/A | Meta-edge linking every Reconciliation-produced edge to its audit record. |
 | `analyzed_in` | `EpisodeNode` | `MacroextractionReportNode` | No | Documents which episodes a Macroextraction report drew on. |
 | `alias_of` | `PersonEntityNode` (alias) | `PersonEntityNode` (canonical) | No | Cross-entry person merge. Alias node is preserved; canonical node is the traversal target. |
 | `investigated_by` | `OpenLoopNode` | `EpisodeNode` | No | Links an open loop to each episode where the loop is explicitly addressed or referenced. |
 | `closes` | `EpisodeNode` | `OpenLoopNode` | No | Written when an episode is identified as resolving an open loop. |
-| `regulates` | `SessionNode` / `ObservationNode` | `PatternNode` | Yes (via audit) | Marks when a user actively catches and interrupts a negative pattern. Bypasses EVOLVE penalty. |
-| `follows_from` | `EpisodeNode` | `EpisodeNode` | No | Links micro-segmented episodes extracted from the same dialogue session to preserve causal conversational flow. |
-| `adopted_as` | `ObservationNode` / `SessionNode` | `AdoptedPrincipleNode` | Yes (via audit) | Written when a session or observation is identified as applying, referencing, or reinforcing an adopted principle. Enables traversal from principle to all relevant logs. |
-| `superseded_by` | `AdoptedPrincipleNode` (old) | `AdoptedPrincipleNode` (new) | No (append-only) | Written when the user adopts a refined or replacement version of a prior principle. Old node moves to `ABANDONED`; the supersession edge preserves the lineage. |
+| `follows_from` | `EpisodeNode` | `EpisodeNode` | No | Links micro-segmented episodes from the same `(event_date, session_label)` to preserve intra-session narrative flow. |
+| `adopted_as` | `ObservationNode` / `SessionNode` | `AdoptedPrincipleNode` | Yes (via audit) | Written when a session or observation applies, references, or reinforces an adopted principle. |
+| `superseded_by` | `AdoptedPrincipleNode` (old) | `AdoptedPrincipleNode` (new) | No (append-only) | Written when the user adopts a refined or replacement version of a prior principle. |
+| `failed_extraction` | `EpisodeNode` | `ObservationNode` | No | Written when an observation fails validation 3 times. The `ObservationNode` carries `status: EXTRACTION_FAILED` and is linked to its episode for HITL surfacing. |
 
-**Reversibility note:** "Yes (via audit)" means the edge's `invalidated_at` timestamp is set (not deleted), and a new `DecisionAuditNode` with `action: ROLLBACK` is written. The edge record persists in the graph in its invalidated state.
+**Reversibility note:** "Yes (via audit)" means the edge's `invalidated_at` timestamp is set (not deleted), and a new `DecisionAuditNode` with `action: ROLLBACK` is written.
+
+### Edge Schemas for Key Reconciliation Edges
+
+#### `same_as`
+```json
+{
+  "edge_type": "same_as",
+  "source_node_id": "pat_2026_06_11_slow_pace_new",
+  "target_node_id": "pat_decision_saturation",
+  "confidence": 0.91,
+  "decision_id": "d_2026_06_11_001",
+  "valid_from": "2025-01-18T10:34:00Z",
+  "invalidated_at": null
+}
+```
+
+#### `dialectic`
+```json
+{
+  "edge_type": "dialectic",
+  "source_node_id": "bel_introvert_001",
+  "target_node_id": "bel_expressive_social_001",
+  "tension_summary": "Both truths are simultaneously held: need for solitude and thriving in expressive social environments. Neither supersedes the other.",
+  "confidence": 0.89,
+  "decision_id": "d_2026_06_11_004",
+  "valid_from": "2025-01-18T11:15:00Z",
+  "invalidated_at": null
+}
+```
+
+#### `regulates`
+```json
+{
+  "edge_type": "regulates",
+  "source_node_id": "obs_2026_06_11_012",
+  "target_node_id": "pat_critic_brain_001",
+  "regulation_summary": "User caught critic brain spiral mid-sentence and explicitly interrupted it before it escalated to avoidance behavior.",
+  "confidence": 0.83,
+  "decision_id": "d_2026_06_11_005",
+  "valid_from": "2025-01-18T11:20:00Z",
+  "invalidated_at": null
+}
+```
 
 ---
 
@@ -426,10 +535,10 @@ Every node and every edge carries timestamps that enable time-range queries and 
 
 | Field | Present On | Meaning |
 |---|---|---|
-| `occurred_at` | `EpisodeNode`, `ObservationNode`, `EventNode`, `SessionNode` | Logical Event Time when the thought, event, or session actually happened, independent of system ingestion time |
+| `occurred_at` | `EpisodeNode`, `ObservationNode`, `EventNode`, `SessionNode` | Logical Event Time when the thought, event, or session actually happened |
 | `created_at` | All nodes | Wall clock time when the node was written to the graph |
-| `valid_from` | All nodes | Effective start of this node's validity (usually equals `created_at`; differs on EVOLVE where `valid_from` is the date the evolved belief became active) |
-| `last_reinforced_at` | `PatternNode`, `BeliefNode` | Timestamp of the most recent `reinforces` or `same_as` edge pointing to this node. Derives from the `occurred_at` of the reinforcing observation, not `created_at`. Used in temporal decay scoring. |
+| `valid_from` | All nodes | Effective start of this node's validity (differs on EVOLVE — set to the date the evolved belief became active) |
+| `last_reinforced_at` | `PatternNode`, `BeliefNode` | Timestamp of the most recent `reinforces` or `same_as` edge. Derives from the `occurred_at` of the reinforcing observation. Used in temporal decay scoring. |
 | `version` | `PatternNode`, `BeliefNode` | Integer version counter. Starts at 1. |
 | `previous_version_id` | `PatternNode`, `BeliefNode` | Node ID of the directly prior version. Null for v1. |
 
@@ -452,13 +561,9 @@ Temporal decay applies to `PatternNode` and `BeliefNode` instances during retrie
 | 180 – 365 days | 0.70 |
 | > 365 days | 0.50 |
 
-Nodes with `last_reinforced_at > 365 days` remain fully queryable via explicit time-range queries (`?time_range=2024-01-01:2025-01-01`) and are not affected by decay in that context.
-
 ---
 
 ## Retrieval Score Formula
-
-The retrieval score for a candidate node during Semantic Candidate Retrieval is computed as:
 
 ```
 final_score = cosine_similarity(query_vector, node_vector)
@@ -489,13 +594,9 @@ def recency_weight(last_reinforced_at: datetime, now: datetime) -> float:
         return 0.50
 ```
 
-> ⚠️ `cosine_similarity` uses the node's stored embedding vector. CRITICAL-tier nodes are embedded with their configured High-Security Embedding Provider and must only be compared against query vectors produced by the same provider. Mixing embedding spaces invalidates the cosine similarity score.
-
 ---
 
 ## Version Chain Example
-
-The following YAML illustrates a BeliefNode EVOLVE chain. The user originally believed they needed solitude to make good decisions; after a significant experience, this evolved to a more nuanced belief about environmental flexibility.
 
 ```yaml
 # Version 1 — original belief (immutable, preserved)
@@ -527,6 +628,8 @@ The following YAML illustrates a BeliefNode EVOLVE chain. The user originally be
   confidence: 0.94
   delta_description: "User explicitly acknowledged that they made one of their best decisions this week during a chaotic team meeting — directly contradicting the prior belief about needing solitude. The belief has evolved to: 'I prefer solitude for reflection but can make high-quality decisions in structured group contexts when the stakes are clear.'"
   model_used: gemini-2.0-pro
+  candidate_retrieval_source: SEMANTIC
+  co_created_origin: false
   status: ACTIVE
 
 # Version 2 — new evolved belief (immutable once written)
@@ -546,7 +649,7 @@ The following YAML illustrates a BeliefNode EVOLVE chain. The user originally be
 
 ## Soft Delete / Erasure (DPDP/GDPR Compliance)
 
-Because content nodes are append-only, standard deletion is not architecturally possible. Erasure under data protection regulations (India's DPDP Act, GDPR) is implemented via **anonymization** — content is replaced; structure is preserved.
+Because content nodes are append-only, standard deletion is not architecturally possible. Erasure is implemented via **anonymization** — content is replaced; structure is preserved.
 
 ### Erasure Procedure
 
@@ -554,23 +657,40 @@ Because content nodes are append-only, standard deletion is not architecturally 
 DELETE /users/{user_id}/data
 ```
 
-This triggers an asynchronous anonymization pass over all nodes belonging to the user:
+This triggers an asynchronous anonymization pass:
 
 1. **Content node anonymization:** All `content`, `belief_statement`, `pattern_description`, `lesson_statement`, `loop_description`, `raw_evidence`, `episode_summary`, and `contradiction_summary` fields are replaced with `[ERASED: {iso_date}]`.
 
-2. **PersonEntityNode anonymization:** The `canonical_name` field is replaced with `[ERASED_PERSON_{sha256_hash_of_name_truncated_8}]`. All `aliases` entries are replaced with `[ERASED_ALIAS]`.
+2. **PersonEntityNode anonymization:** `canonical_name` → `[ERASED_PERSON_{sha256_hash_8}]`. All `aliases` → `[ERASED_ALIAS]`.
 
-3. **DecisionAuditNode anonymization:** `delta_description` and `hitl_resolution_user_choice` (where it contains text) are replaced with `[ERASED: {iso_date}]`.
+3. **DecisionAuditNode anonymization:** `delta_description` and `hitl_resolution_user_choice` (where it contains text) → `[ERASED: {iso_date}]`.
 
-4. **MacroextractionReportNode anonymization:** `behavioral_delta_summary` and all narrative fields are replaced with `[ERASED: {iso_date}]`.
+4. **MacroextractionReportNode anonymization:** `report_content` JSON blob → `[ERASED: {iso_date}]`.
 
-5. **Graph structure is preserved:** Node IDs, edge structure, timestamps, node types, signal strengths, sensitivity tiers, and version chains are all retained. The graph topology is preserved for system integrity auditing.
+5. **Graph structure is preserved:** Node IDs, edge structure, timestamps, node types, signal strengths, and version chains are all retained.
 
-6. **Embeddings:** All embedding vectors stored for the user's nodes are deleted (not anonymized — vectors are fully reconstructable from content, so content erasure without vector deletion would be incomplete).
+6. **Embeddings:** All embedding vectors for the user's nodes are deleted (fully reconstructable from content, so content erasure alone is insufficient).
 
-7. **Audit log:** A `DataErasureAuditRecord` is written to the system audit log (outside the user's graph) recording the user ID hash, the erasure timestamp, and the count of nodes anonymized. This record itself contains no user content.
+7. **Audit log:** A `DataErasureAuditRecord` is written to the **Operational DB** (SQLite/PostgreSQL). Contains no user content.
 
-> ⚠️ **Irreversibility:** Anonymization is irreversible. The original content cannot be recovered from the graph after this procedure. If the user has a local export (via `GET /users/{id}/export`), that export is not affected by the anonymization pass and must be separately destroyed by the user.
+### DataErasureAuditRecord (Operational DB)
+
+```yaml
+table: data_erasure_audit
+record:
+  id: era_2026_07_01_001
+  user_id_hash: "sha256:b3e..."         # hashed — no plaintext user identifier stored
+  erased_at: "2026-07-01T14:22:00Z"
+  nodes_anonymized: 847
+  embeddings_deleted: 847
+  entry_ids_affected:
+    - entry_2026_06_11_raw
+    - entry_2026_05_20_raw
+  initiated_by: USER_REQUEST            # USER_REQUEST | ADMIN_REQUEST | AUTOMATED_RETENTION_POLICY
+  status: COMPLETE                      # COMPLETE | IN_PROGRESS | FAILED
+```
+
+> ⚠️ **Irreversibility:** Anonymization is irreversible. The original content cannot be recovered after this procedure.
 
 ### Partial Erasure (Single Entry)
 
@@ -578,8 +698,8 @@ This triggers an asynchronous anonymization pass over all nodes belonging to the
 DELETE /users/{user_id}/entries/{entry_id}
 ```
 
-Anonymizes all nodes whose `entry_id` or `episode_id` traces back to the specified entry. Same anonymization rules apply. Graph structure is preserved. Edges from non-erased nodes to erased nodes are retained; they point to anonymized nodes.
+Anonymizes all nodes whose `entry_id` or `episode_id` traces back to the specified entry. Same anonymization rules apply.
 
 ---
 
-*See also: [HLDv2.md](../hld/HLDv2.md) for the complete system overview, [Extraction/Reconciliation.md](../Extraction/Reconciliation.md) for edge creation rules, [Extraction/Architecture.md](../Extraction/Architecture.md) for the ObservationNode type enum.*
+*See also: [HLDv2.md](../hld/HLDv2.md) for the complete system overview, [Extraction/Reconciliation.md](../Extraction/Reconciliation.md) for edge creation rules, [Extraction/Microextraction.md](../Extraction/Microextraction.md) for the ObservationNode type enum, [Extraction/Macroextraction.md](../Extraction/Macroextraction.md) for the full MacroextractionReportNode content schema.*

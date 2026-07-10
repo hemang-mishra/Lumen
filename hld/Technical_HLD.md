@@ -461,9 +461,6 @@ No component writes directly to the graph from outside the Graph Service. All gr
 ### Rule 4: Every inter-service call is schema-validated
 Pydantic models are the contracts. Any call that crosses a service boundary (even within the personal monolith) validates its input against the schema. Schema mismatches are caught at the boundary, not deep inside a stage.
 
-### Rule 5: Every inter-service call is schema-validated
-Pydantic models are the contracts. Any call that crosses a service boundary (even within the personal monolith) validates its input against the schema. Schema mismatches are caught at the boundary, not deep inside a stage.
-
 ---
 
 ## 9. Local → Cloud Scaling Path

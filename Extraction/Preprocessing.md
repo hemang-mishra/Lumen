@@ -143,7 +143,7 @@ Every entry (after ASR post-processing, if applicable) is scored for completenes
 
 #### Semantic Gate: LLM Coherence Scoring
 
-Entries that pass the structural gate are sent to a lightweight LLM call (Gemini Flash or local equivalent for CRITICAL content) with a single scoring task:
+Entries that pass the structural gate are sent to a lightweight LLM call (Gemini Flash, or the local model for `HIGH_SECURITY`-routed content) with a single scoring task:
 
 **Prompt structure:**
 ```
@@ -203,6 +203,8 @@ Entries classified as `RAW_CAPTURE` receive:
 ```
 
 The user may respond to any reflection prompt; a response creates a new entry that is independently run through Stage 0.
+
+> **Storage:** `pending_reflections` records are stored in the **Operational DB** (SQLite/PostgreSQL), not in the knowledge graph. They are linked to the entry by `entry_id` and cleaned up once the user responds to at least one prompt or after a 30-day TTL, whichever comes first.
 
 ---
 

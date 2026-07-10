@@ -205,15 +205,15 @@ Unresolved question from June 20: "Is the resistance about leaving, or about bei
 
 ---
 
-## Stage 4: CRITICAL-Tier Node Handling in Live Chat
+## Stage 4: High-Signal Sensitive Node Handling in Live Chat
 
-CRITICAL nodes (sexual identity, deepest trauma, specific relationship data) are **never auto-injected**.
+Nodes with `signal_strength: CRITICAL` that cover deeply sensitive domains (e.g. identity, trauma, intimate relationships) are **never auto-injected**. Their `CRITICAL` signal strength reflects their importance to the user's psychological history — it does not mean they are freely surfaced. The opposite is true: the higher the signal, the more deliberately the injection must be gated.
 
 ### Unlock Signal
 
-A CRITICAL node can be injected only if the user explicitly introduces the topic in the current session. The Query Formulation Layer detects this as a `CRITICAL_DOMAIN_OPENED` event. Once opened, CRITICAL nodes linked to that domain become eligible for injection for the rest of the session.
+A `CRITICAL` signal-strength node in a sensitive domain can be injected only if the user explicitly introduces that topic in the current session. The Query Formulation Layer detects this as a `CRITICAL_DOMAIN_OPENED` event. Once opened, `CRITICAL` nodes linked to that domain become eligible for injection for the rest of the session.
 
-**Example from June 21:** When the user says *"a queer kid trying to figure out what the fuck is going on"* — this is `CRITICAL_DOMAIN_OPENED` for `QUEER_IDENTITY`. From that point, linked CRITICAL nodes (identity confusion, adolescent isolation) are unlocked for injection. The unlock expires at session end and must be re-triggered in a future session.
+**Example from June 21:** When the user says *"a queer kid trying to figure out what the fuck is going on"* — this is `CRITICAL_DOMAIN_OPENED` for `QUEER_IDENTITY`. From that point, `CRITICAL` signal-strength nodes linked to identity confusion and adolescent isolation are unlocked for injection. The unlock expires at session end and must be re-triggered in a future session.
 
 ---
 

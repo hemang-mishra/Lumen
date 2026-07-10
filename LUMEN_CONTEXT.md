@@ -11,7 +11,7 @@ It processes unstructured daily logs (text or voice), extracts structured psycho
 ### Core Philosophies:
 1. **Late Binding:** Observations are extracted *blindly* (zero history context) to prevent the LLM from hallucinating continuity (Anchoring Bias). History is only introduced later during Reconciliation.
 2. **Append-Only Immutable Graph:** Lumen doesn't overwrite facts (e.g., "User likes X"). It tracks the *evolution* of beliefs over time using Causal Chains and `EVOLVE` edges.
-3. **Abstracted Provider Routing:** Content is processed via configurable default providers. High-security (`CRITICAL` tier) data is routed to your configured high-security providers.
+3. **Abstracted Provider Routing:** Content is processed via configurable default providers. High-security (`HIGH_SECURITY` routing tier) data is routed to your configured local or high-privacy models.
 
 ---
 
@@ -20,7 +20,7 @@ It processes unstructured daily logs (text or voice), extracts structured psycho
 Lumen operates via a real-time Chat Interface backed by an asynchronous processing pipeline.
 
 **The Interface Loop:**
-User messages the app ➔ Lumen runs GraphRAG (Step 5) to fetch relevant history ➔ Premium LLM (`gpt-4o`) generates empathetic, context-aware response ➔ *Asynchronously*, the new log enters the extraction pipeline (Steps 0-4).
+User messages the app ➔ Lumen runs GraphRAG (Step 5) to fetch relevant history ➔ Premium Reasoning LLM (e.g., Gemini Pro) generates empathetic, context-aware response ➔ *Asynchronously*, the new log enters the extraction pipeline (Steps 0-4).
 
 ### Step 0: Preprocessing & Speaker Diarization
 *   Cleans raw voice (Whisper STT) or text.
@@ -42,7 +42,7 @@ User messages the app ➔ Lumen runs GraphRAG (Step 5) to fetch relevant history
 
 ### Step 3: Reconciliation & Decision Audit
 *   The system compares the new blind extraction against the retrieved historical nodes.
-*   It executes one of 6 Graph Actions: `MERGE`, `REINFORCE`, `EVOLVE`, `BRANCH`, `CONTRADICT`, or `AMBIGUOUS` (escalates to Human-in-the-Loop review).
+*   It executes one of 8 Graph Actions: `MERGE`, `REINFORCE`, `EVOLVE`, `BRANCH`, `CONTRADICT`, `DIALECTIC`, `REGULATE`, or `AMBIGUOUS` (escalates to Human-in-the-Loop review).
 *   *Example:* If a belief changes, it draws an `EVOLVE` edge to preserve the lineage.
 
 ### Step 4: Graph Write

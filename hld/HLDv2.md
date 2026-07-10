@@ -31,9 +31,9 @@ Lumen is a personal wisdom system that converts unstructured voice and text jour
 | **Late Binding** | The architectural principle that extraction (what did the user say?) is performed with zero history context. History is introduced only at the Reconciliation step. This prevents the LLM from shaping new observations to fit existing patterns. |
 | **Anchoring Bias** | The cognitive and model-level failure mode where new evidence is systematically interpreted through the lens of what already exists, suppressing genuine novelty. Late Binding is the primary defense. |
 | **Fragmentation** | The opposite failure: each entry creates isolated nodes that are never connected, producing a flat list instead of a knowledge graph. Reconciliation prevents fragmentation. |
-| **Embeddings** | Dense vector representations of node content, used in semantic candidate retrieval. STANDARD/ELEVATED tiers use default Embedding Providers; CRITICAL tier uses configured high-security models only. |
+| **Embeddings** | Dense vector representations of node content, used in semantic candidate retrieval. The STANDARD routing tier uses default Embedding Providers; HIGH_SECURITY routed content uses configured local/private models only. |
 | **Causal Chain** | A sequence of linked observations or episodes in the graph that together explain how the user arrived at a current belief or pattern. Used in multi-hop GraphRAG queries. |
-| **Sensitivity Tier** | A three-level classification (`STANDARD`, `ELEVATED`, `CRITICAL`) assigned to every extracted observation. CRITICAL tier mandates high-security LLM and embedding processing. |
+| **Routing Tier** | A two-level classification (`STANDARD`, `HIGH_SECURITY`) that determines model routing. (Note: `CRITICAL` is now solely a `signal_strength` multiplier for retrieval, distinct from routing). |
 | **Decision Audit Node** | A first-class graph node that records every Reconciliation action: which nodes were linked, the confidence score, the action type, the model used, and a rollback pointer. |
 | **Temporal Decay** | The scoring mechanism by which older, unreinforced patterns receive lower retrieval weights (not deletion). Nodes with `last_reinforced_at > 365 days` receive a 0.5× weight multiplier. |
 | **Same-As Edge** | The graph edge produced by a MERGE reconciliation action. It links a newly extracted node to a canonical historical node without deleting either. Provenance is fully preserved. |
@@ -214,7 +214,7 @@ Step 5 operates in two distinct modes depending on context.
 - **Latency:** ≤3 second wait window. If retrieval completes within 3s → injected into the current turn. If exceeded → context tagged `retrieval_source: DEFERRED` and prepended to the next turn (never discarded).
 - **400-token hard injection limit** on context injected into the system prompt. Content is ranked and compressed to fit.
 - **Injection explicitness:** Model-discretion. The AI may surface Lumen context explicitly at most once per 4–5 turns. During `VULNERABLE` or `CRISIS` emotional register, all injected context remains invisible.
-- **CRITICAL-tier nodes** are never auto-injected. Require an explicit `CRITICAL_DOMAIN_OPENED` signal (user introduces the topic themselves in the current session).
+- **CRITICAL signal_strength nodes** are never auto-injected. Require an explicit `CRITICAL_DOMAIN_OPENED` signal (user introduces the topic themselves in the current session).
 - **Session lifecycle:** Session = calendar day. `SessionContextBuffer` is keyed by `(event_date, session_label)` and flushed at session end or midnight.
 
 **Detailed doc:** [Query/Conversational_RAG_Mode.md](../Query/Conversational_RAG_Mode.md)
@@ -236,7 +236,7 @@ Step 5 operates in two distinct modes depending on context.
 | Monthly | Last 30 days, cross-ref prior weekly reports | Belief drift, emotional trend summary |
 | Quarterly | Full graph + all monthly reports | Archetype shift detection, long-term causal chains, biographical gap analysis |
 
-Macroextraction runs on **Gemini Pro** (or equivalent reasoning model). It is never run with CRITICAL-tier content unless a high-security model is used.
+Macroextraction runs on **Gemini Pro** (or equivalent reasoning model). It is never run with HIGH_SECURITY-routed content unless a high-security model is configured.
 
 **Detailed doc:** [Extraction/Architecture.md](../Extraction/Architecture.md)
 
@@ -274,7 +274,7 @@ Model selection is **not a configuration preference** — it is enforced in code
 |---|---|---|
 | `BRANCH`, `REINFORCE`, `REGULATE` | Gemini Flash | Low-to-medium risk actions; speed matters |
 | `MERGE`, `EVOLVE`, `CONTRADICT`, `DIALECTIC` | Gemini Pro or reasoning model | High-consequence or nuanced judgment required |
-| Any action on `CRITICAL`-tier content | **High-Security Provider** | Tier overrides action-level routing |
+| Any action on `HIGH_SECURITY`-routed content | **High-Security Provider** | Tier overrides action-level routing |
 
 ### Query Formulation Layer (Conversational RAG)
 
@@ -286,13 +286,13 @@ Model selection is **not a configuration preference** — it is enforced in code
 
 ### Embeddings
 
-Default: `text-embedding-004`. For identity-critical content: **High-Security Provider**.
+Default: `text-embedding-004`. For `HIGH_SECURITY`-routed content: **High-Security Provider**.
 
 ### Macroextraction
 
 | Job | Model |
 |---|---|
 | Weekly / Monthly / Quarterly synthesis | Gemini Pro |
-| Synthesis over any `CRITICAL`-tier nodes | **High-Security Provider** |
+| Synthesis over any `HIGH_SECURITY`-routed nodes | **High-Security Provider** |
 
-> ⚠️ **Implementation Rule:** Content routing decisions are made at the episode level. If any single observation in an episode is identity-critical, the entire episode's processing pipeline routes to high-security providers. This is enforced in code, not in prompts.
+> ⚠️ **Implementation Rule:** Content routing decisions are made at the episode level. If any single observation in an episode is routed as `HIGH_SECURITY`, the entire episode's processing pipeline routes to high-security providers. This is enforced in code, not in prompts.

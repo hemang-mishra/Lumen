@@ -247,15 +247,18 @@ DELETE /decisions/{decision_id}
 
 ## Per-Action Confidence Thresholds
 
-| Action | Minimum Confidence | Model Tier Required |
+| Action | Minimum Confidence | Routing Tier |
 |---|---|---|
-| `MERGE` | 0.88 | Gemini Flash (STANDARD/ELEVATED), Local (CRITICAL) |
-| `REINFORCE` | 0.80 | Gemini Flash (STANDARD/ELEVATED), Local (CRITICAL) |
-| `EVOLVE` | 0.93 | Gemini Pro or reasoning model (STANDARD/ELEVATED), Local (CRITICAL) |
-| `BRANCH` | 0.75 | Gemini Flash (STANDARD/ELEVATED), Local (CRITICAL) |
-| `CONTRADICT` | 0.85 | Gemini Pro or reasoning model (STANDARD/ELEVATED), Local (CRITICAL) |
-| `REGULATE` | 0.82 | Gemini Flash (STANDARD/ELEVATED), Local (CRITICAL) |
+| `MERGE` | 0.88 | `STANDARD` (Gemini Flash) or `HIGH_SECURITY` (local model) |
+| `REINFORCE` | 0.80 | `STANDARD` (Gemini Flash) or `HIGH_SECURITY` (local model) |
+| `EVOLVE` | 0.93 | `STANDARD` (Gemini Pro / reasoning model) or `HIGH_SECURITY` (local model) |
+| `BRANCH` | 0.75 | `STANDARD` (Gemini Flash) or `HIGH_SECURITY` (local model) |
+| `CONTRADICT` | 0.85 | `STANDARD` (Gemini Pro / reasoning model) or `HIGH_SECURITY` (local model) |
+| `DIALECTIC` | 0.88 | `STANDARD` (Gemini Pro / reasoning model) or `HIGH_SECURITY` (local model) |
+| `REGULATE` | 0.82 | `STANDARD` (Gemini Flash) or `HIGH_SECURITY` (local model) |
 | `AMBIGUOUS` | N/A (tie detection) | N/A — always HITL |
+
+> **Routing tiers:** `STANDARD` uses the cloud Gemini provider. `HIGH_SECURITY` routes to a locally-run model (e.g. Ollama) and is triggered automatically for observations identified as identity-critical by the Preprocessing stage.
 
 ### The "Trial vs. Trait" Rule (Temporal Frequency Multiplier)
 
@@ -265,7 +268,7 @@ To enforce this, Reconciliation applies a **Confidence Threshold Multiplier** ba
 - If a new observation contradicts a long-held belief (e.g., age > 180 days) for the *first time*, the system enforces a strict penalty on the `EVOLVE` and `CONTRADICT` thresholds (e.g., effective threshold becomes 0.98, effectively unachievable).
 - This forces the Reconciliation model to default to `BRANCH`, creating a new, independent node (e.g., "Instances of independence").
 - Only when these branched nodes reach a critical mass or frequency over time does the Macroextraction layer (or a subsequent high-confidence Reconciliation) trigger the full `EVOLVE` or `CONTRADICT` action on the canonical belief.
-- **Metacognitive Bypass:** If a new observation is explicitly typed as `METACOGNITIVE_BREAKTHROUGH` and carries a `HIGH` or `CRITICAL` signal strength, it bypasses the temporal frequency penalty entirely. The user's explicit self-awareness overrides the structural skepticism, allowing an immediate `EVOLVE` or `CONTRADICT`.
+- **Metacognitive Bypass:** If a new observation is explicitly typed as `METACOGNITIVE_BREAKTHROUGH` and carries a `HIGH` or `CRITICAL` signal strength, it bypasses the temporal frequency penalty entirely. The user's explicit self-awareness overrides the structural skepticism, allowing an immediate `EVOLVE` or `CONTRADICT`. Note: `CRITICAL` here refers to the observation's `signal_strength` value (the 2.0× retrieval multiplier), not a routing tier.
 - **Active Regulation:** If the user actively catches and interrupts an ongoing pattern (e.g., catching a "critic brain" spiral), the model outputs the `REGULATE` action instead of `BRANCH` or `EVOLVE`. This creates a `regulates` edge to the canonical pattern, successfully tracking the nascent behavioral change without requiring a full identity `EVOLVE` or causing a fragmented `BRANCH`.
 
 ### Era Baseline Protection (Local Extremum vs Baseline Shift)
@@ -285,7 +288,7 @@ These rules are enforced in code at the point of the Reconciliation response par
 | Rule | Condition | Enforcement Action |
 |---|---|---|
 | **R1** | `observation.type == SUPPRESSED_EMOTION_SURFACING` AND `signal_strength != HIGH` | Reject extraction response. Re-extract with error context. |
-| **R2** | `observation.type IN [METACOGNITIVE_INTERRUPT, METACOGNITIVE_BREAKTHROUGH]` AND `signal_strength NOT IN [HIGH, CRITICAL]` | Reject extraction response. Re-extract with error context. |
+| **R2** | `observation.type IN [METACOGNITIVE_INTERRUPT, METACOGNITIVE_BREAKTHROUGH]` AND `signal_strength NOT IN [HIGH, CRITICAL]` | Reject extraction response. Re-extract with error context. (`CRITICAL` is a valid `signal_strength` value — the 2.0× retrieval multiplier — distinct from routing tier.) |
 | **R3** | `observation.provenance == CO_CREATED` AND `reconciliation.action == EVOLVE` | **Ownership transfer rule.** Allow EVOLVE normally. Set the new version node's `provenance = USER_GENERATED`. The user has taken ownership of the framework they are refining. Record `co_created_origin: true` in the `DecisionAuditNode` for lineage tracing. |
 
 > ⚠️ Rule R5 is the only rule that *overrides* rather than *rejects*. This is intentional: if the model failed to detect a tie but the scores reveal one, the system corrects automatically without burning an additional LLM call. All other rules reject and re-extract.
@@ -343,6 +346,8 @@ Items are ordered within the queue as follows:
 1. `AMBIGUOUS_TIE` items first (regardless of signal strength)
 2. Within each entry type: `signal_strength` descending (`CRITICAL` > `HIGH` > `STANDARD`)
 3. Within same entry type and signal strength: entry age ascending (oldest first)
+
+> `CRITICAL` signal strength (2.0× retrieval multiplier) here determines priority within the queue, not a routing tier.
 
 ### Queue Capacity & Hard Cap
 

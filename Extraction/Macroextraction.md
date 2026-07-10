@@ -180,7 +180,7 @@ pending_hitl_decisions:
 high_signal_observations:
   # All observations with extraction_signal_strength: HIGH or CRITICAL in this window.
   # These are always included in the Macroextraction report regardless of frequency.
-  # Sensitivity filter applies: CRITICAL-tier content is count-only, not quoted.
+  # CRITICAL signal_strength observations (2.0x retrieval multiplier) are surfaced with full content — no special handling.
   - observation_id: obs_example_001
     type: SUPPRESSED_EMOTION_SURFACING
     signal_strength: HIGH
@@ -202,7 +202,6 @@ motif_of_unprocessed_depth:
 relationship_arcs:
   # For each Person Entity that appeared in 3+ episodes this window,
   # summarize how the RELATIONAL_DYNAMIC observations have changed across the window.
-  # Only includes ELEVATED and STANDARD tier person entities (CRITICAL excluded).
   - person_id: person_alex_001
     canonical_name: "Alex"
     episodes_in_window: 4
@@ -284,7 +283,6 @@ archetype_shift:
 active_contradictions:
   # CONTRADICTION nodes created in this window.
   # These are not errors — they represent genuine psychological tension that has not resolved.
-  # Do NOT surface CRITICAL-tier contradictions in automated reports.
   
   - contradiction_id: "con_001"
     belief_a: "I am fundamentally introverted"

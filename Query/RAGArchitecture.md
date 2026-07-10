@@ -47,7 +47,7 @@ This is the most novel query type in the system.
 ## Context Assembly Strategy
 - **Context window budget:** prioritized by `final_score` (cosine similarity × signal_weight × recency_weight).
 - **Hierarchy:** Beliefs first, then Patterns, then Episodes (most general to most specific).
-- **`CRITICAL`-tier nodes:** excluded from context unless user explicitly navigates to them.
+- **`signal_strength: CRITICAL` nodes in sensitive domains:** not auto-injected into context. Eligible for injection only if the user explicitly introduces the topic in the current session (see `CRITICAL_DOMAIN_OPENED` in Conversational_RAG_Mode.md).
 - **Contextual compression:** retrieved nodes are summarized to key sentences before being injected into the generation prompt.
 - **Max context nodes:** 10 nodes total (adjustable), with at least 1 Belief if available.
 
