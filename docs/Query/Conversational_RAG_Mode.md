@@ -8,7 +8,7 @@
 
 The existing query architecture was designed for **pull queries** — the user asks, the system retrieves. In a live therapy session, queries are almost never explicit. Consider the following real session examples:
 
-**June 20:**
+**Session A:**
 > *"I think since childhood, I haven't gone out alone...even in campus I hesitate to go for a lone walk. I don't know, there is something that hits different."*
 
 No question. No explicit "what does my history say about this?" But Lumen has:
@@ -19,16 +19,16 @@ No question. No explicit "what does my history say about this?" But Lumen has:
 
 If the RAG surfaces this, the AI doesn't need to re-derive the pattern from scratch mid-session. It can immediately respond from the user's *specific* history rather than from generic therapeutic knowledge.
 
-**June 21 (evening):**
-> *"A small 13 or 15 year queer kid trying to figure out what the fuck is going on...The war began."*
+**Session B (evening):**
+> *"A small 13 or 15 year old teenager feeling completely lost and isolated...The struggle began."*
 
 Lumen has:
-- `historical_era: a major entrance exam_PREP`
-- `IDENTITY_FUSION_STATE`: self-worth fused to a major entrance exam outcome
+- `historical_era: HIGH_SCHOOL`
+- `IDENTITY_FUSION_STATE`: self-worth fused to academic performance
 - `COGNITIVE_DISTORTION`: *gap treated as character flaw*
 - Pattern: *Critic Brain origin — aspirations exceed tools → identity = the gap*
 
-The AI receiving this context mid-session can make the single most therapeutically powerful move: connecting the June 21 realization directly back to the June 20 resistance to go outside alone — *they share the same root (childhood belief: I am not capable of handling the world alone)*. Without RAG, the AI can see this only if it's in its context window. With RAG, it can see it even 3 months later.
+The AI receiving this context mid-session can make the single most therapeutically powerful move: connecting the Session B realization directly back to the Session A resistance to go outside alone — *they share the same root (childhood belief: I am not capable of handling the world alone)*. Without RAG, the AI can see this only if it's in its context window. With RAG, it can see it even 3 months later.
 
 ---
 
@@ -82,7 +82,7 @@ The Query Formulation Layer is the component that **translates a conversational 
 
 ```json
 {
-  "session_id": "sess_2026_06_21_afternoon",
+  "session_id": "sess_example_afternoon",
   "turn_index": 4,
   "retrieval_triggers": [
     {
@@ -126,7 +126,7 @@ The formulation layer also classifies the user's current emotional register. Thi
 | `CRISIS` | No injection. RAG suspended. AI responds with full presence. |
 | `REFLECTIVE` | Aggressive — up to 5 nodes, can include direct past quotes and causal chains |
 
-> **Why this matters from the logs:** On June 21 when the user broke down about the "queer kid carrying things alone for seven years," the register is VULNERABLE → CRISIS. Injecting pattern data at that moment would be clinically wrong. The AI must simply be present. The RAG needs to know this and stand down.
+> **Why this matters from the logs:** In Session B when the user broke down about the "teenager carrying things alone for seven years," the register is VULNERABLE → CRISIS. Injecting pattern data at that moment would be clinically wrong. The AI must simply be present. The RAG needs to know this and stand down.
 
 ---
 
@@ -142,7 +142,7 @@ Named-entity anchors + historical_era tags + high-sensitivity open nodes. (Defin
 
 Pass C is unique to Conversational RAG Mode. It maintains a `SessionContextBuffer` — a running list of the top-5 most thematically relevant nodes already surfaced in the current session. On each new turn, Pass C checks whether the new trigger is semantically adjacent to something already in the buffer.
 
-**Why it matters:** In the June 21 session, the afternoon discussion is about "peace without the critic," and the evening is about "the war began / a major entrance exam origin." These are causally linked. Pass C ensures that when the evening turn fires a `HISTORICAL_ERA: a major entrance exam_PREP` trigger, the afternoon's `PATTERN_MENTION: critic_brain` nodes are already in the buffer and get re-injected with a boost — connecting the afternoon insight to the evening root cause. Without Pass C, each turn retrieves independently and the session loses its narrative thread.
+**Why it matters:** In Session B, the afternoon discussion is about "peace without the critic," and the evening is about "the struggle began / high school origin." These are causally linked. Pass C ensures that when the evening turn fires a `HISTORICAL_ERA: HIGH_SCHOOL` trigger, the afternoon's `PATTERN_MENTION: critic_brain` nodes are already in the buffer and get re-injected with a boost — connecting the afternoon insight to the evening root cause. Without Pass C, each turn retrieves independently and the session loses its narrative thread.
 
 ```json
 {
@@ -195,11 +195,11 @@ Nodes are not injected raw. Each is compressed to a 1–2 sentence therapeutic b
 [LUMEN CONTEXT — DO NOT EXPOSE TO USER]
 Use the following to deepen your therapeutic response. Do not reference it directly unless it clearly helps.
 
-Pattern: Fear of Alone Exploration. Triggered when attempting unstructured solo activities. Linked to childhood belief: "Outside world is dangerous, I cannot handle it alone." Fades after 10–15 minutes of actual exposure (observed June 20).
+Pattern: Fear of Alone Exploration. Triggered when attempting unstructured solo activities. Linked to childhood belief: "Outside world is dangerous, I cannot handle it alone." Fades after 10–15 minutes of actual exposure (observed in Session A).
 
-Active belief: "I am the kind of person who falls short." Originated in a major entrance exam_PREP era. Partially superseded by recent reframe but still active.
+Active belief: "I am the kind of person who falls short." Originated in HIGH_SCHOOL era. Partially superseded by recent reframe but still active.
 
-Unresolved question from June 20: "Is the resistance about leaving, or about being out there alone?"
+Unresolved question from Session A: "Is the resistance about leaving, or about being out there alone?"
 [END LUMEN CONTEXT]
 ```
 
@@ -213,7 +213,7 @@ Nodes with `signal_strength: CRITICAL` that cover deeply sensitive domains (e.g.
 
 A `CRITICAL` signal-strength node in a sensitive domain can be injected only if the user explicitly introduces that topic in the current session. The Query Formulation Layer detects this as a `CRITICAL_DOMAIN_OPENED` event. Once opened, `CRITICAL` nodes linked to that domain become eligible for injection for the rest of the session.
 
-**Example from June 21:** When the user says *"a queer kid trying to figure out what the fuck is going on"* — this is `CRITICAL_DOMAIN_OPENED` for `QUEER_IDENTITY`. From that point, `CRITICAL` signal-strength nodes linked to identity confusion and adolescent isolation are unlocked for injection. The unlock expires at session end and must be re-triggered in a future session.
+**Example:** When the user says *"a teenager trying to figure out what is going on"* — this is `CRITICAL_DOMAIN_OPENED` for `ADOLESCENT_TRAUMA`. From that point, `CRITICAL` signal-strength nodes linked to identity confusion and adolescent isolation are unlocked for injection. The unlock expires at session end and must be re-triggered in a future session.
 
 ---
 
@@ -274,10 +274,10 @@ Carried-forward context is tagged `retrieval_source: DEFERRED` so the AI knows i
 A session is defined by the **calendar date on which it was opened**, not by a chat window or an inactivity timeout. This maps naturally to the user's actual experience: sleep resets the mental state, and a new day genuinely means a new context.
 
 **Rules:**
-- Opening the chat on June 27th creates (or resumes) the June 27th session.
+- Opening the chat on Tuesday creates (or resumes) the Tuesday session.
 - Sending a message at 11:58 PM and another at 12:02 AM means the 12:02 AM message belongs to the **next day's session** — not to the previous one.
 - The `SessionContextBuffer` is tied to a specific day. Crossing midnight flushes the buffer.
-- **Previous day navigation:** Users can open any past day's session in read-only mode, or optionally query it ("what did we talk about on June 21?"). This works like navigating to a past chat — the past day's context is available but does not pollute the current day's `SessionContextBuffer`.
+- **Previous day navigation:** Users can open any past day's session in read-only mode, or optionally query it ("what did we talk about last Tuesday?"). This works like navigating to a past chat — the past day's context is available but does not pollute the current day's `SessionContextBuffer`.
 
 ### Day Boundary & Wake Nudge
 
@@ -314,23 +314,23 @@ Day Session End (midnight OR explicit close)
 
 ## What This Unlocks: Concrete Examples from the Logs
 
-### Example 1 — June 20: Resistance to going out alone
+### Example 1 — Session A: Resistance to going out alone
 
 **Without RAG:** AI derives fear from scratch using generic therapeutic knowledge.
 
-**With RAG:** Pass A retrieves `PatternNode: Avoidance_Solo_Exploration`. Pass B retrieves `BELIEF: Outside world is dangerous (childhood origin)`. The AI immediately knows this is not social anxiety — it is an old childhood belief embedded at the nervous system level that fades after the threshold is crossed. It can ask the precise question: *"When you went to the barber in Jabalpur alone — after 10–15 minutes, did the resistance stay, or did it fade?"* — because that question was explored before and the answer is in the graph.
+**With RAG:** Pass A retrieves `PatternNode: Avoidance_Solo_Exploration`. Pass B retrieves `BELIEF: Outside world is dangerous (childhood origin)`. The AI immediately knows this is not social anxiety — it is an old childhood belief embedded at the nervous system level that fades after the threshold is crossed. It can ask the precise question: *"When you went to the store in your hometown alone — after 10–15 minutes, did the resistance stay, or did it fade?"* — because that question was explored before and the answer is in the graph.
 
-### Example 2 — June 21 evening: "The war began"
+### Example 2 — Session B evening: "The struggle began"
 
-**Without RAG:** The AI hears about a major entrance exam, aspiration, isolation, and queer identity all in one dense turn. It responds from that turn alone.
+**Without RAG:** The AI hears about academic pressure, aspiration, isolation, and identity all in one dense turn. It responds from that turn alone.
 
-**With RAG:** Pass B fires `HISTORICAL_ERA: a major entrance exam_PREP`. Pass C re-injects the afternoon session's node about "peace without war — first time growth came from curiosity, not fear." The AI receives: *"This user spent today experiencing effort without an internal war for the first time. They are now discovering where that war started."* This enables the connection: *"What you described this afternoon — running, working, feeling at peace — was your first glimpse of growth without the war. And tonight you're seeing where the war started."* That is a single profound therapeutic moment made possible only by cross-session memory.
+**With RAG:** Pass B fires `HISTORICAL_ERA: HIGH_SCHOOL`. Pass C re-injects the afternoon session's node about "peace without struggle — first time growth came from curiosity, not fear." The AI receives: *"This user spent today experiencing effort without an internal struggle for the first time. They are now discovering where that struggle started."* This enables the connection: *"What you described this afternoon — running, working, feeling at peace — was your first glimpse of growth without the struggle. And tonight you're seeing where the struggle started."* That is a single profound therapeutic moment made possible only by cross-session memory.
 
-### Example 3 — June 21: The Adler book debate
+### Example 3 — Session B: The Adler book debate
 
 **Without RAG:** The AI explains Adler generically.
 
-**With RAG:** Pass A retrieves `PatternNode: Critic Brain` + `META_BELIEF: Gap = Character flaw (a major entrance exam origin)` + the afternoon's `CONCEPTUAL_REFRAME: healthy inferiority vs. inferiority complex`. The AI can immediately map Adler's three-way distinction onto the user's own graph: *"Your critic brain isn't Adler's healthy inferiority feeling. It's the complex — the moment the gap stopped being 'I haven't reached my goal' and became 'I am the gap.'"* The specificity is only possible with the graph.
+**With RAG:** Pass A retrieves `PatternNode: Critic Brain` + `META_BELIEF: Gap = Character flaw (high school origin)` + the afternoon's `CONCEPTUAL_REFRAME: healthy inferiority vs. inferiority complex`. The AI can immediately map Adler's three-way distinction onto the user's own graph: *"Your critic brain isn't Adler's healthy inferiority feeling. It's the complex — the moment the gap stopped being 'I haven't reached my goal' and became 'I am the gap.'"* The specificity is only possible with the graph.
 
 ---
 
