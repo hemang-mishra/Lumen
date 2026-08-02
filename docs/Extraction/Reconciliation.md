@@ -289,7 +289,7 @@ These rules are enforced in code at the point of the Reconciliation response par
 |---|---|---|
 | **R1** | `observation.type == SUPPRESSED_EMOTION_SURFACING` AND `signal_strength != HIGH` | Reject extraction response. Re-extract with error context. |
 | **R2** | `observation.type IN [METACOGNITIVE_INTERRUPT, METACOGNITIVE_BREAKTHROUGH]` AND `signal_strength NOT IN [HIGH, CRITICAL]` | Reject extraction response. Re-extract with error context. (`CRITICAL` is a valid `signal_strength` value — the 2.0× retrieval multiplier — distinct from routing tier.) |
-| **R3** | `observation.provenance == CO_CREATED` AND `reconciliation.action == EVOLVE` | **Ownership transfer rule.** Allow EVOLVE normally. Set the new version node's `provenance = USER_GENERATED`. The user has taken ownership of the framework they are refining. Record `co_created_origin: true` in the `DecisionAuditNode` for lineage tracing. |
+| **R3** | `observation.provenance == CO_CREATED` AND `reconciliation.action == EVOLVE` | **Ownership transfer rule.** Allow EVOLVE normally. Set the new version node's `provenance = USER_GENERATED` and `verification_status = VERIFIED`. The user has taken ownership of the framework they are refining. Record `co_created_origin: true` in the `DecisionAuditNode` for lineage tracing. |
 
 > ⚠️ Rule R5 is the only rule that *overrides* rather than *rejects*. This is intentional: if the model failed to detect a tie but the scores reveal one, the system corrects automatically without burning an additional LLM call. All other rules reject and re-extract.
 
@@ -324,7 +324,13 @@ When a user later refines, extends, or applies a `CO_CREATED` node in a new sess
 
 ### CO_CREATED Retrieval Behavior
 
-CO_CREATED nodes are retrieved and injected in Conversational RAG identically to USER_GENERATED nodes. The distinction is only for provenance auditing and Macroextraction reports — not for retrieval ranking.
+CO_CREATED nodes carry `verification_status: UNVERIFIED` by default and receive a **0.5× trust_weight penalty** in the retrieval score formula (see `Architecture.md`). This means they are still retrievable and injectable in Conversational RAG, but ranked significantly lower than `USER_GENERATED` (IMPLICIT, 1.0×) or user-confirmed (VERIFIED, 1.0×) nodes.
+
+**Promotion to VERIFIED:** A CO_CREATED node's `verification_status` promotes from `UNVERIFIED` to `VERIFIED` only through explicit user action:
+1. User confirms accuracy in HITL review queue.
+2. User independently re-articulates the concept in a later session, triggering EVOLVE (Rule R3 ownership transfer also sets `verification_status = VERIFIED`).
+
+There is no automatic promotion based on reinforcement count.
 
 ## HITL Review Queue
 

@@ -75,6 +75,7 @@ raw_evidence:
   - "everyone else was ready to decide weeks ago"
 signal_strength: HIGH                    # STANDARD | HIGH | CRITICAL
 provenance: USER_GENERATED               # USER_GENERATED | AI_GENERATED | CO_CREATED
+verification_status: IMPLICIT            # IMPLICIT | UNVERIFIED | VERIFIED — gates retrieval trust_weight (see Architecture.md)
 person_refs: []                          # array of PersonEntityNode IDs referenced by this observation
 open_loop_ref: null                      # ID of an OpenLoopNode this observation directly addresses or raises
 extraction_confidence: STANDARD          # STANDARD | RECONSTRUCTIVE
@@ -203,6 +204,7 @@ pattern_description: "User systematically over-collects information before commi
 domain: COGNITIVE_STYLE                  # COGNITIVE_STYLE | EMOTIONAL | BEHAVIORAL | RELATIONAL | CAREER | HEALTH
 signal_strength: HIGH                    # STANDARD | HIGH | CRITICAL
 provenance: USER_GENERATED
+verification_status: IMPLICIT            # IMPLICIT | UNVERIFIED | VERIFIED — gates retrieval trust_weight (see Architecture.md)
 evidence_count: 7                        # count of ObservationNodes linked via reinforces or same_as edges
 archetype_tags: ["high_conscientiousness", "risk_averse"]
 era_tag: null                            # Optional historical era anchor (e.g. "a major entrance exam_PREP"). Used by Pass B structural retrieval.
@@ -230,6 +232,7 @@ belief_source_summary: "Expressed explicitly in entry e_2025_11_03 and reinforce
 domain: SELF_CONCEPT
 signal_strength: HIGH                    # STANDARD | HIGH | CRITICAL
 provenance: USER_GENERATED
+verification_status: IMPLICIT            # IMPLICIT | UNVERIFIED | VERIFIED — gates retrieval trust_weight (see Architecture.md)
 evidence_count: 5
 era_tag: null                            # Optional historical era anchor for Pass B structural retrieval.
 query_frequency: 0                       # retrieval frequency counter (see PatternNode for semantics)

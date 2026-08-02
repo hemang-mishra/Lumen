@@ -116,6 +116,7 @@ Step 6: Macroextraction (scheduled: 48h shadow / weekly / monthly / quarterly)
 - `type` — from a closed enum (e.g., `SUPPRESSED_EMOTION_SURFACING`, `BEHAVIORAL_PATTERN_OBSERVATION`, `METACOGNITIVE_INTERRUPT`)
 - `signal_strength` — `STANDARD | HIGH | CRITICAL`
 - `provenance` — `USER_GENERATED | AI_GENERATED | CO_CREATED`
+- `verification_status` — `IMPLICIT | UNVERIFIED | VERIFIED` — gates a 0.5× trust_weight penalty on retrieval for unverified AI-assisted insights (see `Architecture.md`)
 - `content` — the extracted observation text
 - `raw_evidence` — verbatim quote(s) from the episode
 - `extraction_confidence` — set to `RECONSTRUCTIVE` when the observation is narrated from memory (>90 days prior, no direct log evidence)
