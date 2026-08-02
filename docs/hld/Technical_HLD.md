@@ -65,7 +65,7 @@ Every choice below includes a **personal project option** and a **production opt
 
 | Layer | Choice | Rationale |
 |---|---|---|
-| Language | **Python 3.12** | Already decided (Protocol-based LLM abstraction in LLM_Abstraction.md). Ecosystem dominance for LLM tooling. |
+| Language | **Python 3.13** | Already decided (Protocol-based LLM abstraction in LLM_Abstraction.md). Ecosystem dominance for LLM tooling. |
 | API Framework | **FastAPI** | Async-native, automatic OpenAPI docs, Pydantic-native (same library used for stage schemas), streaming support for chat. |
 | Schema / Validation | **Pydantic v2** | Already used in pipeline stage contracts. All inter-stage data transfer objects are Pydantic models. Schema validation between stages is free. |
 | Async Runtime | **asyncio + anyio** | Native to FastAPI. Allows concurrent LLM calls without threads. |

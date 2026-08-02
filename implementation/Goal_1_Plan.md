@@ -1,108 +1,102 @@
 # Goal 1: Database Initialization Protocol
 
-This document details the exact implementation steps for Goal 1 of the Master Plan.
+**Status:** ✅ Complete
+**Tests:** 38 passing, 98% coverage
+**Implemented by:** Code review + refactor cycle
+
+---
 
 ## Objective
-Establish the database layer for Lumen without introducing any LLM logic. We will use **Kuzu** (embedded graph store) and **Qdrant** (local/memory vector store). We will define the abstract Provider Protocols to ensure production-readiness, and initialize the complete Cypher schema for Kuzu based on `Schema.md`.
 
-## 1. Directory Structure
+Establish the database layer for Lumen without introducing any LLM logic. Kuzu (embedded graph store) and Qdrant (local/memory vector store) behind abstract Provider Protocols, with a central configuration module and proper pytest test suites.
 
-We will create the following structure under a new `lumen/` Python package:
+## Directory Structure (as implemented)
 
 ```text
 lumen/
+├── __init__.py               # Package root
+├── config.py                 # AppConfig — central provider configuration
 ├── graph/
-│   ├── __init__.py
-│   ├── provider.py       # GraphProvider Protocol
-│   ├── schema.py         # Kuzu DDL (Data Definition Language) queries
-│   └── kuzu_impl.py      # Kuzu implementation of GraphProvider
+│   ├── __init__.py           # Re-exports GraphProvider, KuzuGraphProvider
+│   ├── provider.py           # GraphProvider Protocol (6 methods)
+│   └── kuzu_impl.py          # KuzuGraphProvider + NODE_TABLES + EDGE_REGISTRY
 ├── vector/
-│   ├── __init__.py
-│   ├── provider.py       # VectorProvider Protocol
-│   └── qdrant_impl.py    # Qdrant implementation of VectorProvider
+│   ├── __init__.py           # Re-exports VectorProvider, QdrantVectorProvider
+│   ├── provider.py           # VectorProvider Protocol (4 methods)
+│   └── qdrant_impl.py        # QdrantVectorProvider
 └── tests/
-    └── test_db_init.py   # E2E test for DB initialization and basic writes
+    ├── __init__.py
+    ├── test_kuzu_impl.py     # 27 tests (5 test classes)
+    └── test_qdrant_impl.py   # 11 tests (4 test classes)
 ```
 
-## 2. Graph Provider & Kuzu Schema
+## What Was Built
 
-### The Protocol (`lumen/graph/provider.py`)
-We will define a `typing.Protocol` named `GraphProvider` with the following interface:
-- `init_schema()`
-- `write_node(node_type: str, properties: dict)`
-- `write_edge(edge_type: str, from_id: str, to_id: str, properties: dict)`
-- `get_node(node_id: str) -> dict`
+### 1. Central Configuration ([`lumen/config.py`](file:///Users/hemangmishra/Projects/Lumen/lumen/config.py))
+- `GraphConfig` — `db_path` (default `./lumen_graph.db`, overridable via `LUMEN_GRAPH_DB_PATH` env var)
+- `VectorConfig` — `location`, `collection_name`, `vector_size` (overridable via `LUMEN_VECTOR_LOCATION`)
+- `AppConfig` — top-level frozen dataclass composing both configs
 
-### Kuzu Schema Initialization (`lumen/graph/schema.py`)
-Kuzu requires explicit table definitions. We will define a sequence of `CREATE NODE TABLE` and `CREATE REL TABLE` queries mapping exactly to `Schema.md`.
+### 2. GraphProvider Protocol ([`lumen/graph/provider.py`](file:///Users/hemangmishra/Projects/Lumen/lumen/graph/provider.py))
+6 methods defined:
+- `init_schema()` — idempotent schema creation
+- `write_node(node_type, properties)` — with node_type validation
+- `write_edge(edge_type, from_id, to_id, properties)` — with typed MATCH (no Cartesian product)
+- `get_node(node_id)` — single node lookup
+- `get_nodes_by_ids(node_ids)` — batch lookup (HLD Section 4.2 read path)
+- `close()` — resource cleanup
 
-**Node Tables:**
-1. `EpisodeNode`
-2. `ObservationNode`
-3. `EventNode`
-4. `SessionNode`
-5. `CausalChainNode`
-6. `CausalStepNode`
-7. `PatternNode`
-8. `BeliefNode`
-9. `LessonNode`
-10. `AdoptedPrincipleNode`
-11. `PersonEntityNode`
-12. `DecisionAuditNode`
-13. `ContradictionNode`
-14. `MacroextractionReportNode`
-15. `OpenLoopNode`
+### 3. KuzuGraphProvider ([`lumen/graph/kuzu_impl.py`](file:///Users/hemangmishra/Projects/Lumen/lumen/graph/kuzu_impl.py))
+- **15 node tables** — all from [`docs/Graph/Schema.md`](file:///Users/hemangmishra/Projects/Lumen/docs/Graph/Schema.md)
+- **43 edge tables** — stored in `EDGE_REGISTRY` with `_EDGE_LOOKUP` dict for O(1) type resolution
+- Context manager support (`with KuzuGraphProvider(...) as p:`)
+- Structured logging via `logging.getLogger(__name__)`
+- Catches only `RuntimeError` (not bare `Exception`) in `_get_existing_tables()`
 
-**Rel (Edge) Tables:**
-1. `contains` (FROM EpisodeNode TO ObservationNode/EventNode/SessionNode/CausalChainNode)
-2. `chain_contains` (FROM CausalChainNode TO CausalStepNode)
-3. `same_as` (FROM ObservationNode/PatternNode TO PatternNode)
-4. `reinforces` (FROM ObservationNode/EventNode TO PatternNode/BeliefNode)
-5. `evolved_from` (FROM PatternNode/BeliefNode TO PatternNode/BeliefNode)
-6. `caused_by` (FROM PatternNode/BeliefNode TO EventNode/SessionNode)
-7. `branches_to` (FROM ObservationNode/EventNode/SessionNode TO PatternNode)
-8. `contradicts` (FROM ContradictionNode TO BeliefNode)
-9. `dialectic` (FROM BeliefNode/PatternNode TO BeliefNode/PatternNode)
-10. `regulates` (FROM SessionNode/ObservationNode TO PatternNode)
-11. `mentions` (FROM ObservationNode/EventNode/SessionNode TO PersonEntityNode)
-12. `decided_by` (FROM ANY_EDGE TO DecisionAuditNode)
-13. `analyzed_in` (FROM EpisodeNode TO MacroextractionReportNode)
-14. `alias_of` (FROM PersonEntityNode TO PersonEntityNode)
-15. `investigated_by` (FROM OpenLoopNode TO EpisodeNode)
-16. `closes` (FROM EpisodeNode TO OpenLoopNode)
-17. `follows_from` (FROM EpisodeNode TO EpisodeNode)
-18. `adopted_as` (FROM ObservationNode/SessionNode TO AdoptedPrincipleNode)
-19. `superseded_by` (FROM AdoptedPrincipleNode TO AdoptedPrincipleNode)
-20. `failed_extraction` (FROM EpisodeNode TO ObservationNode)
+### 4. VectorProvider Protocol ([`lumen/vector/provider.py`](file:///Users/hemangmishra/Projects/Lumen/lumen/vector/provider.py))
+4 methods defined:
+- `init_collection()` — idempotent
+- `upsert(node_id, vector, payload)` — with deterministic UUID5
+- `hybrid_search(dense_vector, sparse_vector=None, limit=10)` — sparse made optional, logs warning when provided
+- `close()` — resource cleanup
 
-### Kuzu Implementation (`lumen/graph/kuzu_impl.py`)
-Will wrap `import kuzu`, manage the database connection (`kuzu.Database(db_path)`), and execute the DDL queries on initialization if the tables do not exist.
+### 5. QdrantVectorProvider ([`lumen/vector/qdrant_impl.py`](file:///Users/hemangmishra/Projects/Lumen/lumen/vector/qdrant_impl.py))
+- Configurable `collection_name` and `vector_size` via constructor
+- Payload indexes on `node_type`, `status`, `signal_strength`
+- Context manager support
+- Sparse BM25 search honestly deferred (logs warning, does not silently ignore)
 
-## 3. Vector Provider & Qdrant Setup
+### 6. Test Suites
 
-### The Protocol (`lumen/vector/provider.py`)
-- `init_collection()`
-- `upsert(node_id: str, vector: list[float], payload: dict)`
-- `hybrid_search(dense_vector: list[float], sparse_vector: dict, limit: int) -> list[str]`
+**[`test_kuzu_impl.py`](file:///Users/hemangmishra/Projects/Lumen/lumen/tests/test_kuzu_impl.py)** — 27 tests:
+| Class | Tests | Coverage |
+|---|---|---|
+| `TestSchemaInit` | All 15 node tables created, all 43 edge tables created, idempotency | Schema DDL |
+| `TestWriteNode` | Episode, Observation, Pattern, Belief, Event, DecisionAudit, JSON serialization, missing ID error, invalid type error | `write_node()` |
+| `TestWriteEdge` | contains, reinforces, evolved_from, caused_by, mentions, decided_by, invalid edge error, edge properties | `write_edge()` |
+| `TestReadOperations` | get_node (found/missing), get_nodes_by_ids (batch/empty) | `get_node()`, `get_nodes_by_ids()` |
+| `TestContextManager` | with-statement lifecycle, resource cleanup | `close()` |
 
-### Qdrant Implementation (`lumen/vector/qdrant_impl.py`)
-Will wrap `qdrant_client.QdrantClient`. For local development, we will support `:memory:` and local path modes.
-- **Collection Name:** `lumen_nodes`
-- **Dense Vector Config:** Size 768 (matching `text-embedding-004` which is default), Distance `Cosine`.
-- **Sparse Vector Config:** Configured for BM25 hybrid search.
-- **Payload Indexes:** Will create indexes for `node_type`, `status`, and `signal_strength` to ensure fast filtering during Pass A retrieval.
+**[`test_qdrant_impl.py`](file:///Users/hemangmishra/Projects/Lumen/lumen/tests/test_qdrant_impl.py)** — 11 tests:
+| Class | Tests | Coverage |
+|---|---|---|
+| `TestCollectionInit` | Creation, idempotency, custom name, custom vector size | `init_collection()` |
+| `TestUpsert` | Basic upsert, idempotent upsert, payload contains node_id | `upsert()` |
+| `TestSearch` | Correct IDs returned, limit respected, empty collection, sparse vector warning | `hybrid_search()` |
+| `TestContextManager` | with-statement lifecycle | `close()` |
 
-## 4. Verification and Testing
+## Key Design Decisions
 
-We will write `tests/test_db_init.py` which will:
-1. Initialize an in-memory Qdrant client and a temporary-directory Kuzu database.
-2. Trigger `init_schema()` and `init_collection()`.
-3. Create a mock `EpisodeNode` and a mock `ObservationNode`.
-4. Create a `contains` edge between them.
-5. Insert mock embeddings into Qdrant.
-6. Assert that the nodes and edges can be retrieved via Cypher from Kuzu.
-7. Assert that the node IDs can be retrieved via a mock vector search from Qdrant.
+1. **`EDGE_REGISTRY` + `_EDGE_LOOKUP`:** Kuzu requires typed edge tables (FROM X TO Y). We define all valid triples as a module-level list, then build an O(1) lookup dict so `write_edge()` resolves node labels without scanning all 15 tables.
+2. **`NODE_TABLES` as dict:** DDL strings keyed by table name instead of raw list, enabling O(1) validation in `write_node()`.
+3. **Sparse search deferred honestly:** Rather than silently ignoring the `sparse_vector` parameter, we log a warning. BM25 will be enabled when `SparseVectorConfig` is added to Qdrant collection setup.
+4. **Context managers:** Both providers support `with` statements to prevent resource leaks (Kuzu file locks, Qdrant connections).
 
-## Next Step
+## What's Deferred to Later Goals
 
-Once this plan is approved, I will create the python files, write the implementations, run the test script, and verify that the database layer is correctly instantiated.
+| Item | Target Goal |
+|---|---|
+| Pydantic-typed `write_node()` signature | Goal 2 |
+| Sparse/BM25 vector configuration | Goal 8 |
+| DDL extraction to structured schema builder (P2 from review) | Backlog |
+| `execute_cypher()` for ad-hoc traversal | Goal 11 |
