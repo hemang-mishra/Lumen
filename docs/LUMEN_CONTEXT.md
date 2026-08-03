@@ -11,7 +11,7 @@ It processes unstructured daily logs (text or voice), extracts structured psycho
 ### Core Philosophies:
 1. **Late Binding:** Observations are extracted *blindly* (zero history context) to prevent the LLM from hallucinating continuity (Anchoring Bias). History is only introduced later during Reconciliation.
 2. **Append-Only Immutable Graph:** Lumen doesn't overwrite facts (e.g., "User likes X"). It tracks the *evolution* of beliefs over time using Causal Chains and `EVOLVE` edges.
-3. **Abstracted Provider Routing:** Content is processed via configurable default providers. High-security (`HIGH_SECURITY` routing tier) data is routed to your configured local or high-privacy models.
+3. **Abstracted Provider Routing:** Content is processed via a single point of configuration (`ProviderConfig`), keyed by model-capability role (`LIGHTWEIGHT`/`THINKING`/`EMBEDDING`/`TRANSCRIPTION`/`TTS`) — never by vendor. Full local/private operation is available to anyone: configure every role to a local provider (e.g. Ollama, whisper.cpp) as a one-time deployment choice.
 
 ---
 

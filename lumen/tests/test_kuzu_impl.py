@@ -158,7 +158,7 @@ class TestWriteNode:
             "node_id": "d_test_001",
             "action": "MERGE",
             "confidence": 0.91,
-            "routing_tier": "STANDARD",
+            "model_role": "LIGHTWEIGHT",
             "hitl_resolved": False,
             "status": "ACTIVE",
         })

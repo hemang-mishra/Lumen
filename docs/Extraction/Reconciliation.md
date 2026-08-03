@@ -64,7 +64,7 @@ This preserves three things:
   "valid_from": "2025-01-18T10:34:00Z",
   "invalidated_at": null,
   "created_by_model": "gemini-2.0-flash",
-  "routing_tier": "STANDARD"
+  "model_role": "LIGHTWEIGHT"
 }
 ```
 
@@ -212,7 +212,7 @@ Every Reconciliation action — including AMBIGUOUS resolutions, CONTRADICT crea
   "runner_up_action": "REINFORCE",
   "delta_description": null,
   "model_used": "gemini-2.0-flash",
-  "routing_tier": "STANDARD",
+  "model_role": "LIGHTWEIGHT",
   "hitl_resolved": false,
   "hitl_resolution_timestamp": null,
   "hitl_resolution_user_choice": null,
@@ -247,18 +247,18 @@ DELETE /decisions/{decision_id}
 
 ## Per-Action Confidence Thresholds
 
-| Action | Minimum Confidence | Routing Tier |
+| Action | Minimum Confidence | Model Role |
 |---|---|---|
-| `MERGE` | 0.88 | `STANDARD` (Gemini Flash) or `HIGH_SECURITY` (local model) |
-| `REINFORCE` | 0.80 | `STANDARD` (Gemini Flash) or `HIGH_SECURITY` (local model) |
-| `EVOLVE` | 0.93 | `STANDARD` (Gemini Pro / reasoning model) or `HIGH_SECURITY` (local model) |
-| `BRANCH` | 0.75 | `STANDARD` (Gemini Flash) or `HIGH_SECURITY` (local model) |
-| `CONTRADICT` | 0.85 | `STANDARD` (Gemini Pro / reasoning model) or `HIGH_SECURITY` (local model) |
-| `DIALECTIC` | 0.88 | `STANDARD` (Gemini Pro / reasoning model) or `HIGH_SECURITY` (local model) |
-| `REGULATE` | 0.82 | `STANDARD` (Gemini Flash) or `HIGH_SECURITY` (local model) |
+| `MERGE` | 0.88 | `LIGHTWEIGHT` |
+| `REINFORCE` | 0.80 | `LIGHTWEIGHT` |
+| `EVOLVE` | 0.93 | `THINKING` |
+| `BRANCH` | 0.75 | `LIGHTWEIGHT` |
+| `CONTRADICT` | 0.85 | `THINKING` |
+| `DIALECTIC` | 0.88 | `THINKING` |
+| `REGULATE` | 0.82 | `LIGHTWEIGHT` |
 | `AMBIGUOUS` | N/A (tie detection) | N/A — always HITL |
 
-> **Routing tiers:** `STANDARD` uses the cloud Gemini provider. `HIGH_SECURITY` routes to a locally-run model (e.g. Ollama) and is triggered automatically for observations identified as identity-critical by the Preprocessing stage.
+> **Model roles:** `LIGHTWEIGHT` is used for low-to-medium-risk actions where speed matters more than deep reasoning. `THINKING` is used for high-consequence or nuanced-judgment actions. Which actual provider and model back each role — cloud or local — is a single operator-configured choice (`ProviderConfig`, see `docs/hld/LLM_Abstraction_Architecture.md`), not a decision the pipeline makes per observation based on content sensitivity.
 
 ### The "Trial vs. Trait" Rule (Temporal Frequency Multiplier)
 

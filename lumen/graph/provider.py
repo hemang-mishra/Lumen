@@ -9,7 +9,10 @@ See: docs/hld/Technical_HLD.md Section 2.2
 
 from __future__ import annotations
 
-from typing import Any, Protocol
+from typing import TYPE_CHECKING, Any, Protocol
+
+if TYPE_CHECKING:
+    from lumen.schemas.base import GraphNode
 
 
 class GraphProvider(Protocol):
@@ -20,16 +23,19 @@ class GraphProvider(Protocol):
 
     def init_schema(self) -> None:
         """Initialize the graph database schema if it doesn't exist.
-        
+
         Must be idempotent — calling twice on an already-initialized
         database must not raise.
         """
         ...
 
-    def write_node(self, node_type: str, properties: dict[str, Any]) -> str:
+    def write_node(self, node_type: str, properties: "GraphNode | dict[str, Any]") -> str:
         """
         Write a node to the graph and return its node_id.
-        The properties dictionary must contain a 'node_id' key.
+
+        `properties` may be a raw dict (must contain a 'node_id' key) or a
+        Pydantic node model from lumen.schemas.nodes (serialized via its
+        to_graph_dict() method). See implementation/Goal_2_Plan.md Section B8.
         """
         ...
 

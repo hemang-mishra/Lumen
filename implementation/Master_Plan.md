@@ -17,12 +17,31 @@ This document outlines the systematic, stage-by-stage implementation plan for th
   - *Result:* 38 tests passing, 98% coverage. All 15 node tables and 43 edge tables created.
   - *Plan:* [`implementation/Goal_1_Plan.md`](file:///Users/hemangmishra/Projects/Lumen/implementation/Goal_1_Plan.md)
 
-- [ ] **Goal 2: Pydantic Schema Contracts**
-  - Implement `lumen/schemas/nodes.py`, `lumen/schemas/edges.py`, and `lumen/schemas/pipeline.py`.
-  - Define typed Pydantic models for all 15 node types from [`docs/Graph/Schema.md`](file:///Users/hemangmishra/Projects/Lumen/docs/Graph/Schema.md).
-  - Define pipeline data transfer objects: `SessionDecayEvent`, `PreprocessingResult`, `ExtractionResult`, `RetrievalResult`, `ReconciliationResult` (per HLD Section 5).
-  - Refactor `GraphProvider.write_node()` to optionally accept Pydantic models alongside raw dicts.
-  - *Test:* Instantiate every node/edge model, validate field constraints, test enum enforcement, test invalid data rejection.
+- [x] **Goal 2: Pydantic Schema Contracts** ✅
+  - Implemented `lumen/schemas/{enums,base,ids,nodes,edges,pipeline}.py`: 15 node models,
+    20 logical edge models + physical-table resolver, 9 pipeline DTOs, ~29 enums.
+  - Added `COGNITIVE_DISTORTION_STATE`, `EXISTENTIAL_REFLECTION`, `IDENTITY_FUSION_STATE`
+    to [`docs/Extraction/Microextraction.md`](file:///Users/hemangmishra/Projects/Lumen/docs/Extraction/Microextraction.md)'s enum dictionary (previously referenced by `Architecture.md` but undefined).
+  - Refactored `GraphProvider.write_node()` / `KuzuGraphProvider.write_node()` to accept
+    a Pydantic node model or a raw dict.
+  - Redesigned the LLM routing concept per explicit user decision: replaced the old
+    `RoutingTier` (`STANDARD`/`HIGH_SECURITY`, privacy-based) with `ModelRole`
+    (`LIGHTWEIGHT`/`THINKING`/`EMBEDDING`/`TRANSCRIPTION`/`TTS`, capability-based).
+    Added `ProviderConfig` to `lumen/config.py` as the single point of configuration —
+    each role independently maps to a `(provider, model)` pair; the abstraction never
+    assumes or enforces deployment locality. `DecisionAuditNode.routing_tier` renamed
+    to `model_role`. Updated `Schema.md`, `Reconciliation.md`, `Preprocessing.md`,
+    `Technical_HLD.md` §2.7, `LLM_Abstraction_Architecture.md`, `HLDv2.md`, and
+    `LUMEN_CONTEXT.md` to match — this removes the previously-documented episode-level
+    `HIGH_SECURITY` cascading-routing feature entirely (was a stated privacy guarantee;
+    now privacy is a pure operator/deployment configuration choice, not a runtime
+    content-routing decision).
+  - *Result:* 222 tests passing (38 Goal 1 + 184 new), 100% coverage on `lumen/schemas/`
+    and `lumen/config.py`. Found and flagged: `EDGE_REGISTRY` has 44 physical edge
+    tables, not 43 as previously documented; Kuzu's edge DDL has no columns for
+    `dialectic`/`regulates` edges' required `tension_summary`/`regulation_summary`
+    fields (blocks Goal 9 until resolved).
+  - *Plan:* [`implementation/Goal_2_Plan.md`](file:///Users/hemangmishra/Projects/Lumen/implementation/Goal_2_Plan.md)
 
 - [ ] **Goal 3: Operational DB Setup (SQLite + SQLAlchemy)**
   - Initialize SQLite via SQLAlchemy ORM in `lumen/operational/`.
@@ -38,9 +57,14 @@ This document outlines the systematic, stage-by-stage implementation plan for th
 
 - [ ] **Goal 4: LLM Provider Abstraction Layer**
   - Implement `lumen/providers/llm_provider.py` (Protocol), `lumen/providers/gemini.py`, `lumen/providers/ollama.py`.
-  - Support `STANDARD` (gemini-2.5-flash) and `HIGH_SECURITY` (ollama/llama) routing tiers.
-  - Implement embedding provider: `text-embedding-004` (Gemini) and `nomic-embed-large` (Ollama).
-  - *Test:* Mock LLM calls, verify prompt/response contracts, test tier-based routing.
+  - Implement a role-resolution factory reading `lumen.config.ProviderConfig` (Goal 2):
+    resolves a `ModelRole` (`LIGHTWEIGHT`/`THINKING`/`EMBEDDING`/`TRANSCRIPTION`/`TTS`) to
+    a concrete Protocol-conforming provider instance. No content-sensitivity branching —
+    role selection is purely task-driven (see `docs/hld/LLM_Abstraction_Architecture.md`).
+  - Implement embedding provider(s) behind the `EMBEDDING` role: `text-embedding-004`
+    (Gemini) and `nomic-embed-large` (Ollama) as swappable options.
+  - *Test:* Mock LLM calls, verify prompt/response contracts, test that each role
+    resolves to its configured provider and that roles are independently overridable.
 
 ## Phase 2: Extraction Pipeline (Goals 5-9)
 **Objective:** Build the core pipeline that transforms raw conversational input into structured graph actions. Each stage is a pure function (HLD Rule 2): accepts Pydantic input, returns Pydantic output.

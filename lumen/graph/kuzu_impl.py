@@ -18,6 +18,7 @@ from typing import Any
 import kuzu
 
 from lumen.graph.provider import GraphProvider
+from lumen.schemas.base import GraphNode
 
 logger = logging.getLogger(__name__)
 
@@ -238,7 +239,7 @@ NODE_TABLES: dict[str, str] = {
         "source_observation_id STRING, target_node_id STRING, "
         "edge_type_created STRING, edge_id STRING, confidence DOUBLE, "
         "confidence_runner_up DOUBLE, runner_up_action STRING, "
-        "delta_description STRING, model_used STRING, routing_tier STRING, "
+        "delta_description STRING, model_used STRING, model_role STRING, "
         "hitl_resolved BOOLEAN, hitl_resolution_timestamp STRING, "
         "hitl_resolution_user_choice STRING, snooze_count INT64, "
         "last_snoozed_at STRING, candidate_retrieval_source STRING, "
@@ -367,8 +368,17 @@ class KuzuGraphProvider(GraphProvider):
     # Write Operations
     # ------------------------------------------------------------------
 
-    def write_node(self, node_type: str, properties: dict[str, Any]) -> str:
-        """Write a node to the graph and return its node_id."""
+    def write_node(self, node_type: str, properties: GraphNode | dict[str, Any]) -> str:
+        """
+        Write a node to the graph and return its node_id.
+
+        Accepts either a Pydantic node model (from lumen.schemas.nodes) or a
+        raw dict. Models are serialized via to_graph_dict() before the
+        existing dict-based write path runs unchanged.
+        """
+        if isinstance(properties, GraphNode):
+            properties = properties.to_graph_dict()
+
         node_id = properties.get("node_id")
         if not node_id:
             raise ValueError("node_id is required in properties")
