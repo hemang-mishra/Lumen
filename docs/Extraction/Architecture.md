@@ -170,8 +170,24 @@ Not all observations carry equal retrieval weight. The pipeline applies a priori
 At retrieval time (Stage 2 and query layer), the final similarity score for a candidate node is:
 
 ```
-final_score = cosine_similarity × signal_weight_multiplier × recency_weight
+final_score = cosine_similarity × signal_weight_multiplier × recency_weight × trust_weight
 ```
+
+### Trust Weight (Verification Status)
+
+Nodes carry a `verification_status` field that tracks whether AI-assisted insights have been explicitly confirmed by the user. This prevents hallucinated or loosely-adopted AI reframes from dominating retrieval.
+
+| `verification_status` | `trust_weight` | Set When |
+|---|---|---|
+| `IMPLICIT` | 1.0 | Default for `USER_GENERATED` provenance — user articulated this directly |
+| `VERIFIED` | 1.0 | User explicitly confirmed via HITL review, or re-articulated in a later session (EVOLVE from CO_CREATED → USER_GENERATED) |
+| `UNVERIFIED` | 0.5 | Default for `CO_CREATED` provenance — AI generated, user may have agreed but hasn't independently confirmed |
+
+**Promotion rules:** `UNVERIFIED` → `VERIFIED` occurs ONLY through explicit user action:
+1. User confirms accuracy in HITL review queue
+2. User independently re-articulates the concept in a later session, triggering EVOLVE (Rule R3 ownership transfer also sets `verification_status = VERIFIED`)
+
+There is no automatic promotion based on reinforcement count. An unverified insight remains unverified until the user actively confirms it.
 
 ### Recency Weight Decay
 

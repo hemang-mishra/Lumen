@@ -75,6 +75,7 @@ raw_evidence:
   - "everyone else was ready to decide weeks ago"
 signal_strength: HIGH                    # STANDARD | HIGH | CRITICAL
 provenance: USER_GENERATED               # USER_GENERATED | AI_GENERATED | CO_CREATED
+verification_status: IMPLICIT            # IMPLICIT | UNVERIFIED | VERIFIED — gates retrieval trust_weight (see Architecture.md)
 person_refs: []                          # array of PersonEntityNode IDs referenced by this observation
 open_loop_ref: null                      # ID of an OpenLoopNode this observation directly addresses or raises
 extraction_confidence: STANDARD          # STANDARD | RECONSTRUCTIVE
@@ -200,9 +201,10 @@ valid_from: "2025-01-18T10:34:00Z"       # valid_from updates on EVOLVE
 last_reinforced_at: "2025-01-18T10:34:00Z"
 pattern_name: "Deliberate Information Saturation Before Decision"
 pattern_description: "User systematically over-collects information before committing to any significant decision, prioritizing certainty over speed. In v2, pattern extends to interpersonal confrontations, not just strategic decisions."
-domain: COGNITIVE_STYLE                  # COGNITIVE_STYLE | EMOTIONAL | BEHAVIORAL | RELATIONAL | CAREER | HEALTH
+domain: COGNITIVE_STYLE                  # COGNITIVE_STYLE | EMOTIONAL | BEHAVIORAL | RELATIONAL | CAREER | HEALTH | SELF_CONCEPT | FINANCIAL | SPIRITUALITY | RECREATIONAL | ENVIRONMENTAL
 signal_strength: HIGH                    # STANDARD | HIGH | CRITICAL
 provenance: USER_GENERATED
+verification_status: IMPLICIT            # IMPLICIT | UNVERIFIED | VERIFIED — gates retrieval trust_weight (see Architecture.md)
 evidence_count: 7                        # count of ObservationNodes linked via reinforces or same_as edges
 archetype_tags: ["high_conscientiousness", "risk_averse"]
 era_tag: null                            # Optional historical era anchor (e.g. "a major entrance exam_PREP"). Used by Pass B structural retrieval.
@@ -230,6 +232,7 @@ belief_source_summary: "Expressed explicitly in entry e_2025_11_03 and reinforce
 domain: SELF_CONCEPT
 signal_strength: HIGH                    # STANDARD | HIGH | CRITICAL
 provenance: USER_GENERATED
+verification_status: IMPLICIT            # IMPLICIT | UNVERIFIED | VERIFIED — gates retrieval trust_weight (see Architecture.md)
 evidence_count: 5
 era_tag: null                            # Optional historical era anchor for Pass B structural retrieval.
 query_frequency: 0                       # retrieval frequency counter (see PatternNode for semantics)
@@ -358,7 +361,7 @@ confidence_runner_up: 0.83
 runner_up_action: REINFORCE
 delta_description: null                  # required and non-null only for action == EVOLVE
 model_used: gemini-2.0-flash
-routing_tier: STANDARD                   # STANDARD | HIGH_SECURITY
+model_role: LIGHTWEIGHT                  # LIGHTWEIGHT | THINKING | EMBEDDING | TRANSCRIPTION | TTS
 hitl_resolved: false
 hitl_resolution_timestamp: null
 hitl_resolution_user_choice: null        # "ACTION_A" | "ACTION_B" | "CREATE_NEW" | "AUTO_BRANCH_AFTER_SNOOZE"
@@ -375,7 +378,7 @@ rollback_pointer:
 status: ACTIVE                           # ACTIVE | ROLLED_BACK | PENDING_HITL | BELOW_THRESHOLD | SUSPENDED_QUEUE_FULL | EXTRACTION_FAILED
 ```
 
-**`routing_tier`:** Two values only. `STANDARD` = default Gemini Flash / Pro routing. `HIGH_SECURITY` = locally-run model (e.g. Ollama) for observations identified as identity-critical. There is no intermediate tier.
+**`model_role`:** Which model-capability role handled this decision — practically always `LIGHTWEIGHT` (fast, low-risk actions: MERGE, REINFORCE, BRANCH, REGULATE) or `THINKING` (deeper reasoning, high-consequence actions: EVOLVE, CONTRADICT, DIALECTIC). Resolved purely from the operator's provider configuration (`ProviderConfig`, see `docs/hld/LLM_Abstraction_Architecture.md`) — this field carries no information about where the model ran (cloud vs. local). There is no privacy or sensitivity tier: an operator who wants guaranteed-local processing configures every role to a local provider, once, as a deployment choice — the pipeline never inspects content sensitivity to decide routing at runtime.
 
 **`status` lifecycle:**
 - `ACTIVE` — decision executed and live in the graph

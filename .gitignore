@@ -218,3 +218,21 @@ __marimo__/
 .streamlit/secrets.toml
 
 daily context logs/
+
+# --- Lumen Specific ---
+# Graph Database (Kuzu)
+lumen_graph.db/
+temp_test_kuzu
+
+# Vector Database (Qdrant local storage)
+lumen_vectors/
+
+# Operational SQLite (SQLAlchemy)
+operational.db
+
+# OS Files
+.DS_Store
+
+# IDEs
+.vscode/
+.idea/
