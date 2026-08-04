@@ -97,8 +97,12 @@ Two more from `docs/Graph/Schema.md`:
   write and its vector upsert always use the same `node_id`.
 - **Everything gets a `trace_id`** once Goal 3b lands — logs, Pydantic models, graph
   writes, LLM calls.
-- **Modules carry a docstring** naming the spec section they implement
-  (e.g. `See: docs/hld/Technical_HLD.md Section 2.2`). Keep this up.
+- **Comments explain the code, not the spec.** Every module, class, and non-obvious
+  function carries a docstring written in plain language that explains what it does and
+  why, so the code reads on its own. Do **not** cite doc paths or section numbers in
+  docstrings or comments — spec traceability belongs in `implementation/Goal_N_Plan.md`,
+  which is where discrepancies and design rationale get recorded. Existing `See: docs/...`
+  references are legacy; strip them when you touch that code.
 - **Tests mirror modules**: `lumen/tests/test_<module>.py`, grouped into `Test*` classes
   by behavior, using `tmp_path` fixtures for anything on disk.
 - **Log, don't silently degrade.** If a capability is deferred (e.g. sparse BM25 search),
