@@ -193,15 +193,15 @@ class TestRetrievalResultCandidateCap:
     def test_exactly_eight_unique_candidates_accepted(self):
         candidates = [self._candidate(f"n{i}", CandidateRetrievalSource.SEMANTIC) for i in range(8)]
         result = RetrievalResult(
-            observation_id="obs_1", pass_a_candidates=candidates, retrieval_time_ms=10
+            source_node_id="obs_1", pass_a_candidates=candidates, retrieval_time_ms=10
         )
         assert len(result.pass_a_candidates) == 8
 
     def test_nine_unique_candidates_rejected(self):
         candidates = [self._candidate(f"n{i}", CandidateRetrievalSource.SEMANTIC) for i in range(9)]
-        with pytest.raises(ValidationError, match="caps the Pass A"):
+        with pytest.raises(ValidationError, match="capped at 8"):
             RetrievalResult(
-                observation_id="obs_1", pass_a_candidates=candidates, retrieval_time_ms=10
+                source_node_id="obs_1", pass_a_candidates=candidates, retrieval_time_ms=10
             )
 
     def test_duplicate_node_ids_across_passes_deduplicated_before_cap(self):
@@ -211,7 +211,7 @@ class TestRetrievalResultCandidateCap:
             self._candidate(f"n{i}", CandidateRetrievalSource.STRUCTURAL) for i in range(2, 7)
         ]
         result = RetrievalResult(
-            observation_id="obs_1", pass_a_candidates=pass_a, pass_b_candidates=pass_b,
+            source_node_id="obs_1", pass_a_candidates=pass_a, pass_b_candidates=pass_b,
             retrieval_time_ms=10,
         )
         merged_ids = {c.node_id for c in result.pass_a_candidates} | {
@@ -224,14 +224,14 @@ class TestReconciliationResult:
     def test_evolve_without_delta_rejected(self):
         with pytest.raises(ValidationError, match="delta_description"):
             ReconciliationResult(
-                observation_id="obs_1", action=ReconciliationAction.EVOLVE,
+                source_node_id="obs_1", action=ReconciliationAction.EVOLVE,
                 confidence=0.94, decision_model="gemini-2.0-pro",
                 escalated_to_hitl=False, audit_node_id="d_1",
             )
 
     def test_evolve_with_delta_accepted(self):
         result = ReconciliationResult(
-            observation_id="obs_1", action=ReconciliationAction.EVOLVE,
+            source_node_id="obs_1", action=ReconciliationAction.EVOLVE,
             confidence=0.94, delta_description="Belief evolved.",
             decision_model="gemini-2.0-pro", escalated_to_hitl=False,
             audit_node_id="d_1",
@@ -240,7 +240,7 @@ class TestReconciliationResult:
 
     def test_merge_without_delta_is_fine(self):
         result = ReconciliationResult(
-            observation_id="obs_1", action=ReconciliationAction.MERGE,
+            source_node_id="obs_1", action=ReconciliationAction.MERGE,
             confidence=0.91, decision_model="gemini-2.0-flash",
             escalated_to_hitl=False, audit_node_id="d_1",
         )

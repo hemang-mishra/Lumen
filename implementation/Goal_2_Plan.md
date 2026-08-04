@@ -568,6 +568,23 @@ untouched by this goal).**
   to close life-coverage gaps identified in review (C2.2 follow-up); `Schema.md`'s
   PatternNode domain comment updated to match, since this was an intentional spec
   expansion rather than a documented-vs-implemented discrepancy.
+- `source_observation_id` renamed to `source_node_id` on `DecisionAuditNode`,
+  `ReconciliationResult`, and `RetrievalResult` — the old name implied only
+  `ObservationNode` is ever reconciled, but `reinforces`/`branches_to`/`regulates`
+  edges can equally originate from an `EventNode` or `SessionNode` per
+  `EDGE_REGISTRY`. Updated `Schema.md`, `Reconciliation.md`, and `Technical_HLD.md`
+  §5 to match.
+- **`branches_to` extended to support new `BeliefNode` creation, not just
+  `PatternNode`.** `Reconciliation.md`'s own `BRANCH` row always said it could
+  create *"a genuinely new pattern, belief, or domain,"* but `EDGE_REGISTRY` only
+  ever defined `branches_to` targeting `PatternNode` — there was no way to record
+  provenance for a newly-branched belief. Added `branches_to_obs_bel`,
+  `branches_to_evt_bel`, `branches_to_sess_bel` alongside the renamed
+  `branches_to_obs_pat`/`branches_to_evt_pat`/`branches_to_sess_pat` (matching the
+  `reinforces_*_pat`/`reinforces_*_bel` naming convention already used elsewhere).
+  `EDGE_REGISTRY` now has **47 physical edge tables** (up from 44). `Schema.md`'s
+  `branches_to` row and `lumen/schemas/edges.py`'s resolver updated to match;
+  verified with a live Kuzu write through `branches_to_obs_bel`.
 
 ## C4. What's Still Deferred
 

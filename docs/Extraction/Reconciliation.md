@@ -203,7 +203,7 @@ Every Reconciliation action — including AMBIGUOUS resolutions, CONTRADICT crea
   "node_id": "d_2026_06_11_001",
   "created_at": "2025-01-18T10:34:17Z",
   "action": "MERGE",
-  "source_observation_id": "obs_2026_06_11_004",
+  "source_node_id": "obs_2026_06_11_004",
   "target_node_id": "pat_decision_saturation",
   "edge_type_created": "same_as",
   "edge_id": "edge_2026_06_11_009",

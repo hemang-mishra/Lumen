@@ -63,10 +63,13 @@ EDGE_REGISTRY: list[tuple[str, str, str]] = [
     ("PatternNode", "SessionNode", "caused_by_pat_sess"),
     ("BeliefNode", "SessionNode", "caused_by_bel_sess"),
 
-    # branches_to — BRANCH result
-    ("ObservationNode", "PatternNode", "branches_to_obs"),
-    ("EventNode", "PatternNode", "branches_to_evt"),
-    ("SessionNode", "PatternNode", "branches_to_sess"),
+    # branches_to — BRANCH result (new PatternNode or new BeliefNode)
+    ("ObservationNode", "PatternNode", "branches_to_obs_pat"),
+    ("EventNode", "PatternNode", "branches_to_evt_pat"),
+    ("SessionNode", "PatternNode", "branches_to_sess_pat"),
+    ("ObservationNode", "BeliefNode", "branches_to_obs_bel"),
+    ("EventNode", "BeliefNode", "branches_to_evt_bel"),
+    ("SessionNode", "BeliefNode", "branches_to_sess_bel"),
 
     # contradicts — CONTRADICT result
     ("ContradictionNode", "BeliefNode", "contradicts"),
@@ -236,7 +239,7 @@ NODE_TABLES: dict[str, str] = {
     "DecisionAuditNode": (
         "CREATE NODE TABLE DecisionAuditNode ("
         "node_id STRING, created_at STRING, action STRING, "
-        "source_observation_id STRING, target_node_id STRING, "
+        "source_node_id STRING, target_node_id STRING, "
         "edge_type_created STRING, edge_id STRING, confidence DOUBLE, "
         "confidence_runner_up DOUBLE, runner_up_action STRING, "
         "delta_description STRING, model_used STRING, model_role STRING, "

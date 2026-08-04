@@ -36,9 +36,16 @@ This document outlines the systematic, stage-by-stage implementation plan for th
     `HIGH_SECURITY` cascading-routing feature entirely (was a stated privacy guarantee;
     now privacy is a pure operator/deployment configuration choice, not a runtime
     content-routing decision).
+  - Renamed `source_observation_id` → `source_node_id` on `DecisionAuditNode`,
+    `ReconciliationResult`, and `RetrievalResult` — reconciliation can be triggered
+    by an `EventNode`/`SessionNode`, not only an `ObservationNode`. Extended
+    `branches_to` to support new `BeliefNode` creation (`branches_to_*_bel`), not
+    just `PatternNode` — `Reconciliation.md` always said BRANCH could create "a
+    genuinely new pattern, belief, or domain" but the edge schema never backed the
+    belief case. `EDGE_REGISTRY` now has 47 physical edge tables (was 44, originally
+    documented as 43).
   - *Result:* 222 tests passing (38 Goal 1 + 184 new), 100% coverage on `lumen/schemas/`
-    and `lumen/config.py`. Found and flagged: `EDGE_REGISTRY` has 44 physical edge
-    tables, not 43 as previously documented; Kuzu's edge DDL has no columns for
+    and `lumen/config.py`. Found and flagged: Kuzu's edge DDL has no columns for
     `dialectic`/`regulates` edges' required `tension_summary`/`regulation_summary`
     fields (blocks Goal 9 until resolved).
   - *Plan:* [`implementation/Goal_2_Plan.md`](file:///Users/hemangmishra/Projects/Lumen/implementation/Goal_2_Plan.md)

@@ -244,7 +244,7 @@ def sample_decision_audit() -> DecisionAuditNode:
         node_id="d_2026_06_11_001",
         created_at=NOW,
         action=ReconciliationAction.MERGE,
-        source_observation_id="obs_2026_06_11_004",
+        source_node_id="obs_2026_06_11_004",
         target_node_id="pat_decision_saturation",
         edge_type_created="same_as",
         edge_id="edge_2026_06_11_009",

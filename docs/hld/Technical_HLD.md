@@ -333,13 +333,13 @@ class ExtractionResult(BaseModel):
     retry_count: int
 
 class RetrievalResult(BaseModel):
-    observation_id: str
+    source_node_id: str  # ObservationNode | EventNode | SessionNode
     pass_a_candidates: list[CandidateNode]  # semantic
     pass_b_candidates: list[CandidateNode]  # structural
     retrieval_time_ms: int
 
 class ReconciliationResult(BaseModel):
-    observation_id: str
+    source_node_id: str  # ObservationNode | EventNode | SessionNode
     action: ReconciliationAction
     target_node_id: str | None
     confidence: float

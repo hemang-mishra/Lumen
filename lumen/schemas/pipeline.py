@@ -46,10 +46,15 @@ from lumen.schemas.nodes import (
 
 class PipelineDTO(BaseModel):
     """
-    Base for the top-level stage contracts. trace_id carries the per-session
-    UUID from Technical_HLD.md Section 10 through every stage — populated by
-    Goal 3b; left optional here so this goal's DTOs are constructible without
-    that infrastructure existing yet.
+    Base class shared by every top-level pipeline stage input/output. Stage
+    DTOs are the fixed contracts passed between pipeline stages — each stage
+    takes one of these in and hands another one back out.
+
+    Attributes:
+        trace_id: Optional identifier used to correlate all the data
+            produced for a single session as it moves through the
+            pipeline. Left optional since trace_id generation isn't wired
+            up everywhere yet.
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -64,10 +69,23 @@ class PipelineDTO(BaseModel):
 
 class BufferMessage(BaseModel):
     """
-    One message in the Session Buffer. Referenced as SessionDecayEvent's
-    raw_buffer in Technical_HLD.md Section 5 but not itself defined there;
-    reconstructed from Preprocessing.md's Dialogue Act Classification and
-    CO_CREATED Marker Detection description.
+    A single message stored in a user's session buffer, waiting to be
+    grouped together and processed once the session goes idle.
+
+    Attributes:
+        message_id: Unique identifier for this message.
+        role: Who sent the message — "USER" or "AI".
+        content: The raw text of the message.
+        timestamp: The exact time the message was sent.
+        event_date: The calendar date this message logically belongs to,
+            which may differ from the timestamp's date for late-night
+            entries.
+        dialogue_act: Optional classification of the message's intent —
+            e.g. distinguishing a factual question from an emotionally
+            expressive reflection.
+        co_created_marker: True if this message shows the user explicitly
+            agreeing with or adopting something the AI said just before
+            it.
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -82,7 +100,18 @@ class BufferMessage(BaseModel):
 
 
 class ResolvedEntity(BaseModel):
-    """One resolved coreference. See Preprocessing.md §4 Coreference Pre-Pass."""
+    """
+    A single pronoun or alias that was successfully matched to a specific
+    named person within a journal entry.
+
+    Attributes:
+        span: The exact text span that was resolved, e.g. "he" or
+            "my mentor".
+        resolved_to: The canonical name of the person this span refers to.
+        confidence: How confident the resolution is, from 0.0 to 1.0.
+        resolution_basis: A short explanation of why this resolution was
+            made, e.g. "most recent named person mentioned".
+    """
 
     model_config = ConfigDict(extra="forbid")
 
@@ -93,7 +122,16 @@ class ResolvedEntity(BaseModel):
 
 
 class AmbiguousRef(BaseModel):
-    """An unresolved coreference span. See Preprocessing.md §4."""
+    """
+    A pronoun or alias that could not be confidently matched to a single
+    person, because more than one plausible match exists in the entry.
+
+    Attributes:
+        span: The exact text span that could not be resolved, e.g. "she".
+        candidates: The people this span might refer to (at least two,
+            since a single candidate would just be resolved instead).
+        reason: A short explanation of why the reference is ambiguous.
+    """
 
     model_config = ConfigDict(extra="forbid")
 
@@ -104,8 +142,16 @@ class AmbiguousRef(BaseModel):
 
 class CoreferenceMap(BaseModel):
     """
-    The coreference_map JSON object from Preprocessing.md §4 — produced once
-    in Stage 0, consumed directly by Stage 1 (no re-derivation).
+    The full set of pronoun/alias resolutions produced for one journal
+    entry, combining everything that was successfully resolved with
+    everything left ambiguous.
+
+    Attributes:
+        entry_id: The journal entry this coreference map was built for.
+        resolved_entities: All pronouns/aliases confidently matched to a
+            named person.
+        ambiguous_refs: All pronouns/aliases that could not be confidently
+            resolved.
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -117,10 +163,29 @@ class CoreferenceMap(BaseModel):
 
 class PreprocessedEpisode(BaseModel):
     """
-    One conceptual episode after Stage 0 cleaning, ready for Stage 1
-    Microextraction. Reconstructed from Preprocessing.md's completeness
-    scoring and quality-gate routing, and Schema.md's EpisodeNode fields
-    that Stage 0 is responsible for producing.
+    One self-contained topical segment of a journal entry, cleaned up and
+    ready to be analyzed. A single entry can be split into multiple
+    episodes if it covers more than one distinct topic.
+
+    Attributes:
+        episode_index: This episode's position within its entry
+            (1-indexed).
+        total_episodes_in_entry: How many episodes the entry was split
+            into in total. episode_index can never exceed this value.
+        cleaned_text: The episode's text after cleanup — filler words
+            removed, self-corrections resolved, translated to English if
+            needed.
+        entry_class: Whether this episode is a full "REFLECTION" worth
+            deep analysis, or a lighter "RAW_CAPTURE".
+        coherence_score: How clear and complete the reflection is, from
+            0.0 (incoherent) to 1.0 (a fully formed thought).
+        historical_era: Optional label for a specific past period of the
+            user's life this episode is anchored to, if one was
+            mentioned.
+        overarching_themes: High-level topic tags describing what this
+            episode is about.
+        raw_text_hash: A hash of the cleaned text, used to detect
+            duplicates.
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -146,11 +211,28 @@ class PreprocessedEpisode(BaseModel):
 
 class CandidateNode(BaseModel):
     """
-    One retrieval candidate surfaced by Stage 2. Referenced as
-    RetrievalResult's pass_a_candidates/pass_b_candidates in
-    Technical_HLD.md Section 5 but not itself defined there; reconstructed
-    from Architecture.md's Stage 2 description (semantic vs. structural
-    retrieval, structural anchors).
+    One existing graph node retrieved as a possible match for something
+    newly extracted from a journal entry, before a final decision is made
+    about how the two relate.
+
+    Attributes:
+        node_id: The identifier of the candidate node in the graph.
+        node_type: The type of node this is, e.g. "PatternNode" or
+            "BeliefNode".
+        content_preview: A short preview of the candidate's content,
+            useful for display or debugging.
+        similarity_score: How semantically similar the candidate is to
+            the new content, from 0.0 to 1.0. Only set for candidates
+            found via semantic search — candidates found by direct
+            structural lookup (e.g. matching a named person) leave this
+            unset.
+        retrieval_source: How this candidate was found — "SEMANTIC"
+            (found by meaning) or "STRUCTURAL" (found via a direct link,
+            such as a shared person or historical era).
+        structural_anchor_type: If found structurally, what kind of
+            anchor led to it, e.g. a named person or a historical era.
+        structural_anchor_value: If found structurally, the specific
+            value of that anchor, e.g. the person's name.
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -165,7 +247,7 @@ class CandidateNode(BaseModel):
 
     @model_validator(mode="after")
     def _validate_similarity_score_presence(self) -> "CandidateNode":
-        """Semantic candidates carry a similarity score; structural ones don't (Architecture.md)."""
+        """Semantic candidates must carry a similarity score; structural candidates don't have one."""
         if self.retrieval_source == CandidateRetrievalSource.SEMANTIC and self.similarity_score is None:
             raise ValueError("SEMANTIC candidates require a similarity_score")
         return self
@@ -177,7 +259,18 @@ class CandidateNode(BaseModel):
 
 
 class SessionDecayEvent(PipelineDTO):
-    """Fires when a session decays (1hr inactivity) and enters the pipeline."""
+    """
+    Signals that a user's session has gone idle for long enough that its
+    buffered messages should now be processed as a complete unit.
+
+    Attributes:
+        session_id: Identifier for the session that decayed.
+        user_id: Identifier for the user this session belongs to.
+        event_date: The calendar date this session's content belongs to.
+        message_count: How many messages were buffered in this session.
+        raw_buffer: The actual buffered messages to be processed.
+        triggered_at: The exact time this decay event fired.
+    """
 
     session_id: str = Field(min_length=1)
     user_id: str = Field(min_length=1)
@@ -188,7 +281,26 @@ class SessionDecayEvent(PipelineDTO):
 
 
 class PreprocessingResult(PipelineDTO):
-    """Output of Stage 0. See Preprocessing.md."""
+    """
+    The result of cleaning up and segmenting one session's worth of raw
+    input before it goes on to deeper analysis.
+
+    Attributes:
+        session_id: The session this result was produced from.
+        episodes: The cleaned, topic-segmented pieces the session was
+            split into.
+        coreference_map: The pronoun/alias resolutions found across the
+            session, shared by all of its episodes.
+        quality_gate_decision: The overall routing decision for this
+            session — whether it's substantial enough for full analysis
+            ("REFLECTION"), only worth a light pass ("RAW_CAPTURE"), or
+            not usable at all ("DISCARD").
+        processing_time_ms: How long this preprocessing step took, in
+            milliseconds.
+        pending_reflections: Follow-up questions generated for the user
+            when the input was too thin for full analysis, inviting them
+            to expand on it later.
+    """
 
     session_id: str = Field(min_length=1)
     episodes: list[PreprocessedEpisode] = Field(default_factory=list)
@@ -200,11 +312,27 @@ class PreprocessingResult(PipelineDTO):
 
 class ExtractionResult(PipelineDTO):
     """
-    Output of Stage 1. Extended beyond Technical_HLD.md's `observations`-only
-    sketch with events/sessions/causal_chains/causal_steps, since
-    Microextraction.md's schema also produces EventNode, SessionNode, and
-    CausalChainNode/CausalStepNode instances per episode, not just
-    observations.
+    Everything extracted from a single episode: the standalone
+    observations made, any concrete events or sessions identified, and any
+    cause-and-effect chains traced through them.
+
+    Attributes:
+        episode_id: The episode this result was extracted from.
+        observations: Standalone observations pulled from the episode,
+            such as emotions, beliefs, or patterns noticed.
+        events: Concrete real-world events identified in the episode.
+        sessions: Reflective or conversational sessions identified in the
+            episode, as opposed to a physical event.
+        causal_chains: Cause-and-effect sequences traced across the
+            episode's observations and events.
+        causal_steps: The individual steps making up each causal chain
+            above.
+        extraction_model: The name of the model used to perform the
+            extraction.
+        validation_passed: Whether the extracted data passed schema
+            validation.
+        retry_count: How many times extraction had to be retried before
+            it validated successfully.
     """
 
     episode_id: str = Field(min_length=1)
@@ -220,34 +348,69 @@ class ExtractionResult(PipelineDTO):
 
 class RetrievalResult(PipelineDTO):
     """
-    Output of Stage 2. See Architecture.md Stage 2 merge rule: the combined
-    Pass A + Pass B candidate set is capped at 8 nodes after deduplication
-    by node_id.
+    The candidate matches found for a single piece of extracted content
+    (an observation, event, or session), gathered from two independent
+    search passes so they can be compared before a final decision is made.
+    Together the two passes may surface at most 8 unique candidates.
+
+    Attributes:
+        source_node_id: The observation, event, or session these
+            candidates were retrieved for.
+        pass_a_candidates: Candidates found via semantic (meaning-based)
+            search.
+        pass_b_candidates: Candidates found via structural (direct-link)
+            search, e.g. by shared named person or historical era.
+        retrieval_time_ms: How long retrieval took, in milliseconds.
     """
 
-    observation_id: str = Field(min_length=1)
+    source_node_id: str = Field(min_length=1)
     pass_a_candidates: list[CandidateNode] = Field(default_factory=list)
     pass_b_candidates: list[CandidateNode] = Field(default_factory=list)
     retrieval_time_ms: int = Field(ge=0)
 
     @model_validator(mode="after")
     def _validate_candidate_cap(self) -> "RetrievalResult":
-        """Architecture.md merge rule: max 8 deduplicated candidates."""
+        """Caps the combined, deduplicated candidate set at 8 unique nodes."""
         merged_ids = {c.node_id for c in self.pass_a_candidates} | {
             c.node_id for c in self.pass_b_candidates
         }
         if len(merged_ids) > 8:
             raise ValueError(
                 f"merged candidate set has {len(merged_ids)} unique nodes; "
-                "Architecture.md caps the Pass A + Pass B merge at 8"
+                "the Pass A + Pass B merge is capped at 8"
             )
         return self
 
 
 class ReconciliationResult(PipelineDTO):
-    """Output of Stage 3. See Reconciliation.md."""
+    """
+    The final decision made about how a newly extracted observation,
+    event, or session relates to the rest of the graph — whether it
+    confirms something existing, represents a change, conflicts with it,
+    or stands on its own as something new.
 
-    observation_id: str = Field(min_length=1)
+    Attributes:
+        source_node_id: The observation, event, or session this decision
+            was made about.
+        action: The action taken — e.g. merging into an existing node,
+            reinforcing it, evolving it into a new version, branching off
+            as something new, or flagging a conflict.
+        target_node_id: The existing node this decision relates to, if
+            any.
+        confidence: How confident the model was in this decision, from
+            0.0 to 1.0.
+        delta_description: A description of what changed. Required
+            whenever the action evolves an existing node into a new
+            version.
+        decision_model: The name of the model that made this decision.
+        escalated_to_hitl: Whether this decision was too uncertain to
+            make automatically and was sent to the user for manual review
+            instead.
+        audit_node_id: The identifier of the audit record created for
+            this decision, so it can be traced or reversed later.
+    """
+
+    source_node_id: str = Field(min_length=1)
     action: ReconciliationAction
     target_node_id: str | None = None
     confidence: float = Field(ge=0.0, le=1.0)
@@ -258,7 +421,7 @@ class ReconciliationResult(PipelineDTO):
 
     @model_validator(mode="after")
     def _validate_evolve_requires_delta(self) -> "ReconciliationResult":
-        """Same rule as DecisionAuditNode: EVOLVE requires delta_description."""
+        """Requires a delta_description whenever the action is EVOLVE."""
         if self.action == ReconciliationAction.EVOLVE and not self.delta_description:
             raise ValueError("action EVOLVE requires a non-null delta_description")
         return self
