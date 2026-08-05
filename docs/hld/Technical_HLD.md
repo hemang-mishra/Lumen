@@ -278,13 +278,28 @@ Lumen uses **three separate data stores**, each optimized for its access pattern
 
 ┌─────────────────────────────────────────────────────────┐
 │               OPERATIONAL DB (SQLite/PostgreSQL)        │
-│  session_buffer: raw messages pending extraction        │
-│  pipeline_jobs: task state, retries, errors             │
-│  hitl_queue: AMBIGUOUS decisions pending human review   │
-│  user_settings: provider config, sensitivity prefs      │
-│  api_keys: encrypted provider credentials               │
+│  session_buffers + buffer_messages: pending extraction  │
+│  pipeline_jobs: run state, retries, errors              │
+│  pipeline_stage_runs: per-stage metrics, input/output   │
+│  pipeline_write_log: trace → graph/vector write mapping │
+│  hitl_queue: decisions pending human review             │
+│  user_settings: key/value config overrides              │
+│  data_erasure_audit: erasure records (no user content)  │
+│  api_keys: encrypted provider credentials  [Goal 4]     │
 │  Access pattern: standard CRUD, status polling          │
 └─────────────────────────────────────────────────────────┘
+
+Notes on the table set (resolved in Goal 3):
+- `session_buffer` is two tables — the buffer (keyed `user_id` + `event_date` +
+  `session_label`) and its ordered messages.
+- `pipeline_jobs` is three tables. `pipeline_stage_runs` stores per-attempt timing,
+  model, validation outcome, and the input/output payloads that make
+  `rerun_from_stage` possible; `pipeline_write_log` is the trace→graph mapping
+  described in Section 10.
+- `user_settings` holds generic `(user_id, key, value_json)` overrides, resolved as
+  **DB override > env var > code default**. It does *not* hold "sensitivity prefs" —
+  the sensitivity/routing-tier concept was removed in Goal 2 (see Section 2.7).
+- `api_keys` is deferred to Goal 4, where provider credentials first have a consumer.
 ```
 
 ### 4.2 Node ID as the Universal Key
@@ -333,13 +348,13 @@ class ExtractionResult(BaseModel):
     retry_count: int
 
 class RetrievalResult(BaseModel):
-    observation_id: str
+    source_node_id: str  # ObservationNode | EventNode | SessionNode
     pass_a_candidates: list[CandidateNode]  # semantic
     pass_b_candidates: list[CandidateNode]  # structural
     retrieval_time_ms: int
 
 class ReconciliationResult(BaseModel):
-    observation_id: str
+    source_node_id: str  # ObservationNode | EventNode | SessionNode
     action: ReconciliationAction
     target_node_id: str | None
     confidence: float
@@ -516,10 +531,17 @@ At no phase does this require rewriting business logic. The pipeline stages, Pyd
 
 Every session that enters the pipeline gets a `trace_id` (UUID). This trace_id is attached to:
 - Every log line at every stage
-- Every Pydantic model flowing through the pipeline
-- Every graph node and edge written as a result
-- Every Qdrant write
+- Every Pydantic model flowing through the pipeline (`PipelineDTO.trace_id`)
+- Every operational-DB row the run produces (`pipeline_jobs`, `pipeline_stage_runs`, `pipeline_write_log`, `hitl_queue`)
 - Every LLM call (as a metadata header)
+
+**Graph and vector writes are traced by reference, not by column.** Node and edge
+tables carry no `trace_id` column — the graph schema is purely semantic. Instead the
+`pipeline_write_log` table records every `node_id` and every `(edge_type, from_id, to_id)`
+a run wrote, keyed by `trace_id`. This gives both directions of the lookup:
+`get_trace(trace_id)` returns everything a run produced, and `find_job_for_node(node_id)`
+returns the run that created any given node. Storing the id on all 15 node and 44 edge
+tables was rejected in Goal 3 as schema churn with no added capability.
 
 Given any bug report, the trace_id lets you reconstruct the complete data flow: raw buffer → preprocessing result → extraction result → retrieval candidates → reconciliation decision → graph write. Every step, with timing and model output.
 

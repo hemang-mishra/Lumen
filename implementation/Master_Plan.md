@@ -36,24 +36,47 @@ This document outlines the systematic, stage-by-stage implementation plan for th
     `HIGH_SECURITY` cascading-routing feature entirely (was a stated privacy guarantee;
     now privacy is a pure operator/deployment configuration choice, not a runtime
     content-routing decision).
+  - Renamed `source_observation_id` → `source_node_id` on `DecisionAuditNode`,
+    `ReconciliationResult`, and `RetrievalResult` — reconciliation can be triggered
+    by an `EventNode`/`SessionNode`, not only an `ObservationNode`. Extended
+    `branches_to` to support new `BeliefNode` creation (`branches_to_*_bel`), not
+    just `PatternNode` — `Reconciliation.md` always said BRANCH could create "a
+    genuinely new pattern, belief, or domain" but the edge schema never backed the
+    belief case. `EDGE_REGISTRY` now has 47 physical edge tables (was 44, originally
+    documented as 43).
   - *Result:* 222 tests passing (38 Goal 1 + 184 new), 100% coverage on `lumen/schemas/`
-    and `lumen/config.py`. Found and flagged: `EDGE_REGISTRY` has 44 physical edge
-    tables, not 43 as previously documented; Kuzu's edge DDL has no columns for
+    and `lumen/config.py`. Found and flagged: Kuzu's edge DDL has no columns for
     `dialectic`/`regulates` edges' required `tension_summary`/`regulation_summary`
     fields (blocks Goal 9 until resolved).
   - *Plan:* [`implementation/Goal_2_Plan.md`](file:///Users/hemangmishra/Projects/Lumen/implementation/Goal_2_Plan.md)
 
-- [ ] **Goal 3: Operational DB Setup (SQLite + SQLAlchemy)**
-  - Initialize SQLite via SQLAlchemy ORM in `lumen/operational/`.
-  - Tables: `session_buffer`, `pipeline_jobs`, `hitl_queue`, `user_settings`, `data_erasure_audit`.
-  - Add Alembic for schema migrations.
-  - *Test:* Write/read session buffer records, verify pipeline job state transitions.
+- [x] **Goal 3: Operational DB Setup (SQLite + SQLAlchemy)** ✅
+  - Implemented `lumen/operational/{enums,models,engine,schemas,repositories,sqlalchemy_impl,migrator}.py`
+    — 8 tables, 5 repository Protocols, one SQLAlchemy implementation, Alembic migrations.
+  - `session_buffer` became two tables (buffer + ordered messages); `pipeline_jobs` became
+    three (`pipeline_jobs`, `pipeline_stage_runs`, `pipeline_write_log`) so per-stage metrics,
+    stage replay, and the trace→graph mapping each get the shape they need.
+  - Repositories accept and return Pydantic records; no ORM object leaves the package.
+    A unit-of-work session manager lets several repositories share one transaction.
+  - Alembic is the sole schema path — tests run `upgrade head`, and a drift test
+    (`compare_metadata`) fails if `models.py` and the migration disagree.
+  - `api_keys` deferred to Goal 4; HITL cap/snooze/auto-resolve deferred to Goal 18;
+    erasure anonymization pass deferred to Goal 19.
+  - *Result:* 435 tests passing (222 from Goals 1–2 + 213 new), 100% coverage on
+    `lumen/operational/` and `lumen/observability/`.
+  - *Plan:* [`implementation/Goal_3_Plan.md`](file:///Users/hemangmishra/Projects/Lumen/implementation/Goal_3_Plan.md)
 
-- [ ] **Goal 3b: Structured Logging & Trace ID Infrastructure**
-  - Implement `trace_id` generation (UUID per session entering pipeline) as described in HLD Section 10.
-  - Configure structured JSON logging to file.
-  - Attach `trace_id` to every log line, Pydantic model, and DB write.
-  - *Test:* Verify trace_id propagation across a mock pipeline run.
+- [x] **Goal 3b: Structured Logging & Trace ID Infrastructure** ✅
+  - Implemented `lumen/observability/{trace,logging}.py` — `ContextVar`-based trace ids,
+    `bind_trace()` / `span()`, a JSON log formatter, and a handler-level trace filter.
+  - Because the filter sits on the handler rather than on individual loggers, Goal 1's
+    existing `kuzu_impl`/`qdrant_impl` log calls emit traced JSON with no code change.
+  - `PipelineDTO.trace_id` now defaults from the run context, so stages never pass it by hand.
+  - **Decided:** `trace_id` is *not* stored on graph nodes/edges. `pipeline_write_log` records
+    what each run wrote, giving both `trace → nodes` and `node → trace`. `Technical_HLD.md`
+    §10 and §4.1 updated to match (they previously specified a column that no table had).
+  - *Test:* Mock 3-stage run asserts one id reaches logs, DTOs, and DB rows; two concurrent
+    runs on separate threads are proven not to leak into each other.
 
 - [ ] **Goal 4: LLM Provider Abstraction Layer**
   - Implement `lumen/providers/llm_provider.py` (Protocol), `lumen/providers/gemini.py`, `lumen/providers/ollama.py`.
@@ -154,7 +177,7 @@ This document outlines the systematic, stage-by-stage implementation plan for th
 
 - [ ] **Goal 18: HITL Queue System**
   - Implement `lumen/api/routes/hitl.py` — card-based review UI endpoints.
-  - 20-item queue cap, 7-day auto-resolve, snooze support.
+  - Configurable queue cap (default 40), 7-day auto-resolve, snooze support.
   - *Test:* Force AMBIGUOUS reconciliation, verify queue entry, resolve manually, verify graph update.
 
 - [ ] **Goal 19: Temporal Decay & Maintenance Jobs**

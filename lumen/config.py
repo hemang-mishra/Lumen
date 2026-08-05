@@ -32,6 +32,49 @@ class VectorConfig:
 
 
 @dataclass(frozen=True)
+class OperationalConfig:
+    """
+    Configuration for the operational database — the store that holds session
+    buffers, pipeline job state, the review queue, and settings.
+
+    Swapping SQLite for PostgreSQL is a change to db_url and nothing else.
+
+    Environment variables:
+      LUMEN_OPS_DB_URL           — SQLAlchemy connection URL
+      LUMEN_OPS_DB_ECHO          — "true" to log every SQL statement
+      LUMEN_SESSION_DECAY_MINUTES — idle minutes before a session is processed
+      LUMEN_HITL_QUEUE_CAP       — maximum items allowed in the review queue
+    """
+
+    db_url: str = os.environ.get("LUMEN_OPS_DB_URL", "sqlite:///./lumen_ops.db")
+    echo_sql: bool = os.environ.get("LUMEN_OPS_DB_ECHO", "").lower() == "true"
+    session_decay_minutes: int = int(os.environ.get("LUMEN_SESSION_DECAY_MINUTES", "120"))
+    hitl_queue_cap: int = int(os.environ.get("LUMEN_HITL_QUEUE_CAP", "40"))
+
+
+@dataclass(frozen=True)
+class ObservabilityConfig:
+    """
+    Configuration for logging.
+
+    Logs are written as one JSON object per line, which makes them easy to
+    grep, parse, and filter by trace id.
+
+    Environment variables:
+      LUMEN_LOG_LEVEL   — DEBUG / INFO / WARNING / ERROR
+      LUMEN_LOG_FILE    — where the JSON log file is written
+      LUMEN_LOG_CONSOLE — "false" to silence console output
+    """
+
+    log_level: str = os.environ.get("LUMEN_LOG_LEVEL", "INFO")
+    log_file: str = os.environ.get("LUMEN_LOG_FILE", "./logs/lumen.jsonl")
+    log_to_console: bool = os.environ.get("LUMEN_LOG_CONSOLE", "true").lower() != "false"
+    console_json: bool = False
+    max_bytes: int = 10 * 1024 * 1024
+    backup_count: int = 5
+
+
+@dataclass(frozen=True)
 class ProviderConfig:
     """
     Single point of configuration for every AI provider role in Lumen.
@@ -90,8 +133,14 @@ class AppConfig:
     Environment variables override defaults:
       LUMEN_GRAPH_DB_PATH   — path for Kuzu database
       LUMEN_VECTOR_LOCATION — ":memory:" or path for Qdrant
-      See ProviderConfig for the full set of AI-provider env vars.
+      LUMEN_USER_ID         — identifier for the single local user
+      See ProviderConfig, OperationalConfig and ObservabilityConfig for the rest.
     """
     graph: GraphConfig = field(default_factory=GraphConfig)
     vector: VectorConfig = field(default_factory=VectorConfig)
     providers: ProviderConfig = field(default_factory=ProviderConfig)
+    operational: OperationalConfig = field(default_factory=OperationalConfig)
+    observability: ObservabilityConfig = field(default_factory=ObservabilityConfig)
+
+    # The personal build has one user. Multi-user deployments set this per request.
+    user_id: str = os.environ.get("LUMEN_USER_ID", "local")

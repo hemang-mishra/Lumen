@@ -58,6 +58,6 @@ Lumen is currently an architecture-stage project. This roadmap defines the build
 | LLM inconsistency in enum type assignment | High | Validation layer + re-extraction with correction prompt |
 | Write race conditions in async BRANCH | High | Write-serialization queue + daily dedup pass |
 | Vocabulary drift over years | Medium | Quarterly re-embedding with atomic migration |
-| HITL queue abandonment | Medium | Hard cap of 20 items + suspension instead of auto-BRANCH |
+| HITL queue abandonment | Medium | Hard cap of 40 items + suspension instead of auto-BRANCH |
 | Cross-version embedding incompatibility | High | Freeze active_version during migration |
 | CRITICAL content in output layer | High | Output scrubbing pass on all generated responses |

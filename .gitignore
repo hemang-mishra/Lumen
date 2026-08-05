@@ -229,6 +229,12 @@ lumen_vectors/
 
 # Operational SQLite (SQLAlchemy)
 operational.db
+lumen_ops.db
+lumen_ops.db-wal
+lumen_ops.db-shm
+
+# Structured JSON logs
+logs/
 
 # OS Files
 .DS_Store

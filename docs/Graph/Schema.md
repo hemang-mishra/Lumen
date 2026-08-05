@@ -352,7 +352,7 @@ node_type: DecisionAuditNode
 node_id: d_2026_06_11_001
 created_at: "2025-01-18T10:34:17Z"
 action: MERGE                            # MERGE | REINFORCE | EVOLVE | BRANCH | CONTRADICT | DIALECTIC | REGULATE | AMBIGUOUS
-source_observation_id: obs_2026_06_11_004
+source_node_id: obs_2026_06_11_004       # ObservationNode | EventNode | SessionNode — the extracted node this decision concerns
 target_node_id: pat_decision_saturation
 edge_type_created: same_as
 edge_id: edge_2026_06_11_009
@@ -385,7 +385,7 @@ status: ACTIVE                           # ACTIVE | ROLLED_BACK | PENDING_HITL |
 - `ROLLED_BACK` — edge invalidated; affected nodes re-queued
 - `PENDING_HITL` — awaiting user resolution (AMBIGUOUS tie detected)
 - `BELOW_THRESHOLD` — model confidence fell below action threshold; in HITL queue
-- `SUSPENDED_QUEUE_FULL` — HITL queue at 20-item cap; item waiting to enter
+- `SUSPENDED_QUEUE_FULL` — HITL queue at its item cap; item waiting to enter
 - `EXTRACTION_FAILED` — observation failed validation 3 times; graph write skipped
 
 ---
@@ -468,7 +468,7 @@ last_referenced_at: "2026-06-01T06:00:00Z"
 | `reinforces` | `ObservationNode` / `EventNode` | `PatternNode` / `BeliefNode` | Yes (via audit) | REINFORCE result. Adds evidential weight to existing node. |
 | `evolved_from` | `PatternNode` v2 / `BeliefNode` v2 | `PatternNode` v1 / `BeliefNode` v1 | No (append-only) | EVOLVE result. The prior version is immutably preserved. The new version points backward. |
 | `caused_by` | `PatternNode` / `BeliefNode` (new version) | `EventNode` / `SessionNode` | Yes (via audit) | Causal anchor for EVOLVE or BRANCH in the bipartite graph. |
-| `branches_to` | `ObservationNode` / `EventNode` / `SessionNode` | `PatternNode` (new) | Yes (via audit) | BRANCH result. Documents provenance of the new independent node. |
+| `branches_to` | `ObservationNode` / `EventNode` / `SessionNode` | `PatternNode` (new) / `BeliefNode` (new) | Yes (via audit) | BRANCH result. Documents provenance of the new independent node — a genuinely novel pattern or belief with no link to any existing candidate. |
 | `contradicts` | `ContradictionNode` | `BeliefNode` (both sides) | Yes (via audit) | CONTRADICT result. Two edges per ContradictionNode — one to each belief. |
 | `dialectic` | `BeliefNode` / `PatternNode` | `BeliefNode` / `PatternNode` | Yes (via audit) | DIALECTIC result. Links two simultaneously true but conflicting nodes. |
 | `regulates` | `SessionNode` / `ObservationNode` | `PatternNode` | Yes (via audit) | REGULATE result. Marks when a user actively catches and interrupts a negative pattern. Bypasses EVOLVE confidence threshold. |
@@ -625,7 +625,7 @@ def recency_weight(last_reinforced_at: datetime, now: datetime) -> float:
 - node_type: DecisionAuditNode
   node_id: d_2026_06_11_007
   action: EVOLVE
-  source_observation_id: obs_2026_06_11_009
+  source_node_id: obs_2026_06_11_009
   target_node_id: bel_solitude_decision_v1
   edge_type_created: evolved_from
   confidence: 0.94

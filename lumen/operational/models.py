@@ -1,0 +1,388 @@
+"""
+Database tables for the operational store.
+
+These are SQLAlchemy models, which means the same definitions work on SQLite
+today and PostgreSQL later — only the connection URL changes.
+
+Two conventions hold throughout:
+
+  * Times are stored as timezone-aware UTC. SQLite does not remember time
+    zones on its own, so utcnow() is used everywhere and values are made
+    aware again on the way out.
+  * Enums are stored as their string values rather than as database enum
+    types. Adding a new value then costs nothing on SQLite, which has no way
+    to alter an enum in place.
+"""
+
+from __future__ import annotations
+
+from datetime import UTC, date, datetime
+
+from sqlalchemy import (
+    JSON,
+    Boolean,
+    Date,
+    DateTime,
+    Float,
+    ForeignKey,
+    Index,
+    Integer,
+    String,
+    Text,
+    UniqueConstraint,
+)
+from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
+
+from lumen.operational.enums import (
+    BufferSource,
+    BufferStatus,
+    ErasureStatus,
+    HitlItemStatus,
+    JobStatus,
+    StageStatus,
+)
+
+
+def utcnow() -> datetime:
+    """Current time, always timezone-aware and in UTC."""
+    return datetime.now(UTC)
+
+
+class Base(DeclarativeBase):
+    """Shared base for every operational table."""
+
+
+class SessionBuffer(Base):
+    """
+    A conversation being collected, waiting to be processed.
+
+    Buffers are identified by user, calendar date, and label. A single day can
+    hold several separate conversations, and they stay separate on purpose —
+    the user split them by topic, so merging them would destroy that intent.
+
+    A buffer sits OPEN while messages arrive. Once it has been quiet long
+    enough it becomes eligible for processing, which is what find_decayed
+    looks for.
+    """
+
+    __tablename__ = "session_buffers"
+
+    session_id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    user_id: Mapped[str] = mapped_column(String(128), nullable=False, index=True)
+    event_date: Mapped[date] = mapped_column(Date, nullable=False)
+    session_label: Mapped[str] = mapped_column(String(64), nullable=False, default="")
+
+    status: Mapped[str] = mapped_column(
+        String(32), nullable=False, default=BufferStatus.OPEN.value
+    )
+    source: Mapped[str] = mapped_column(
+        String(32), nullable=False, default=BufferSource.NATIVE_CHAT.value
+    )
+
+    message_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    last_activity_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, nullable=False
+    )
+    decayed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    ingested_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+    messages: Mapped[list["BufferMessage"]] = relationship(
+        back_populates="buffer",
+        cascade="all, delete-orphan",
+        order_by="BufferMessage.seq",
+    )
+
+    __table_args__ = (
+        # One buffer per conversation. Two messages arriving at once for the
+        # same day and label must land in the same buffer, not create two.
+        UniqueConstraint(
+            "user_id", "event_date", "session_label", name="uq_buffer_user_date_label"
+        ),
+        # Supports the decay scan, which filters on status and idle time.
+        Index("ix_buffer_status_activity", "status", "last_activity_at"),
+    )
+
+
+class BufferMessage(Base):
+    """
+    One message inside a buffer.
+
+    Ordering comes from the seq column rather than the timestamp. Imported
+    conversations sometimes carry identical or missing timestamps, and message
+    order still has to survive that.
+    """
+
+    __tablename__ = "buffer_messages"
+
+    message_id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    session_id: Mapped[str] = mapped_column(
+        String(128),
+        ForeignKey("session_buffers.session_id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    seq: Mapped[int] = mapped_column(Integer, nullable=False)
+
+    role: Mapped[str] = mapped_column(String(8), nullable=False)
+    content: Mapped[str] = mapped_column(Text, nullable=False)
+    timestamp: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    event_date: Mapped[date] = mapped_column(Date, nullable=False)
+
+    dialogue_act: Mapped[str | None] = mapped_column(String(48))
+    co_created_marker: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+
+    buffer: Mapped[SessionBuffer] = relationship(back_populates="messages")
+
+    __table_args__ = (
+        UniqueConstraint("session_id", "seq", name="uq_message_session_seq"),
+    )
+
+
+class PipelineJob(Base):
+    """
+    One run of the pipeline over one session buffer.
+
+    The config snapshot records which models were configured at the time. A
+    re-run can then either reproduce the original conditions or deliberately
+    differ from them, and either way it is clear which happened.
+    """
+
+    __tablename__ = "pipeline_jobs"
+
+    job_id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    trace_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    session_id: Mapped[str] = mapped_column(
+        String(128),
+        ForeignKey("session_buffers.session_id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    user_id: Mapped[str] = mapped_column(String(128), nullable=False, index=True)
+
+    status: Mapped[str] = mapped_column(
+        String(32), nullable=False, default=JobStatus.PENDING.value
+    )
+    current_stage: Mapped[str | None] = mapped_column(String(48))
+
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+    retry_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    error_type: Mapped[str | None] = mapped_column(String(128))
+    error_message: Mapped[str | None] = mapped_column(Text)
+    config_snapshot: Mapped[dict | None] = mapped_column(JSON)
+
+    stage_runs: Mapped[list["PipelineStageRun"]] = relationship(
+        back_populates="job", cascade="all, delete-orphan"
+    )
+    writes: Mapped[list["PipelineWriteLog"]] = relationship(
+        back_populates="job", cascade="all, delete-orphan"
+    )
+
+
+class PipelineStageRun(Base):
+    """
+    One attempt at one stage of a job.
+
+    Both the input and the output are kept. That is what allows a stage to be
+    replayed later without re-running everything before it, and it is what the
+    debug view reads to show exactly what went in and came back out.
+
+    A stage can be attempted more than once, so each attempt gets its own row
+    rather than overwriting the last.
+    """
+
+    __tablename__ = "pipeline_stage_runs"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    job_id: Mapped[str] = mapped_column(
+        String(128),
+        ForeignKey("pipeline_jobs.job_id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    trace_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+
+    stage: Mapped[str] = mapped_column(String(48), nullable=False)
+    attempt: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    status: Mapped[str] = mapped_column(
+        String(32), nullable=False, default=StageStatus.PENDING.value
+    )
+
+    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    duration_ms: Mapped[int | None] = mapped_column(Integer)
+
+    # How the stage behaved. Kept as real columns, not buried in JSON, so they
+    # can be filtered and averaged directly.
+    model_used: Mapped[str | None] = mapped_column(String(128))
+    validation_passed: Mapped[bool | None] = mapped_column(Boolean)
+    retry_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+
+    input_payload: Mapped[dict | None] = mapped_column(JSON)
+    output_payload: Mapped[dict | None] = mapped_column(JSON)
+    error_message: Mapped[str | None] = mapped_column(Text)
+
+    job: Mapped[PipelineJob] = relationship(back_populates="stage_runs")
+
+    __table_args__ = (
+        UniqueConstraint("job_id", "stage", "attempt", name="uq_stage_run_job_stage_attempt"),
+    )
+
+
+class PipelineWriteLog(Base):
+    """
+    A record of everything a pipeline run wrote to the graph and vector stores.
+
+    This is what connects a trace back to its results. Given a node, it answers
+    "which run created this and what else did that run touch" — without having
+    to store a trace id on every node and edge in the graph itself.
+    """
+
+    __tablename__ = "pipeline_write_log"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    job_id: Mapped[str] = mapped_column(
+        String(128),
+        ForeignKey("pipeline_jobs.job_id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    trace_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+
+    stage: Mapped[str] = mapped_column(String(48), nullable=False)
+    target: Mapped[str] = mapped_column(String(32), nullable=False)
+
+    # Set for node and vector writes.
+    node_id: Mapped[str | None] = mapped_column(String(256), index=True)
+    # Set for edge writes.
+    edge_type: Mapped[str | None] = mapped_column(String(128))
+    from_id: Mapped[str | None] = mapped_column(String(256))
+    to_id: Mapped[str | None] = mapped_column(String(256))
+
+    written_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+    job: Mapped[PipelineJob] = relationship(back_populates="writes")
+
+
+class HitlQueueItem(Base):
+    """
+    An item waiting for the user to decide something.
+
+    This table holds only the queue mechanics — position, status, how many
+    times it has been deferred. The decision itself lives in the graph as an
+    audit node, and audit_node_id is the link between the two. Keeping one
+    owner per fact means the two stores can never disagree.
+
+    The two rank columns exist because the queue is sorted by meaning, not by
+    alphabet: a tie beats a low-confidence call, and a critical signal beats a
+    routine one. Databases cannot sort text that way, so the ranks are worked
+    out once when the item is added and stored as numbers.
+    """
+
+    __tablename__ = "hitl_queue"
+
+    id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    user_id: Mapped[str] = mapped_column(String(128), nullable=False, index=True)
+    trace_id: Mapped[str | None] = mapped_column(String(64), index=True)
+    job_id: Mapped[str | None] = mapped_column(
+        String(128), ForeignKey("pipeline_jobs.job_id", ondelete="SET NULL")
+    )
+
+    # The matching audit node in the graph. Unique, so one decision can never
+    # produce two queue items.
+    audit_node_id: Mapped[str] = mapped_column(String(256), nullable=False, unique=True)
+    observation_id: Mapped[str | None] = mapped_column(String(256))
+    episode_id: Mapped[str | None] = mapped_column(String(256))
+
+    entry_type: Mapped[str] = mapped_column(String(32), nullable=False)
+    status: Mapped[str] = mapped_column(
+        String(32), nullable=False, default=HitlItemStatus.PENDING_HITL.value
+    )
+    priority_rank: Mapped[int] = mapped_column(Integer, nullable=False)
+    signal_rank: Mapped[int] = mapped_column(Integer, nullable=False)
+
+    recommended_action: Mapped[str | None] = mapped_column(String(32))
+    candidate_a_node_id: Mapped[str | None] = mapped_column(String(256))
+    candidate_b_node_id: Mapped[str | None] = mapped_column(String(256))
+    confidence_a: Mapped[float | None] = mapped_column(Float)
+    confidence_b: Mapped[float | None] = mapped_column(Float)
+    context_summary: Mapped[str | None] = mapped_column(Text)
+
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    snooze_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    last_snoozed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    resolved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    resolution_choice: Mapped[str | None] = mapped_column(String(48))
+
+    __table_args__ = (
+        # The exact ordering the queue is read in.
+        Index(
+            "ix_hitl_priority",
+            "user_id", "status", "priority_rank", "signal_rank", "created_at",
+        ),
+    )
+
+
+class UserSetting(Base):
+    """
+    A single setting the user has changed from its default.
+
+    Stored as key and value rather than one column per setting, so adding a new
+    setting never needs a database migration. Only settings that have actually
+    been overridden get a row; everything else falls back to the environment
+    or the built-in default.
+    """
+
+    __tablename__ = "user_settings"
+
+    user_id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    key: Mapped[str] = mapped_column(String(128), primary_key=True)
+    value_json: Mapped[dict | list | str | int | float | bool | None] = mapped_column(JSON)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, onupdate=utcnow
+    )
+
+
+class DataErasureAudit(Base):
+    """
+    Proof that an erasure happened.
+
+    Deliberately holds no personal content and no readable user identifier —
+    the user id is hashed before it ever reaches this table. A record of a
+    deletion that itself preserved the deleted information would defeat the
+    point.
+    """
+
+    __tablename__ = "data_erasure_audit"
+
+    id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    user_id_hash: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    erased_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, nullable=False
+    )
+
+    nodes_anonymized: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    embeddings_deleted: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    entry_ids_affected: Mapped[list | None] = mapped_column(JSON)
+
+    initiated_by: Mapped[str] = mapped_column(String(48), nullable=False)
+    status: Mapped[str] = mapped_column(
+        String(32), nullable=False, default=ErasureStatus.IN_PROGRESS.value
+    )
+
+
+__all__ = [
+    "Base",
+    "utcnow",
+    "SessionBuffer",
+    "BufferMessage",
+    "PipelineJob",
+    "PipelineStageRun",
+    "PipelineWriteLog",
+    "HitlQueueItem",
+    "UserSetting",
+    "DataErasureAudit",
+]

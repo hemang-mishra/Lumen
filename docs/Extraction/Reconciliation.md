@@ -203,7 +203,7 @@ Every Reconciliation action — including AMBIGUOUS resolutions, CONTRADICT crea
   "node_id": "d_2026_06_11_001",
   "created_at": "2025-01-18T10:34:17Z",
   "action": "MERGE",
-  "source_observation_id": "obs_2026_06_11_004",
+  "source_node_id": "obs_2026_06_11_004",
   "target_node_id": "pat_decision_saturation",
   "edge_type_created": "same_as",
   "edge_id": "edge_2026_06_11_009",
@@ -357,12 +357,12 @@ Items are ordered within the queue as follows:
 
 ### Queue Capacity & Hard Cap
 
-**Maximum queue size: 20 items.**
+**Maximum queue size: 40 items.** (Configurable via `LUMEN_HITL_QUEUE_CAP` — see `lumen.config.OperationalConfig`.)
 
-When the queue reaches 20 items:
+When the queue reaches the cap:
 - New items that would enter the queue are written with `status: SUSPENDED_QUEUE_FULL`.
 - `SUSPENDED_QUEUE_FULL` items do **not** auto-BRANCH. They wait.
-- When queue size drops below 20, suspended items enter in priority order.
+- When queue size drops below the cap, suspended items enter in priority order.
 - The user is notified when the queue is full and when items are unblocked.
 
 ### SNOOZE Behavior

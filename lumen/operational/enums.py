@@ -1,0 +1,175 @@
+"""
+Closed vocabularies used only by the operational database.
+
+These describe process state — where a session is in its lifecycle, whether a
+job finished, why an item is waiting for review. Vocabularies that describe
+knowledge instead live in lumen/schemas/enums.py and are imported from there
+rather than duplicated.
+"""
+
+from __future__ import annotations
+
+from enum import StrEnum
+
+
+class BufferStatus(StrEnum):
+    """
+    Where a session buffer is in its journey to the pipeline.
+
+    OPEN       — still collecting messages; the user may add more.
+    DECAYED    — gone quiet long enough that it is ready to process.
+    DISPATCHED — handed to the pipeline; a job exists for it.
+    PROCESSED  — the pipeline finished with it.
+    DISCARDED  — rejected, usually because it held nothing worth extracting.
+    """
+
+    OPEN = "OPEN"
+    DECAYED = "DECAYED"
+    DISPATCHED = "DISPATCHED"
+    PROCESSED = "PROCESSED"
+    DISCARDED = "DISCARDED"
+
+
+class BufferSource(StrEnum):
+    """Where the messages in a buffer came from."""
+
+    NATIVE_CHAT = "NATIVE_CHAT"
+    IMPORT_MARKDOWN = "IMPORT_MARKDOWN"
+    IMPORT_JSON = "IMPORT_JSON"
+    VOICE_NOTE = "VOICE_NOTE"
+
+
+class JobStatus(StrEnum):
+    """
+    Lifecycle of one pipeline run.
+
+    COMPLETE and CANCELLED are final. FAILED is not — a failed job can be
+    started again, which is what makes a re-run possible.
+    """
+
+    PENDING = "PENDING"
+    RUNNING = "RUNNING"
+    COMPLETE = "COMPLETE"
+    FAILED = "FAILED"
+    CANCELLED = "CANCELLED"
+
+
+class PipelineStage(StrEnum):
+    """The stages a session passes through, in order."""
+
+    STAGE_0_PREPROCESSING = "STAGE_0_PREPROCESSING"
+    STAGE_1_MICROEXTRACTION = "STAGE_1_MICROEXTRACTION"
+    STAGE_2_RETRIEVAL = "STAGE_2_RETRIEVAL"
+    STAGE_3_RECONCILIATION = "STAGE_3_RECONCILIATION"
+    STAGE_4_GRAPH_WRITE = "STAGE_4_GRAPH_WRITE"
+
+
+class StageStatus(StrEnum):
+    """Outcome of a single attempt at one stage."""
+
+    PENDING = "PENDING"
+    RUNNING = "RUNNING"
+    COMPLETE = "COMPLETE"
+    FAILED = "FAILED"
+    SKIPPED = "SKIPPED"
+
+
+class WriteTarget(StrEnum):
+    """Which store a pipeline run wrote to."""
+
+    GRAPH_NODE = "GRAPH_NODE"
+    GRAPH_EDGE = "GRAPH_EDGE"
+    VECTOR = "VECTOR"
+
+
+class HitlEntryType(StrEnum):
+    """
+    Why an item needs a human to look at it.
+
+    AMBIGUOUS_TIE     — two candidate actions scored too close to separate.
+    BELOW_THRESHOLD   — one clear action, but the model was not confident enough.
+    EXTRACTION_FAILED — extraction kept producing invalid output.
+
+    The order here is also the priority order: a tie outranks a low-confidence
+    call, which outranks a failed extraction.
+    """
+
+    AMBIGUOUS_TIE = "AMBIGUOUS_TIE"
+    BELOW_THRESHOLD = "BELOW_THRESHOLD"
+    EXTRACTION_FAILED = "EXTRACTION_FAILED"
+
+
+class HitlItemStatus(StrEnum):
+    """
+    State of a review queue item.
+
+    SUSPENDED_QUEUE_FULL means the queue was at capacity when the item arrived.
+    It waits its turn rather than being decided automatically — the queue cap
+    exists to protect the user's attention, not to license guessing.
+    """
+
+    PENDING_HITL = "PENDING_HITL"
+    SUSPENDED_QUEUE_FULL = "SUSPENDED_QUEUE_FULL"
+    RESOLVED = "RESOLVED"
+    AUTO_RESOLVED = "AUTO_RESOLVED"
+
+
+class ErasureInitiator(StrEnum):
+    """Who asked for data to be erased."""
+
+    USER_REQUEST = "USER_REQUEST"
+    ADMIN_REQUEST = "ADMIN_REQUEST"
+    AUTOMATED_RETENTION_POLICY = "AUTOMATED_RETENTION_POLICY"
+
+
+class ErasureStatus(StrEnum):
+    """How far an erasure run got."""
+
+    IN_PROGRESS = "IN_PROGRESS"
+    COMPLETE = "COMPLETE"
+    FAILED = "FAILED"
+
+
+# Priority numbers used to sort the review queue. Lower sorts first.
+HITL_ENTRY_TYPE_RANK: dict[HitlEntryType, int] = {
+    HitlEntryType.AMBIGUOUS_TIE: 1,
+    HitlEntryType.BELOW_THRESHOLD: 2,
+    HitlEntryType.EXTRACTION_FAILED: 3,
+}
+
+# Statuses that mean an item is still waiting on the user.
+OPEN_HITL_STATUSES: frozenset[HitlItemStatus] = frozenset(
+    {HitlItemStatus.PENDING_HITL, HitlItemStatus.SUSPENDED_QUEUE_FULL}
+)
+
+# Job states that cannot be left once entered.
+TERMINAL_JOB_STATUSES: frozenset[JobStatus] = frozenset(
+    {JobStatus.COMPLETE, JobStatus.CANCELLED}
+)
+
+# The only job state changes allowed. Anything else is a bug in the caller.
+ALLOWED_JOB_TRANSITIONS: dict[JobStatus, frozenset[JobStatus]] = {
+    JobStatus.PENDING: frozenset({JobStatus.RUNNING, JobStatus.CANCELLED}),
+    JobStatus.RUNNING: frozenset({JobStatus.COMPLETE, JobStatus.FAILED, JobStatus.CANCELLED}),
+    JobStatus.FAILED: frozenset({JobStatus.RUNNING}),
+    JobStatus.COMPLETE: frozenset(),
+    JobStatus.CANCELLED: frozenset(),
+}
+
+
+__all__ = [
+    "BufferStatus",
+    "BufferSource",
+    "JobStatus",
+    "PipelineStage",
+    "StageStatus",
+    "WriteTarget",
+    "HitlEntryType",
+    "HitlItemStatus",
+    "ErasureInitiator",
+    "ErasureStatus",
+    "HITL_ENTRY_TYPE_RANK",
+    "OPEN_HITL_STATUSES",
+    "TERMINAL_JOB_STATUSES",
+    "ALLOWED_JOB_TRANSITIONS",
+]

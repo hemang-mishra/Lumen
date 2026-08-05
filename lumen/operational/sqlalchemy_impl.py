@@ -1,0 +1,1068 @@
+"""
+The SQLAlchemy implementation of the operational store.
+
+This is the only module that knows how operational data is actually stored.
+Everything else works through the protocols, so replacing SQLite with
+PostgreSQL — or with something else entirely — touches nothing outside here.
+
+Each repository is small and covers one area. They share a session manager
+that lets several of them take part in a single transaction when a caller asks
+for one, and otherwise gives each operation its own.
+"""
+
+from __future__ import annotations
+
+import hashlib
+import logging
+import threading
+import uuid
+from collections.abc import Generator
+from contextlib import contextmanager
+from datetime import UTC, date, datetime
+from typing import Any
+
+from sqlalchemy import Engine, delete, func, select
+from sqlalchemy.orm import Session, sessionmaker
+
+from lumen.config import AppConfig, OperationalConfig, ProviderConfig
+from lumen.observability.trace import get_trace_id, new_trace_id
+from lumen.operational import models
+from lumen.operational.engine import create_ops_engine, create_session_factory
+from lumen.operational.enums import (
+    ALLOWED_JOB_TRANSITIONS,
+    HITL_ENTRY_TYPE_RANK,
+    OPEN_HITL_STATUSES,
+    BufferSource,
+    BufferStatus,
+    ErasureStatus,
+    HitlEntryType,
+    HitlItemStatus,
+    JobStatus,
+    PipelineStage,
+    StageStatus,
+    WriteTarget,
+)
+from lumen.operational.repositories import (
+    IllegalStateTransitionError,
+    RecordNotFoundError,
+    UnknownSettingKeyError,
+)
+from lumen.operational.schemas import (
+    BufferMessageRecord,
+    ErasureAuditRecord,
+    HitlQueueItemRecord,
+    PipelineJobRecord,
+    PipelineTrace,
+    SessionBufferRecord,
+    StageMetrics,
+    StageRunRecord,
+    StoredErasureAudit,
+    UserSettingRecord,
+    WriteLogEntry,
+)
+from lumen.schemas.enums import HitlResolutionChoice, ModelRole, SignalStrength
+from lumen.schemas.pipeline import BufferMessage, SessionDecayEvent
+
+logger = logging.getLogger(__name__)
+
+
+# How strongly a signal counts when ordering the review queue. Higher wins.
+_SIGNAL_RANK: dict[SignalStrength, int] = {
+    SignalStrength.CRITICAL: 3,
+    SignalStrength.HIGH: 2,
+    SignalStrength.STANDARD: 1,
+}
+
+
+def _known_setting_keys() -> frozenset[str]:
+    """
+    Every setting the application actually reads.
+
+    The provider keys are generated from the roles themselves, so adding a new
+    role makes its settings available without anyone remembering to update a
+    list here.
+    """
+    keys = {
+        "pipeline.session_decay_minutes",
+        "hitl.queue_cap",
+        "logging.level",
+    }
+    for role in ModelRole:
+        keys.add(f"providers.{role.value.lower()}.provider")
+        keys.add(f"providers.{role.value.lower()}.model")
+    return frozenset(keys)
+
+
+KNOWN_SETTING_KEYS: frozenset[str] = _known_setting_keys()
+
+
+def _utcnow() -> datetime:
+    """Current time, timezone-aware and in UTC."""
+    return datetime.now(UTC)
+
+
+def _aware(value: datetime | None) -> datetime | None:
+    """
+    Make sure a time read from the database carries its time zone.
+
+    SQLite forgets time zones, so values come back naive. They were written as
+    UTC, so that is what gets attached again.
+    """
+    if value is None:
+        return None
+    return value.replace(tzinfo=UTC) if value.tzinfo is None else value
+
+
+def _hash_user_id(user_id: str) -> str:
+    """Turn a user id into a one-way hash for the erasure log."""
+    return hashlib.sha256(user_id.encode("utf-8")).hexdigest()
+
+
+class _SessionManager:
+    """
+    Hands out database sessions.
+
+    When a caller has opened a transaction, every repository joins that one
+    session so their writes commit or roll back together. Otherwise each
+    operation gets its own short-lived session that commits on its own.
+
+    The open transaction is tracked per thread, so two background workers
+    running side by side never end up sharing a session.
+    """
+
+    def __init__(self, factory: sessionmaker[Session]) -> None:
+        self._factory = factory
+        self._local = threading.local()
+
+    @property
+    def _ambient(self) -> Session | None:
+        return getattr(self._local, "session", None)
+
+    @contextmanager
+    def session(self) -> Generator[Session]:
+        """Get a session for one piece of work."""
+        existing = self._ambient
+        if existing is not None:
+            # Inside a transaction: use it and let the owner decide the outcome.
+            yield existing
+            return
+
+        session = self._factory()
+        try:
+            yield session
+            session.commit()
+        except Exception:
+            session.rollback()
+            raise
+        finally:
+            session.close()
+
+    @contextmanager
+    def transaction(self) -> Generator[None]:
+        """Group everything inside the block into one all-or-nothing write."""
+        if self._ambient is not None:
+            # Already in a transaction; joining it keeps the outermost block
+            # in charge of committing.
+            yield
+            return
+
+        session = self._factory()
+        self._local.session = session
+        try:
+            yield
+            session.commit()
+        except Exception:
+            session.rollback()
+            raise
+        finally:
+            self._local.session = None
+            session.close()
+
+
+class SqlAlchemySessionBufferRepository:
+    """Stores conversations while they wait to be processed."""
+
+    def __init__(self, sessions: _SessionManager) -> None:
+        self._sessions = sessions
+
+    def create_buffer(self, record: SessionBufferRecord) -> str:
+        with self._sessions.session() as db:
+            now = _utcnow()
+            db.add(
+                models.SessionBuffer(
+                    session_id=record.session_id,
+                    user_id=record.user_id,
+                    event_date=record.event_date,
+                    session_label=record.session_label,
+                    status=record.status.value,
+                    source=record.source.value,
+                    message_count=record.message_count,
+                    created_at=record.created_at or now,
+                    last_activity_at=record.last_activity_at or now,
+                    decayed_at=record.decayed_at,
+                    ingested_at=record.ingested_at,
+                )
+            )
+            db.flush()
+        logger.debug("created session buffer", extra={"session_id": record.session_id})
+        return record.session_id
+
+    def find_or_create(
+        self,
+        user_id: str,
+        event_date: date,
+        session_label: str = "",
+        source: BufferSource = BufferSource.NATIVE_CHAT,
+    ) -> SessionBufferRecord:
+        with self._sessions.session() as db:
+            row = db.scalar(
+                select(models.SessionBuffer).where(
+                    models.SessionBuffer.user_id == user_id,
+                    models.SessionBuffer.event_date == event_date,
+                    models.SessionBuffer.session_label == session_label,
+                )
+            )
+            if row is None:
+                now = _utcnow()
+                row = models.SessionBuffer(
+                    session_id=_new_session_id(event_date, session_label),
+                    user_id=user_id,
+                    event_date=event_date,
+                    session_label=session_label,
+                    status=BufferStatus.OPEN.value,
+                    source=source.value,
+                    message_count=0,
+                    created_at=now,
+                    last_activity_at=now,
+                    ingested_at=now,
+                )
+                db.add(row)
+                db.flush()
+                logger.info(
+                    "opened session buffer",
+                    extra={"session_id": row.session_id, "event_date": str(event_date)},
+                )
+            return _to_buffer_record(row)
+
+    def append_message(self, session_id: str, message: BufferMessageRecord) -> None:
+        with self._sessions.session() as db:
+            buffer = self._require_buffer(db, session_id)
+            db.add(
+                models.BufferMessage(
+                    message_id=message.message_id,
+                    session_id=session_id,
+                    seq=message.seq,
+                    role=message.role,
+                    content=message.content,
+                    timestamp=message.timestamp,
+                    event_date=message.event_date,
+                    dialogue_act=message.dialogue_act.value if message.dialogue_act else None,
+                    co_created_marker=message.co_created_marker,
+                )
+            )
+            # Keeping these current is what lets the decay check work off the
+            # buffer alone, without counting messages every time it runs.
+            buffer.message_count += 1
+            buffer.last_activity_at = _utcnow()
+            db.flush()
+
+    def get_buffer(self, session_id: str) -> SessionBufferRecord | None:
+        with self._sessions.session() as db:
+            row = db.get(models.SessionBuffer, session_id)
+            return _to_buffer_record(row) if row else None
+
+    def get_messages(self, session_id: str) -> list[BufferMessageRecord]:
+        with self._sessions.session() as db:
+            rows = db.scalars(
+                select(models.BufferMessage)
+                .where(models.BufferMessage.session_id == session_id)
+                .order_by(models.BufferMessage.seq)
+            ).all()
+            return [_to_message_record(row) for row in rows]
+
+    def find_decayed(self, cutoff: datetime, limit: int = 50) -> list[SessionBufferRecord]:
+        with self._sessions.session() as db:
+            rows = db.scalars(
+                select(models.SessionBuffer)
+                .where(
+                    models.SessionBuffer.status == BufferStatus.OPEN.value,
+                    models.SessionBuffer.last_activity_at < cutoff,
+                    models.SessionBuffer.message_count > 0,
+                )
+                .order_by(models.SessionBuffer.last_activity_at)
+                .limit(limit)
+            ).all()
+            return [_to_buffer_record(row) for row in rows]
+
+    def build_decay_event(self, session_id: str) -> SessionDecayEvent:
+        with self._sessions.session() as db:
+            buffer = self._require_buffer(db, session_id)
+            messages = db.scalars(
+                select(models.BufferMessage)
+                .where(models.BufferMessage.session_id == session_id)
+                .order_by(models.BufferMessage.seq)
+            ).all()
+
+            return SessionDecayEvent(
+                session_id=buffer.session_id,
+                user_id=buffer.user_id,
+                event_date=buffer.event_date,
+                session_label=buffer.session_label,
+                message_count=len(messages),
+                raw_buffer=[_to_buffer_message(row) for row in messages],
+                triggered_at=_aware(buffer.decayed_at) or _utcnow(),
+            )
+
+    def mark_status(self, session_id: str, status: BufferStatus) -> SessionBufferRecord:
+        with self._sessions.session() as db:
+            buffer = self._require_buffer(db, session_id)
+            buffer.status = status.value
+            if status == BufferStatus.DECAYED and buffer.decayed_at is None:
+                buffer.decayed_at = _utcnow()
+            db.flush()
+            return _to_buffer_record(buffer)
+
+    def _require_buffer(self, db: Session, session_id: str) -> models.SessionBuffer:
+        row = db.get(models.SessionBuffer, session_id)
+        if row is None:
+            raise RecordNotFoundError(f"no session buffer with id {session_id!r}")
+        return row
+
+
+class SqlAlchemyPipelineJobRepository:
+    """Tracks pipeline runs, their stages, and everything they wrote."""
+
+    def __init__(self, sessions: _SessionManager) -> None:
+        self._sessions = sessions
+
+    def create_job(
+        self,
+        session_id: str,
+        user_id: str,
+        config_snapshot: dict[str, Any] | None = None,
+        trace_id: str | None = None,
+    ) -> PipelineJobRecord:
+        resolved_trace = trace_id or get_trace_id() or new_trace_id()
+        job_id = f"job_{uuid.uuid4().hex[:16]}"
+
+        with self._sessions.session() as db:
+            row = models.PipelineJob(
+                job_id=job_id,
+                trace_id=resolved_trace,
+                session_id=session_id,
+                user_id=user_id,
+                status=JobStatus.PENDING.value,
+                created_at=_utcnow(),
+                config_snapshot=config_snapshot,
+            )
+            db.add(row)
+            db.flush()
+            record = _to_job_record(row)
+
+        logger.info("pipeline job created", extra={"job_id": job_id, "session_id": session_id})
+        return record
+
+    def get_job(self, job_id: str) -> PipelineJobRecord | None:
+        with self._sessions.session() as db:
+            row = db.get(models.PipelineJob, job_id)
+            return _to_job_record(row) if row else None
+
+    def transition(
+        self,
+        job_id: str,
+        to_status: JobStatus,
+        error_type: str | None = None,
+        error_message: str | None = None,
+    ) -> PipelineJobRecord:
+        with self._sessions.session() as db:
+            row = self._require_job(db, job_id)
+            current = JobStatus(row.status)
+
+            if to_status not in ALLOWED_JOB_TRANSITIONS[current]:
+                raise IllegalStateTransitionError(
+                    f"job {job_id} cannot move from {current.value} to {to_status.value}"
+                )
+
+            # A failed job going back to running is a re-run, and that is worth
+            # counting — three quiet retries look very different from one.
+            if current == JobStatus.FAILED and to_status == JobStatus.RUNNING:
+                row.retry_count += 1
+                row.error_type = None
+                row.error_message = None
+
+            row.status = to_status.value
+
+            if to_status == JobStatus.RUNNING and row.started_at is None:
+                row.started_at = _utcnow()
+            if to_status in (JobStatus.COMPLETE, JobStatus.FAILED, JobStatus.CANCELLED):
+                row.finished_at = _utcnow()
+            if to_status == JobStatus.FAILED:
+                row.error_type = error_type
+                row.error_message = error_message
+
+            db.flush()
+            record = _to_job_record(row)
+
+        logger.info(
+            "pipeline job transitioned",
+            extra={"job_id": job_id, "to_status": to_status.value},
+        )
+        return record
+
+    def start_stage(
+        self,
+        job_id: str,
+        stage: PipelineStage,
+        input_payload: dict[str, Any] | None = None,
+        attempt: int | None = None,
+    ) -> StageRunRecord:
+        with self._sessions.session() as db:
+            job = self._require_job(db, job_id)
+            resolved_attempt = attempt if attempt is not None else self._next_attempt(db, job_id, stage)
+
+            row = models.PipelineStageRun(
+                job_id=job_id,
+                trace_id=job.trace_id,
+                stage=stage.value,
+                attempt=resolved_attempt,
+                status=StageStatus.RUNNING.value,
+                started_at=_utcnow(),
+                input_payload=input_payload,
+            )
+            db.add(row)
+
+            # Recording the stage on the job keeps "where is this run right
+            # now" answerable without reading through every stage row.
+            job.current_stage = stage.value
+            db.flush()
+            return _to_stage_record(row)
+
+    def finish_stage(
+        self,
+        run_id: int,
+        status: StageStatus,
+        metrics: StageMetrics | None = None,
+        output_payload: dict[str, Any] | None = None,
+        error_message: str | None = None,
+    ) -> StageRunRecord:
+        with self._sessions.session() as db:
+            row = db.get(models.PipelineStageRun, run_id)
+            if row is None:
+                raise RecordNotFoundError(f"no stage run with id {run_id!r}")
+
+            finished = _utcnow()
+            row.status = status.value
+            row.finished_at = finished
+            row.output_payload = output_payload
+            row.error_message = error_message
+
+            if metrics is not None:
+                row.model_used = metrics.model_used
+                row.validation_passed = metrics.validation_passed
+                row.retry_count = metrics.retry_count
+                row.duration_ms = metrics.duration_ms
+
+            if row.duration_ms is None and row.started_at is not None:
+                started = _aware(row.started_at)
+                row.duration_ms = int((finished - started).total_seconds() * 1000)
+
+            db.flush()
+            return _to_stage_record(row)
+
+    def get_stage_runs(self, job_id: str) -> list[StageRunRecord]:
+        with self._sessions.session() as db:
+            rows = db.scalars(
+                select(models.PipelineStageRun)
+                .where(models.PipelineStageRun.job_id == job_id)
+                .order_by(models.PipelineStageRun.id)
+            ).all()
+            return [_to_stage_record(row) for row in rows]
+
+    def record_write(
+        self,
+        job_id: str,
+        stage: PipelineStage,
+        target: WriteTarget,
+        node_id: str | None = None,
+        edge_type: str | None = None,
+        from_id: str | None = None,
+        to_id: str | None = None,
+    ) -> None:
+        with self._sessions.session() as db:
+            job = self._require_job(db, job_id)
+
+            # The write belongs to the job's trace, not to whatever happens to
+            # be current — a stage replayed later still belongs to its original
+            # run. Building the entry also validates it, so a malformed record
+            # is refused before it becomes permanent.
+            entry = WriteLogEntry(
+                job_id=job_id,
+                trace_id=job.trace_id,
+                stage=stage,
+                target=target,
+                node_id=node_id,
+                edge_type=edge_type,
+                from_id=from_id,
+                to_id=to_id,
+            )
+
+            db.add(
+                models.PipelineWriteLog(
+                    job_id=job_id,
+                    trace_id=job.trace_id,
+                    stage=entry.stage.value,
+                    target=entry.target.value,
+                    node_id=entry.node_id,
+                    edge_type=entry.edge_type,
+                    from_id=entry.from_id,
+                    to_id=entry.to_id,
+                    written_at=_utcnow(),
+                )
+            )
+            db.flush()
+
+    def get_trace(self, trace_id: str) -> PipelineTrace | None:
+        with self._sessions.session() as db:
+            job = db.scalar(
+                select(models.PipelineJob).where(models.PipelineJob.trace_id == trace_id)
+            )
+            if job is None:
+                return None
+
+            stage_rows = db.scalars(
+                select(models.PipelineStageRun)
+                .where(models.PipelineStageRun.job_id == job.job_id)
+                .order_by(models.PipelineStageRun.id)
+            ).all()
+            write_rows = db.scalars(
+                select(models.PipelineWriteLog)
+                .where(models.PipelineWriteLog.job_id == job.job_id)
+                .order_by(models.PipelineWriteLog.id)
+            ).all()
+
+            return PipelineTrace(
+                job=_to_job_record(job),
+                stage_runs=[_to_stage_record(row) for row in stage_rows],
+                writes=[_to_write_entry(row) for row in write_rows],
+            )
+
+    def find_job_for_node(self, node_id: str) -> PipelineJobRecord | None:
+        with self._sessions.session() as db:
+            write = db.scalar(
+                select(models.PipelineWriteLog)
+                .where(models.PipelineWriteLog.node_id == node_id)
+                .order_by(models.PipelineWriteLog.id)
+            )
+            if write is None:
+                return None
+            job = db.get(models.PipelineJob, write.job_id)
+            return _to_job_record(job) if job else None
+
+    def _require_job(self, db: Session, job_id: str) -> models.PipelineJob:
+        row = db.get(models.PipelineJob, job_id)
+        if row is None:
+            raise RecordNotFoundError(f"no pipeline job with id {job_id!r}")
+        return row
+
+    def _next_attempt(self, db: Session, job_id: str, stage: PipelineStage) -> int:
+        highest = db.scalar(
+            select(func.max(models.PipelineStageRun.attempt)).where(
+                models.PipelineStageRun.job_id == job_id,
+                models.PipelineStageRun.stage == stage.value,
+            )
+        )
+        return (highest or 0) + 1
+
+
+class SqlAlchemyHitlQueueRepository:
+    """Holds items waiting for the user to decide something."""
+
+    def __init__(self, sessions: _SessionManager) -> None:
+        self._sessions = sessions
+
+    def enqueue(self, item: HitlQueueItemRecord) -> str:
+        priority_rank = HITL_ENTRY_TYPE_RANK[item.entry_type]
+        signal_rank = _SIGNAL_RANK[item.signal_strength]
+
+        with self._sessions.session() as db:
+            db.add(
+                models.HitlQueueItem(
+                    id=item.id,
+                    user_id=item.user_id,
+                    trace_id=item.trace_id or get_trace_id(),
+                    job_id=item.job_id,
+                    audit_node_id=item.audit_node_id,
+                    observation_id=item.observation_id,
+                    episode_id=item.episode_id,
+                    entry_type=item.entry_type.value,
+                    status=item.status.value,
+                    priority_rank=priority_rank,
+                    signal_rank=signal_rank,
+                    recommended_action=(
+                        item.recommended_action.value if item.recommended_action else None
+                    ),
+                    candidate_a_node_id=item.candidate_a_node_id,
+                    candidate_b_node_id=item.candidate_b_node_id,
+                    confidence_a=item.confidence_a,
+                    confidence_b=item.confidence_b,
+                    context_summary=item.context_summary,
+                    created_at=item.created_at or _utcnow(),
+                    snooze_count=item.snooze_count,
+                    last_snoozed_at=item.last_snoozed_at,
+                )
+            )
+            db.flush()
+
+        logger.info(
+            "review item queued",
+            extra={"item_id": item.id, "entry_type": item.entry_type.value},
+        )
+        return item.id
+
+    def get(self, item_id: str) -> HitlQueueItemRecord | None:
+        with self._sessions.session() as db:
+            row = db.get(models.HitlQueueItem, item_id)
+            return _to_hitl_record(row) if row else None
+
+    def get_by_audit_node(self, audit_node_id: str) -> HitlQueueItemRecord | None:
+        with self._sessions.session() as db:
+            row = db.scalar(
+                select(models.HitlQueueItem).where(
+                    models.HitlQueueItem.audit_node_id == audit_node_id
+                )
+            )
+            return _to_hitl_record(row) if row else None
+
+    def list_pending(self, user_id: str, limit: int = 20) -> list[HitlQueueItemRecord]:
+        open_statuses = [status.value for status in OPEN_HITL_STATUSES]
+        with self._sessions.session() as db:
+            rows = db.scalars(
+                select(models.HitlQueueItem)
+                .where(
+                    models.HitlQueueItem.user_id == user_id,
+                    models.HitlQueueItem.status.in_(open_statuses),
+                )
+                # Ties first, then stronger signals, then oldest first.
+                .order_by(
+                    models.HitlQueueItem.priority_rank.asc(),
+                    models.HitlQueueItem.signal_rank.desc(),
+                    models.HitlQueueItem.created_at.asc(),
+                )
+                .limit(limit)
+            ).all()
+            return [_to_hitl_record(row) for row in rows]
+
+    def count_pending(self, user_id: str) -> int:
+        open_statuses = [status.value for status in OPEN_HITL_STATUSES]
+        with self._sessions.session() as db:
+            return int(
+                db.scalar(
+                    select(func.count())
+                    .select_from(models.HitlQueueItem)
+                    .where(
+                        models.HitlQueueItem.user_id == user_id,
+                        models.HitlQueueItem.status.in_(open_statuses),
+                    )
+                )
+                or 0
+            )
+
+    def update_status(
+        self,
+        item_id: str,
+        status: HitlItemStatus,
+        resolution_choice: HitlResolutionChoice | None = None,
+    ) -> HitlQueueItemRecord:
+        with self._sessions.session() as db:
+            row = db.get(models.HitlQueueItem, item_id)
+            if row is None:
+                raise RecordNotFoundError(f"no review item with id {item_id!r}")
+
+            row.status = status.value
+            if resolution_choice is not None:
+                row.resolution_choice = resolution_choice.value
+            if status in (HitlItemStatus.RESOLVED, HitlItemStatus.AUTO_RESOLVED):
+                row.resolved_at = _utcnow()
+
+            db.flush()
+            return _to_hitl_record(row)
+
+
+class SqlAlchemyUserSettingsRepository:
+    """Stores the settings a user has changed from their defaults."""
+
+    def __init__(self, sessions: _SessionManager) -> None:
+        self._sessions = sessions
+
+    def get(self, user_id: str, key: str) -> Any | None:
+        with self._sessions.session() as db:
+            row = db.get(models.UserSetting, (user_id, key))
+            return row.value_json if row else None
+
+    def get_all(self, user_id: str) -> dict[str, Any]:
+        with self._sessions.session() as db:
+            rows = db.scalars(
+                select(models.UserSetting).where(models.UserSetting.user_id == user_id)
+            ).all()
+            return {row.key: row.value_json for row in rows}
+
+    def set(self, user_id: str, key: str, value: Any) -> None:
+        # Refusing unknown keys stops a typo from becoming a setting the user
+        # believes they changed but which nothing will ever read.
+        if key not in KNOWN_SETTING_KEYS:
+            raise UnknownSettingKeyError(
+                f"{key!r} is not a recognised setting; known keys are "
+                f"{sorted(KNOWN_SETTING_KEYS)}"
+            )
+
+        with self._sessions.session() as db:
+            row = db.get(models.UserSetting, (user_id, key))
+            if row is None:
+                db.add(models.UserSetting(user_id=user_id, key=key, value_json=value))
+            else:
+                row.value_json = value
+                row.updated_at = _utcnow()
+            db.flush()
+
+    def delete(self, user_id: str, key: str) -> bool:
+        with self._sessions.session() as db:
+            result = db.execute(
+                delete(models.UserSetting).where(
+                    models.UserSetting.user_id == user_id,
+                    models.UserSetting.key == key,
+                )
+            )
+            return bool(result.rowcount)
+
+    def get_records(self, user_id: str) -> list[UserSettingRecord]:
+        """Read a user's settings with their timestamps, newest change last."""
+        with self._sessions.session() as db:
+            rows = db.scalars(
+                select(models.UserSetting)
+                .where(models.UserSetting.user_id == user_id)
+                .order_by(models.UserSetting.key)
+            ).all()
+            return [
+                UserSettingRecord(
+                    user_id=row.user_id,
+                    key=row.key,
+                    value=row.value_json,
+                    updated_at=_aware(row.updated_at),
+                )
+                for row in rows
+            ]
+
+
+class SqlAlchemyDataErasureAuditRepository:
+    """Records that erasures happened, without recording what was erased."""
+
+    def __init__(self, sessions: _SessionManager) -> None:
+        self._sessions = sessions
+
+    def record(self, entry: ErasureAuditRecord) -> str:
+        # Hashing here rather than at the call site means no caller can store
+        # a readable identifier by forgetting to.
+        user_id_hash = _hash_user_id(entry.user_id)
+
+        with self._sessions.session() as db:
+            db.add(
+                models.DataErasureAudit(
+                    id=entry.id,
+                    user_id_hash=user_id_hash,
+                    erased_at=entry.erased_at or _utcnow(),
+                    nodes_anonymized=entry.nodes_anonymized,
+                    embeddings_deleted=entry.embeddings_deleted,
+                    entry_ids_affected=list(entry.entry_ids_affected),
+                    initiated_by=entry.initiated_by.value,
+                    status=entry.status.value,
+                )
+            )
+            db.flush()
+
+        logger.info(
+            "erasure recorded",
+            extra={"record_id": entry.id, "nodes_anonymized": entry.nodes_anonymized},
+        )
+        return entry.id
+
+    def get(self, record_id: str) -> StoredErasureAudit | None:
+        with self._sessions.session() as db:
+            row = db.get(models.DataErasureAudit, record_id)
+            return _to_erasure_record(row) if row else None
+
+    def list_for_user(self, user_id: str) -> list[StoredErasureAudit]:
+        user_id_hash = _hash_user_id(user_id)
+        with self._sessions.session() as db:
+            rows = db.scalars(
+                select(models.DataErasureAudit)
+                .where(models.DataErasureAudit.user_id_hash == user_id_hash)
+                .order_by(models.DataErasureAudit.erased_at.desc())
+            ).all()
+            return [_to_erasure_record(row) for row in rows]
+
+
+class SQLAlchemyOperationalStore:
+    """
+    One way in to all operational data.
+
+    Owns the connection and the five repositories, so callers hold a single
+    object rather than assembling pieces themselves.
+    """
+
+    def __init__(
+        self,
+        config: OperationalConfig | None = None,
+        engine: Engine | None = None,
+    ) -> None:
+        self._config = config or OperationalConfig()
+        self._engine = engine or create_ops_engine(self._config)
+        self._owns_engine = engine is None
+        self._factory = create_session_factory(self._engine)
+        self._sessions = _SessionManager(self._factory)
+
+        self.buffers = SqlAlchemySessionBufferRepository(self._sessions)
+        self.jobs = SqlAlchemyPipelineJobRepository(self._sessions)
+        self.hitl = SqlAlchemyHitlQueueRepository(self._sessions)
+        self.settings = SqlAlchemyUserSettingsRepository(self._sessions)
+        self.erasure = SqlAlchemyDataErasureAuditRepository(self._sessions)
+
+    @property
+    def engine(self) -> Engine:
+        """The underlying engine, for migrations and tests."""
+        return self._engine
+
+    def init_schema(self) -> None:
+        """
+        Create any missing tables.
+
+        Migrations are the normal way the schema is built and changed. This is
+        here for tests and throwaway databases where running a migration would
+        be more ceremony than the situation deserves.
+        """
+        models.Base.metadata.create_all(self._engine)
+
+    def transaction(self):
+        """Group several writes so they all succeed or all fail together."""
+        return self._sessions.transaction()
+
+    def close(self) -> None:
+        """Release the database connection, if this store opened it."""
+        if self._owns_engine:
+            self._engine.dispose()
+
+    def __enter__(self) -> SQLAlchemyOperationalStore:
+        return self
+
+    def __exit__(self, *exc_info: object) -> None:
+        self.close()
+
+
+def resolve_provider_config(
+    base: ProviderConfig, overrides: dict[str, Any]
+) -> ProviderConfig:
+    """
+    Apply saved settings on top of the configured providers.
+
+    A value the user set wins over an environment variable, which wins over the
+    built-in default. Settings that are absent or empty change nothing, so a
+    half-filled settings table cannot blank out a working configuration.
+    """
+    replacements: dict[str, Any] = {}
+    for role in ModelRole:
+        prefix = f"providers.{role.value.lower()}"
+        for suffix in ("provider", "model"):
+            value = overrides.get(f"{prefix}.{suffix}")
+            if value:
+                replacements[f"{role.value.lower()}_{suffix}"] = value
+
+    if not replacements:
+        return base
+
+    current = {
+        field: getattr(base, field)
+        for field in (
+            "lightweight_provider", "lightweight_model",
+            "thinking_provider", "thinking_model",
+            "embedding_provider", "embedding_model",
+            "transcription_provider", "transcription_model",
+            "tts_provider", "tts_model",
+        )
+    }
+    current.update(replacements)
+    return ProviderConfig(**current)
+
+
+def build_operational_store(config: AppConfig | None = None) -> SQLAlchemyOperationalStore:
+    """Create the store the application uses, wired from configuration."""
+    settings = config or AppConfig()
+    return SQLAlchemyOperationalStore(settings.operational)
+
+
+# ---------------------------------------------------------------------------
+# Turning database rows into the records callers see.
+# ---------------------------------------------------------------------------
+
+
+def _new_session_id(event_date: date, session_label: str) -> str:
+    """
+    Build a readable id for a new buffer.
+
+    Readable rather than a bare identifier so a log line naming a session says
+    something useful on its own.
+    """
+    label = session_label.strip().replace(" ", "_").lower() or "main"
+    return f"sb_{event_date:%Y_%m_%d}_{label}_{uuid.uuid4().hex[:8]}"
+
+
+def _to_buffer_record(row: models.SessionBuffer) -> SessionBufferRecord:
+    return SessionBufferRecord(
+        session_id=row.session_id,
+        user_id=row.user_id,
+        event_date=row.event_date,
+        session_label=row.session_label,
+        status=BufferStatus(row.status),
+        source=BufferSource(row.source),
+        message_count=row.message_count,
+        created_at=_aware(row.created_at),
+        last_activity_at=_aware(row.last_activity_at),
+        decayed_at=_aware(row.decayed_at),
+        ingested_at=_aware(row.ingested_at),
+    )
+
+
+def _to_message_record(row: models.BufferMessage) -> BufferMessageRecord:
+    return BufferMessageRecord(
+        message_id=row.message_id,
+        session_id=row.session_id,
+        seq=row.seq,
+        role=row.role,
+        content=row.content,
+        timestamp=_aware(row.timestamp),
+        event_date=row.event_date,
+        dialogue_act=row.dialogue_act,
+        co_created_marker=row.co_created_marker,
+    )
+
+
+def _to_buffer_message(row: models.BufferMessage) -> BufferMessage:
+    """Convert a stored message into the form the pipeline expects."""
+    return BufferMessage(
+        message_id=row.message_id,
+        role=row.role,
+        content=row.content,
+        timestamp=_aware(row.timestamp),
+        event_date=row.event_date,
+        dialogue_act=row.dialogue_act,
+        co_created_marker=row.co_created_marker,
+    )
+
+
+def _to_job_record(row: models.PipelineJob) -> PipelineJobRecord:
+    return PipelineJobRecord(
+        job_id=row.job_id,
+        trace_id=row.trace_id,
+        session_id=row.session_id,
+        user_id=row.user_id,
+        status=JobStatus(row.status),
+        current_stage=PipelineStage(row.current_stage) if row.current_stage else None,
+        created_at=_aware(row.created_at),
+        started_at=_aware(row.started_at),
+        finished_at=_aware(row.finished_at),
+        retry_count=row.retry_count,
+        error_type=row.error_type,
+        error_message=row.error_message,
+        config_snapshot=row.config_snapshot,
+    )
+
+
+def _to_stage_record(row: models.PipelineStageRun) -> StageRunRecord:
+    return StageRunRecord(
+        id=row.id,
+        job_id=row.job_id,
+        trace_id=row.trace_id,
+        stage=PipelineStage(row.stage),
+        attempt=row.attempt,
+        status=StageStatus(row.status),
+        started_at=_aware(row.started_at),
+        finished_at=_aware(row.finished_at),
+        duration_ms=row.duration_ms,
+        model_used=row.model_used,
+        validation_passed=row.validation_passed,
+        retry_count=row.retry_count,
+        input_payload=row.input_payload,
+        output_payload=row.output_payload,
+        error_message=row.error_message,
+    )
+
+
+def _to_write_entry(row: models.PipelineWriteLog) -> WriteLogEntry:
+    return WriteLogEntry(
+        id=row.id,
+        job_id=row.job_id,
+        trace_id=row.trace_id,
+        stage=PipelineStage(row.stage),
+        target=WriteTarget(row.target),
+        node_id=row.node_id,
+        edge_type=row.edge_type,
+        from_id=row.from_id,
+        to_id=row.to_id,
+        written_at=_aware(row.written_at),
+    )
+
+
+def _to_hitl_record(row: models.HitlQueueItem) -> HitlQueueItemRecord:
+    signal_strength = next(
+        (strength for strength, rank in _SIGNAL_RANK.items() if rank == row.signal_rank),
+        SignalStrength.STANDARD,
+    )
+    return HitlQueueItemRecord(
+        id=row.id,
+        user_id=row.user_id,
+        audit_node_id=row.audit_node_id,
+        entry_type=HitlEntryType(row.entry_type),
+        signal_strength=signal_strength,
+        status=HitlItemStatus(row.status),
+        trace_id=row.trace_id,
+        job_id=row.job_id,
+        observation_id=row.observation_id,
+        episode_id=row.episode_id,
+        recommended_action=row.recommended_action,
+        candidate_a_node_id=row.candidate_a_node_id,
+        candidate_b_node_id=row.candidate_b_node_id,
+        confidence_a=row.confidence_a,
+        confidence_b=row.confidence_b,
+        context_summary=row.context_summary,
+        created_at=_aware(row.created_at),
+        snooze_count=row.snooze_count,
+        last_snoozed_at=_aware(row.last_snoozed_at),
+        resolved_at=_aware(row.resolved_at),
+        resolution_choice=row.resolution_choice,
+        priority_rank=row.priority_rank,
+        signal_rank=row.signal_rank,
+    )
+
+
+def _to_erasure_record(row: models.DataErasureAudit) -> StoredErasureAudit:
+    return StoredErasureAudit(
+        id=row.id,
+        user_id_hash=row.user_id_hash,
+        erased_at=_aware(row.erased_at),
+        nodes_anonymized=row.nodes_anonymized,
+        embeddings_deleted=row.embeddings_deleted,
+        entry_ids_affected=list(row.entry_ids_affected or []),
+        initiated_by=row.initiated_by,
+        status=ErasureStatus(row.status),
+    )
+
+
+__all__ = [
+    "KNOWN_SETTING_KEYS",
+    "SQLAlchemyOperationalStore",
+    "SqlAlchemySessionBufferRepository",
+    "SqlAlchemyPipelineJobRepository",
+    "SqlAlchemyHitlQueueRepository",
+    "SqlAlchemyUserSettingsRepository",
+    "SqlAlchemyDataErasureAuditRepository",
+    "resolve_provider_config",
+    "build_operational_store",
+]

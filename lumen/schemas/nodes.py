@@ -371,10 +371,17 @@ class DecisionAuditNode(LumenNode):
     information about where that model ran (cloud vs. local) — deployment
     locality is purely an operator/config concern (lumen.config.ProviderConfig),
     never a routing decision the pipeline makes based on content sensitivity.
+
+    source_node_id (formerly source_observation_id) is the node a
+    Reconciliation decision was made about. Renamed because that node isn't
+    always an ObservationNode — reinforces/branches_to/regulates edges can
+    also originate from an EventNode or SessionNode (see EDGE_REGISTRY),
+    and evolved_from/dialectic edges originate from a Pattern/BeliefNode
+    itself, not from the triggering extracted content at all.
     """
 
     action: ReconciliationAction
-    source_observation_id: str = Field(min_length=1)
+    source_node_id: str = Field(min_length=1)
     target_node_id: str | None = None
     edge_type_created: str | None = None
     edge_id: str | None = None

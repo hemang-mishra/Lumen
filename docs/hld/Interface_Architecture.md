@@ -48,7 +48,7 @@ To prevent this graph pollution and avoid high computational costs, Lumen uses *
 
 1. **Buffering**: All inputs are appended to a `Session Buffer` keyed by `(event_date, session_label)`. A day can have multiple concurrent sessions (e.g., `June 27 / "A"` and `June 27 / "B"`). These are kept as independent buffers — they do NOT merge into a single daily transcript, because the user has intentionally separated them by theme or context.
 
-2. **Session Decay Trigger**: The system waits for a session to decay (1 hour of inactivity within that `session_label`). If a user returns after decay and continues on the **same `session_label`**, new turns append to that buffer. If the user opens a new chat or imports a file with a different `session_label` on the same day, a new buffer is created. After final decay or manual "End Session", the buffer is sent to Step 0.
+2. **Session Decay Trigger**: The system waits for a session to decay (2 hours of inactivity within that `session_label`, configurable via `LUMEN_SESSION_DECAY_MINUTES` — see `lumen.config.OperationalConfig`). If a user returns after decay and continues on the **same `session_label`**, new turns append to that buffer. If the user opens a new chat or imports a file with a different `session_label` on the same day, a new buffer is created. After final decay or manual "End Session", the buffer is sent to Step 0.
 
 3. **Multi-Session Same Day**: A day may produce multiple independent sessions. Each session is independently preprocessed and extracted. The `SessionNode` in the graph carries `(event_date, session_label)` as a composite key. When querying "what did we discuss today?", the UI enumerates all `session_label` values for that `event_date`.
 
