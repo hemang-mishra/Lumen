@@ -357,12 +357,12 @@ Items are ordered within the queue as follows:
 
 ### Queue Capacity & Hard Cap
 
-**Maximum queue size: 20 items.**
+**Maximum queue size: 40 items.** (Configurable via `LUMEN_HITL_QUEUE_CAP` — see `lumen.config.OperationalConfig`.)
 
-When the queue reaches 20 items:
+When the queue reaches the cap:
 - New items that would enter the queue are written with `status: SUSPENDED_QUEUE_FULL`.
 - `SUSPENDED_QUEUE_FULL` items do **not** auto-BRANCH. They wait.
-- When queue size drops below 20, suspended items enter in priority order.
+- When queue size drops below the cap, suspended items enter in priority order.
 - The user is notified when the queue is full and when items are unblocked.
 
 ### SNOOZE Behavior

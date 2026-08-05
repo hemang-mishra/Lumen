@@ -8,9 +8,19 @@ data instead of re-authoring construction boilerplate.
 
 from __future__ import annotations
 
-from datetime import date, datetime
+import json
+import logging
+from datetime import UTC, date, datetime
 
 import pytest
+
+from lumen.config import OperationalConfig
+from lumen.observability.logging import JsonFormatter, TraceIdFilter
+from lumen.observability.trace import bind_trace
+from lumen.operational.engine import create_ops_engine
+from lumen.operational.migrator import upgrade_to_head
+from lumen.operational.schemas import BufferMessageRecord
+from lumen.operational.sqlalchemy_impl import SQLAlchemyOperationalStore
 
 from lumen.schemas.enums import (
     CandidateRetrievalSource,
@@ -302,3 +312,102 @@ def sample_open_loop() -> OpenLoopNode:
         last_referenced_at=NOW,
         linked_patterns=["pat_decision_saturation"],
     )
+
+
+# ---------------------------------------------------------------------------
+# Operational store and observability fixtures
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def ops_config(tmp_path) -> OperationalConfig:
+    """Point the operational store at a database file of this test's own."""
+    return OperationalConfig(db_url=f"sqlite:///{tmp_path / 'ops.db'}")
+
+
+@pytest.fixture
+def ops_engine(ops_config):
+    """
+    A database engine with the schema built by the real migrations.
+
+    Tests run the migrations rather than creating tables directly, so every
+    test run also checks that the migrations actually work.
+    """
+    engine = create_ops_engine(ops_config)
+    upgrade_to_head(engine)
+    yield engine
+    engine.dispose()
+
+
+@pytest.fixture
+def ops_store(ops_config, ops_engine) -> SQLAlchemyOperationalStore:
+    """A ready-to-use operational store backed by a migrated database."""
+    store = SQLAlchemyOperationalStore(ops_config, engine=ops_engine)
+    yield store
+    store.close()
+
+
+@pytest.fixture
+def bound_trace():
+    """Run a test inside a known trace id, so assertions can name it."""
+    with bind_trace("test-trace-0001") as trace_id:
+        yield trace_id
+
+
+@pytest.fixture
+def captured_logs():
+    """
+    Collect log lines as parsed JSON.
+
+    Attaches a handler that formats records exactly the way the real file
+    handler does, so tests check the actual output rather than a stand-in.
+    """
+    records: list[dict] = []
+
+    class _Collector(logging.Handler):
+        def __init__(self) -> None:
+            super().__init__()
+            self.setFormatter(JsonFormatter())
+            self.addFilter(TraceIdFilter())
+
+        def emit(self, record: logging.LogRecord) -> None:
+            records.append(json.loads(self.format(record)))
+
+    handler = _Collector()
+    root = logging.getLogger()
+    previous_level = root.level
+    root.addHandler(handler)
+    root.setLevel(logging.DEBUG)
+    try:
+        yield records
+    finally:
+        root.removeHandler(handler)
+        root.setLevel(previous_level)
+
+
+@pytest.fixture
+def buffer_with_messages(ops_store):
+    """A buffer holding three messages, ready for tests that need real data."""
+    buffer = ops_store.buffers.find_or_create(
+        user_id="local", event_date=TODAY, session_label="A"
+    )
+    for index, (role, content) in enumerate(
+        [
+            ("USER", "Rough day. I kept second-guessing the architecture call."),
+            ("AI", "What made it feel unresolved?"),
+            ("USER", "I think I was avoiding the tradeoff rather than making it."),
+        ]
+    ):
+        ops_store.buffers.append_message(
+            buffer.session_id,
+            BufferMessageRecord(
+                message_id=f"msg_{index}",
+                session_id=buffer.session_id,
+                seq=index,
+                role=role,
+                content=content,
+                timestamp=datetime(2026, 6, 11, 21, index, tzinfo=UTC),
+                event_date=TODAY,
+            ),
+        )
+    return ops_store.buffers.get_buffer(buffer.session_id)

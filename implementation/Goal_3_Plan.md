@@ -1,7 +1,7 @@
 # Goal 3 + 3b: Operational DB & Trace Infrastructure
 
 **Branch:** `goal3`
-**Status:** 📋 Planned — awaiting approval of Section A
+**Status:** ✅ Complete
 **Depends on:** Goal 1 (DB Init) ✅, Goal 2 (Pydantic Contracts) ✅
 **Blocks:** Goal 10 (E2E harness), Goal 18 (HITL queue), Goal 19 (erasure), Goal 20 (BFF)
 
@@ -27,7 +27,7 @@ followed from raw message to graph write and back.
 
 | Deliverable | What it is |
 |---|---|
-| **7 operational tables** | The 5 named in `Master_Plan.md`, with `pipeline_jobs` split into three (see A3). |
+| **8 operational tables** | The 5 named in `Master_Plan.md`, with `session_buffer` split in two and `pipeline_jobs` split into three (see A3). |
 | **5 repository Protocols + one SQLAlchemy implementation** | Business logic talks to `SessionBufferRepository`, `PipelineJobRepository`, etc. — never to a SQLAlchemy `Session`. Goals 10/18 become testable against fakes with no database at all. |
 | **Alembic migrations** | The schema is code-controlled from day one. SQLite → PostgreSQL is one env var (`LUMEN_OPS_DB_URL`). |
 | **`trace_id` infrastructure** | A UUID minted at each pipeline entry, carried ambiently so every log line, Pydantic model, and DB row picks it up without being handed it explicitly. |
@@ -41,7 +41,7 @@ followed from raw message to graph write and back.
 4. **stdlib `logging` + a custom JSON formatter.** No new dependency, and Goal 1's existing `getLogger(__name__)` calls start emitting traced JSON with no code change.
 5. **Master_Plan's 5 tables; `api_keys` deferred to Goal 4**, where encrypted credentials first have a reader. Building a secrets table now would mean designing an encryption scheme with no consumer.
 6. **`user_settings` is generic key/value.** Precedence: **DB override > env var > code default**. This is what lets the Settings UI change a `ModelRole`'s provider at runtime without a migration.
-7. **HITL: table + queries only.** The 20-item cap, snooze flow, and 7-day auto-resolve are Goal 18's — they can't do anything real until there's a graph write-back to execute.
+7. **HITL: table + queries only.** The queue cap, snooze flow, and 7-day auto-resolve are Goal 18's — they can't do anything real until there's a graph write-back to execute.
 8. **`session_label` gets added to `SessionDecayEvent`.** The buffer is keyed by `(event_date, session_label)` per `Interface_Architecture.md`, and `SessionNode` carries the label — but Goal 2's decay DTO doesn't, so Stage 0 would have nothing to stamp onto the node.
 
 ## A3. Why `pipeline_jobs` Becomes Three Tables
@@ -61,7 +61,7 @@ erasure pass, and a JSON scan is the wrong shape for it.
 
 ## A4. What the Tables Mean
 
-- **`session_buffers` + `buffer_messages`** — the pre-pipeline waiting room. A buffer is unique on `(user_id, event_date, session_label)`; multiple same-day sessions stay separate, exactly as `Interface_Architecture.md` requires. This goal ships the *query* for finding decayed sessions (1hr inactivity, configurable); the background watcher that calls it is Goal 10's.
+- **`session_buffers` + `buffer_messages`** — the pre-pipeline waiting room. A buffer is unique on `(user_id, event_date, session_label)`; multiple same-day sessions stay separate, exactly as `Interface_Architecture.md` requires. This goal ships the *query* for finding decayed sessions (2hr inactivity by default, configurable); the background watcher that calls it is Goal 10's.
 - **`hitl_queue`** — **workflow state only**. The decision itself is a `DecisionAuditNode` in the graph; this table holds the queue mechanics around it (status, priority, snooze counters), joined by `audit_node_id`. Two stores, one owner each, no duplicated truth.
 - **`data_erasure_audit`** — table and repository only; the anonymization pass is Goal 19. Per `Schema.md`, this record **contains no user content**: the repository hashes `user_id` on the way in and plaintext is never stored. A test enforces that.
 
@@ -100,7 +100,7 @@ rather than silently picking**, per CLAUDE.md:
 
 ## A8. Definition of Done
 
-- 7 tables created via Alembic; `alembic upgrade head` and `downgrade base` both clean.
+- 8 tables created via Alembic; `alembic upgrade head` and `downgrade base` both clean.
 - A drift test proves `models.py` and the migration cannot silently diverge.
 - Round-trip: write a buffer + messages → read back a valid `SessionDecayEvent`.
 - Illegal pipeline job state transitions raise, rather than corrupting state.
@@ -475,7 +475,7 @@ write-log, and HITL rows. No call site passes it explicitly.
 # SECTION C — RESULTS
 
 **Status:** ✅ Complete
-**Tests:** 433 passing (222 from Goals 1–2, 211 new). **100% coverage** on
+**Tests:** 435 passing (222 from Goals 1–2, 213 new). **100% coverage** on
 `lumen/operational/` and `lumen/observability/`.
 
 ## C1. What Was Built
@@ -533,6 +533,30 @@ Test files: 9 new, ~211 tests.
   replaced, per user instruction, with plain-language comments that cite no docs. Spec
   traceability lives in these plan files instead.
 - **`Master_Plan.md`** — Goals 3 and 3b checked off with result lines.
+
+### Session decay and queue cap raised (post-implementation, user decision)
+
+`OperationalConfig` defaults were changed to `session_decay_minutes=120` (from 60) and
+`hitl_queue_cap=40` (from 20). Both had been written into the specs as fixed numbers, so
+the docs were updated to match rather than leaving code and docs in disagreement:
+
+| Doc | Change |
+|---|---|
+| `Interface_Architecture.md` §Daily Session Buffer | 1 hour → 2 hours of inactivity, noted as configurable |
+| `HLDv2.md` (flow diagram + Ingestion Layer) | 1hr → 2hr decay, noted as configurable |
+| `Preprocessing.md` §Session Decay | 1 hour → 2 hours; the later "1-hour decay" reference reworded to not restate the number |
+| `Reconciliation.md` §Queue Capacity | "Maximum queue size: 20 items" → 40, noted as configurable; the two follow-on rules now say "the cap" instead of restating it |
+| `Schema.md` §DecisionStatus | `SUSPENDED_QUEUE_FULL` description no longer hard-codes 20 |
+| `ROADMAP.md` risk table | Hard cap 20 → 40 |
+| `Master_Plan.md` Goal 18 | "20-item queue cap" → "configurable queue cap (default 40)" |
+
+Where a number appeared more than once in the same document, the secondary mentions were
+reworded to refer to "the cap" or "the decay window" rather than repeating the figure —
+so the next change to these values has one place to edit per doc, not several.
+
+The corresponding test stopped pinning the exact defaults (they are a deployment choice,
+not a guarantee) and now asserts only that they are positive, with two added tests
+covering the `LUMEN_SESSION_DECAY_MINUTES` / `LUMEN_HITL_QUEUE_CAP` override path.
 
 ## C5. Amendment to Goal 2
 

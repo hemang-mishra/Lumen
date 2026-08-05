@@ -55,7 +55,7 @@ Raw Input (Native Chat / Voice / Markdown Import / JSON Import)
        │
        ▼
 Ingestion Layer → Session Buffer keyed by (event_date, session_label)
-       │  (session decay: 1hr inactivity or manual "End Session")
+       │  (session decay: 2hr inactivity or manual "End Session")
        ▼
 Step 0: Preprocessing & Quality Gate
        │
@@ -88,7 +88,7 @@ Step 6: Macroextraction (scheduled: 48h shadow / weekly / monthly / quarterly)
 **Key technical detail:**
 - The Session Buffer is keyed by `(event_date, session_label)`. A single calendar day can have multiple independent sessions (e.g., `June 27 / "A"` and `June 27 / "B"`). These are kept as separate buffers — not merged.
 - **External Log Importer** supports two sub-formats: (1) Markdown exports (speaker roles from section headers; event date from filename or header); (2) Native JSON exports (`role: user/assistant` for diarization; `event_date` derived from the first message `timestamp`, not `lastUpdated`).
-- Session decay trigger: 1 hour of inactivity within a `session_label`. Crossing midnight auto-starts a new `event_date` session.
+- Session decay trigger: 2 hours of inactivity within a `session_label` (configurable via `LUMEN_SESSION_DECAY_MINUTES`). Crossing midnight auto-starts a new `event_date` session.
 
 **Detailed doc:** [Interface_Architecture.md](../hld/Interface_Architecture.md)
 

@@ -385,7 +385,7 @@ status: ACTIVE                           # ACTIVE | ROLLED_BACK | PENDING_HITL |
 - `ROLLED_BACK` — edge invalidated; affected nodes re-queued
 - `PENDING_HITL` — awaiting user resolution (AMBIGUOUS tie detected)
 - `BELOW_THRESHOLD` — model confidence fell below action threshold; in HITL queue
-- `SUSPENDED_QUEUE_FULL` — HITL queue at 20-item cap; item waiting to enter
+- `SUSPENDED_QUEUE_FULL` — HITL queue at its item cap; item waiting to enter
 - `EXTRACTION_FAILED` — observation failed validation 3 times; graph write skipped
 
 ---

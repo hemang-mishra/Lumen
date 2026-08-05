@@ -23,6 +23,7 @@ from datetime import date, datetime
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from lumen.observability.trace import get_trace_id
 from lumen.schemas.enums import (
     CandidateRetrievalSource,
     DialogueAct,
@@ -46,20 +47,19 @@ from lumen.schemas.nodes import (
 
 class PipelineDTO(BaseModel):
     """
-    Base class shared by every top-level pipeline stage input/output. Stage
-    DTOs are the fixed contracts passed between pipeline stages — each stage
-    takes one of these in and hands another one back out.
+    Base class shared by every top-level pipeline stage input and output.
+    Each stage takes one of these in and hands another one back out.
 
     Attributes:
-        trace_id: Optional identifier used to correlate all the data
-            produced for a single session as it moves through the
-            pipeline. Left optional since trace_id generation isn't wired
-            up everywhere yet.
+        trace_id: Ties together everything produced by a single run. It fills
+            itself in from the current run context, so stages never have to
+            pass it along by hand. Built outside a run it stays empty, which
+            is correct — there is no run for it to belong to.
     """
 
     model_config = ConfigDict(extra="forbid")
 
-    trace_id: str | None = None
+    trace_id: str | None = Field(default_factory=get_trace_id)
 
 
 # ---------------------------------------------------------------------------
@@ -267,6 +267,10 @@ class SessionDecayEvent(PipelineDTO):
         session_id: Identifier for the session that decayed.
         user_id: Identifier for the user this session belongs to.
         event_date: The calendar date this session's content belongs to.
+        session_label: Distinguishes conversations held on the same day. A
+            day can hold several, kept separate because the user split them
+            by topic. Carried here so later stages can record which
+            conversation their results came from.
         message_count: How many messages were buffered in this session.
         raw_buffer: The actual buffered messages to be processed.
         triggered_at: The exact time this decay event fired.
@@ -275,6 +279,7 @@ class SessionDecayEvent(PipelineDTO):
     session_id: str = Field(min_length=1)
     user_id: str = Field(min_length=1)
     event_date: date
+    session_label: str = ""
     message_count: int = Field(ge=0)
     raw_buffer: list[BufferMessage] = Field(default_factory=list)
     triggered_at: datetime
