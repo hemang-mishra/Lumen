@@ -39,8 +39,8 @@ followed from raw message to graph write and back.
 2. **Repositories behind Protocols**, matching `graph/` and `vector/`. Callers never see an ORM object.
 3. **`trace_id` does not go into the graph.** `Technical_HLD.md` §10 says it's attached to every node and edge written — but no node or edge table has such a column, and adding one means altering 59 Kuzu tables and every Goal 2 model. Instead the ops DB records *which* node and edge IDs each pipeline run wrote. Same reconstruction power, one join, zero graph churn.
 4. **stdlib `logging` + a custom JSON formatter.** No new dependency, and Goal 1's existing `getLogger(__name__)` calls start emitting traced JSON with no code change.
-5. **Master_Plan's 5 tables; `api_keys` deferred to Goal 4**, where encrypted credentials first have a reader. Building a secrets table now would mean designing an encryption scheme with no consumer.
-6. **`user_settings` is generic key/value.** Precedence: **DB override > env var > code default**. This is what lets the Settings UI change a `ModelRole`'s provider at runtime without a migration.
+5. **Master_Plan's 5 tables; `api_keys` deferred to Goal 4**, where encrypted credentials first have a reader. Building a secrets table now would mean designing an encryption scheme with no consumer. *(⚠️ Superseded — see C7: Goal 4 cancelled the table outright.)*
+6. **`user_settings` is generic key/value.** Precedence: **DB override > env var > code default**. This is what lets the Settings UI change a `ModelRole`'s provider at runtime without a migration. *(⚠️ Rationale superseded — see C7: provider selection never passes through settings.)*
 7. **HITL: table + queries only.** The queue cap, snooze flow, and 7-day auto-resolve are Goal 18's — they can't do anything real until there's a graph write-back to execute.
 8. **`session_label` gets added to `SessionDecayEvent`.** The buffer is keyed by `(event_date, session_label)` per `Interface_Architecture.md`, and `SessionNode` carries the label — but Goal 2's decay DTO doesn't, so Stage 0 would have nothing to stamp onto the node.
 
@@ -575,3 +575,22 @@ FastAPI routes (Goals 11+), and OpenTelemetry export (Goal 20).
 
 One item worth naming for Goal 4: `resolve_provider_config()` is written and tested, but
 nothing calls it yet — the role-resolution factory that consumes it is Goal 4's.
+
+---
+
+## C7. Superseded by Goal 4
+
+Two decisions above were reversed in Goal 4. This section is the correction; the text
+above is left as written, since it is the record of what was decided at the time.
+
+| Superseded | Goal 4's decision | Where |
+|---|---|---|
+| **A2-5, A7, C6** — `api_keys` + encryption "deferred to Goal 4" | **Cancelled, not deferred.** There will be no `api_keys` table and no application-level secrets store. Provider credentials are read from environment variables and never persisted. | `Goal_4_Plan.md` A2-4 |
+| **A2-6** — `user_settings` precedence exists so "the Settings UI can change a `ModelRole`'s provider at runtime" | **Rationale withdrawn.** Provider selection is a maintainer decision made at deployment time, read from the environment once at process start. It never passes through `user_settings`, and the provider factory has no operational-DB dependency. The precedence chain itself stands — it just governs genuine user preferences, not provider routing. | `Goal_4_Plan.md` A2-2, A2-3 |
+
+**Code removed in Goal 4 as a result:** `resolve_provider_config()` and its export from
+`lumen.operational`, plus the ten generated `providers.<role>.{provider,model}` entries in
+`KNOWN_SETTING_KEYS`. It was dead code — C6 above notes nothing called it — written to serve
+a runtime-override path that is no longer being built. `test_operational_settings.py` lost its
+nine `TestResolveProviderConfig` cases and gained four asserting the opposite: no settings key
+names a provider, and no key could carry a credential. Suite total moved 435 → 429.

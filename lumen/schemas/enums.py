@@ -104,6 +104,48 @@ class ModelRole(StrEnum):
     TTS = "TTS"
 
 
+class EmbeddingTaskType(StrEnum):
+    """
+    Which side of a search a piece of text is on.
+
+    Searching is lopsided. The thing being searched for and the thing that
+    matches it are usually written completely differently — "why do I keep
+    checking how everyone else is doing?" against a stored pattern reading
+    "seeking external validation through social comparison". Barely a shared
+    word, but one is the answer to the other. Embedding models are trained to
+    bridge that gap, and this label is how they are told which side they are
+    looking at.
+
+    DOCUMENT       — text being stored, to be found later.
+    QUERY          — text being searched with, right now.
+    SIMILARITY     — two pieces of text being compared as equals.
+    CLASSIFICATION — text being fed to a classifier.
+
+    Only DOCUMENT text is ever saved. Everything stored is a statement about
+    the user's history: a pattern, a belief, an observation, an episode
+    summary. Nothing question-shaped is kept anywhere.
+
+    Searching text is passing through. A chat message that triggers a lookup,
+    or a freshly extracted observation looking for what it resembles in the
+    past, is used to search and then thrown away.
+
+    Worth knowing: the same text can be on both sides at different moments. A
+    new observation searches the past for something to reconcile against, and
+    is then written to the graph itself so later observations can find it. Same
+    words, embedded twice, labelled differently each time, and correct both
+    times.
+
+    Getting the label wrong is expensive to undo, which is why it is decided
+    per call rather than assumed. It is baked into every vector written with
+    it, so changing it later means embedding everything again.
+    """
+
+    DOCUMENT = "DOCUMENT"
+    QUERY = "QUERY"
+    SIMILARITY = "SIMILARITY"
+    CLASSIFICATION = "CLASSIFICATION"
+
+
 # ---------------------------------------------------------------------------
 # Per-node status enums — deliberately NOT unified into one Status enum,
 # since valid values differ per node type (e.g. IMMUTABLE only applies to
@@ -406,6 +448,7 @@ __all__ = [
     "ExtractionConfidence",
     "Domain",
     "ModelRole",
+    "EmbeddingTaskType",
     "NodeStatus",
     "ObservationStatus",
     "LifecycleNodeStatus",

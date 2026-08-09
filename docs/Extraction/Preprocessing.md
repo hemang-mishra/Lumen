@@ -143,7 +143,7 @@ Every entry (after ASR post-processing, if applicable) is scored for completenes
 
 #### Semantic Gate: LLM Coherence Scoring
 
-Entries that pass the structural gate are sent to a call using the operator-configured `LIGHTWEIGHT` model role (see `docs/hld/LLM_Abstraction_Architecture.md`) with a single scoring task:
+Entries that pass the structural gate are sent to a call using the maintainer-configured `LIGHTWEIGHT` model role (see `docs/hld/LLM_Abstraction_Architecture.md`) with a single scoring task:
 
 **Prompt structure:**
 ```

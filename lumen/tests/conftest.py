@@ -14,7 +14,9 @@ from datetime import UTC, date, datetime
 
 import pytest
 
-from lumen.config import OperationalConfig
+from lumen.config import OperationalConfig, ProviderConfig
+from lumen.providers.factory import reset_provider_cache
+from lumen.providers.fake import fake_scripts
 from lumen.observability.logging import JsonFormatter, TraceIdFilter
 from lumen.observability.trace import bind_trace
 from lumen.operational.engine import create_ops_engine
@@ -411,3 +413,53 @@ def buffer_with_messages(ops_store):
             ),
         )
     return ops_store.buffers.get_buffer(buffer.session_id)
+
+
+# ---------------------------------------------------------------------------
+# Model provider fixtures
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture(autouse=True)
+def isolated_providers():
+    """
+    Give every test a clean provider setup.
+
+    Providers are cached for the life of the process, and scripted replies are
+    left in a shared place for the factory to find. Both would otherwise leak
+    from one test into the next.
+    """
+    reset_provider_cache()
+    fake_scripts.clear()
+    yield
+    reset_provider_cache()
+    fake_scripts.clear()
+
+
+@pytest.fixture
+def provider_config() -> ProviderConfig:
+    """
+    Provider settings with the waiting taken out.
+
+    Retry delays are set to zero so tests that exercise failure paths finish
+    immediately instead of actually sleeping.
+    """
+    return ProviderConfig(
+        max_attempts=3,
+        backoff_base_seconds=0.0,
+        backoff_max_seconds=0.0,
+        rate_limit_backoff_max_seconds=0.0,
+        embed_batch_size=32,
+        embed_max_workers=1,
+    )
+
+
+@pytest.fixture
+def recording_sleeper():
+    """
+    A stand-in for sleeping that just remembers what it was asked to wait.
+
+    Lets a test check the backoff pattern without spending the time.
+    """
+    waits: list[float] = []
+    return waits, waits.append

@@ -73,6 +73,11 @@ Stage 4: Graph Write
 
 - **Pass A — Semantic Retrieval:** Uses HyDE (Hypothetical Document Embedding) to generate a synthetic "ideal historical match" for embedding, then runs Hybrid Search (BM25 + cosine similarity) to retrieve the top 3–5 closest historical nodes. This handles most cases where the current and historical descriptions share semantic proximity.
 
+  > **Embedding task type:** the synthetic match is embedded as a **document**
+  > (`EmbeddingTaskType.DOCUMENT`), not a query. Turning the query into a document is precisely
+  > what HyDE is for; labelling it `QUERY` would apply the query/document asymmetry correction
+  > a second time. See `hld/LLM_Abstraction_Architecture.md` §2B.
+
 - **Pass B — Structural Retrieval:** A deterministic, graph-keyed lookup that bypasses embedding entirely. It runs whenever any of the following anchors are present in the current episode:
   1. **Named persons** from the coreference map — retrieves all active `BeliefNode`, `PatternNode`, and `ObservationNode` instances linked to that `PersonEntityNode`.
   2. **`historical_era` tags** — retrieves all nodes tagged with that era (e.g., `a major entrance exam_PREP`).
@@ -116,7 +121,7 @@ HyDE combats semantic drift at query time, but does nothing for frozen historica
 node:
   id: pat_example_001
   content: "Seeking external validation through social comparison"
-  embedding_v1: [...]       # Model: nomic-embed-large, 2026-Q1
+  embedding_v1: [...]       # Model: nomic-embed-text, 2026-Q1
   embedding_v2: [...]       # Model: mxbai-embed-large, 2027-Q1 (re-run quarterly)
   active_embedding_version: v2
 ```
