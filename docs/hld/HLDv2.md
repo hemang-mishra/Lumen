@@ -264,9 +264,11 @@ Model selection is a **model-capability role**, resolved through a single point 
 configuration (`ProviderConfig`, see `hld/LLM_Abstraction_Architecture.md`). The pipeline
 requests `LIGHTWEIGHT` or `THINKING` (or `EMBEDDING`/`TRANSCRIPTION`/`TTS` for their
 respective jobs) based on the task's own complexity — never based on content sensitivity.
-There is no automatic, code-enforced escalation for "identity-critical" content: an
-operator who wants every call to run on a local/private model configures all five roles
-to local providers, once, as a deployment choice.
+There is no automatic, code-enforced escalation for "identity-critical" content: a
+maintainer who wants every call to run on a local/private model configures all five roles
+to local providers, once, as a deployment choice. Provider selection is read from the
+environment at process start — it is a maintainer's deployment property, never a setting
+exposed to the person writing the entries.
 
 ### Extraction (Microextraction)
 

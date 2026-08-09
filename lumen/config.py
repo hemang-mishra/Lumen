@@ -5,30 +5,101 @@ Central configuration for all provider injection. This is the single place
 where infrastructure choices (Kuzu vs Neo4j, local vs cloud Qdrant, etc.)
 are made. Business logic never references vendor libraries directly.
 
-See: docs/hld/Technical_HLD.md Section 3.3 — "The only thing that changes
-between local and production is config.py"
+Every environment variable is read when a config object is *constructed*, not
+when this module is imported. That distinction matters: a process that loads a
+.env file after importing lumen.config would otherwise be stuck with whatever
+the environment held at import time, silently ignoring its own settings.
 """
 
 from __future__ import annotations
 
 import os
 from dataclasses import dataclass, field
+from typing import Any
 
 from lumen.schemas.enums import ModelRole
+
+
+def _env(name: str, default: str) -> Any:
+    """
+    A dataclass default that reads an environment variable on construction.
+
+    Field defaults are evaluated once, when the class is created. Wrapping the
+    read in a default_factory defers it to each instantiation, which is what
+    makes `LUMEN_X=... python -m lumen` and monkeypatched environments in tests
+    behave the way everyone expects.
+    """
+    return field(default_factory=lambda: os.environ.get(name, default))
+
+
+def _env_int(name: str, default: int) -> Any:
+    """As _env, for a whole number."""
+    return field(default_factory=lambda: int(os.environ.get(name, str(default))))
+
+
+def _env_float(name: str, default: float) -> Any:
+    """As _env, for a decimal number."""
+    return field(default_factory=lambda: float(os.environ.get(name, str(default))))
+
+
+def _env_optional_int(name: str) -> Any:
+    """
+    As _env, for a whole number that is normally not set at all.
+
+    Left unset it stays None, which lets code tell "nobody said" apart from
+    "somebody said this number" — a distinction that matters when the fallback
+    would otherwise hide a mistake.
+    """
+
+    def read() -> int | None:
+        raw = os.environ.get(name)
+        return int(raw) if raw else None
+
+    return field(default_factory=read)
+
+
+def _env_bool(name: str, default: bool) -> Any:
+    """
+    As _env, for a true/false switch.
+
+    Anything other than "true"/"false" (case-insensitive) leaves the default in
+    place rather than guessing at intent.
+    """
+
+    def read() -> bool:
+        raw = os.environ.get(name)
+        if raw is None:
+            return default
+        lowered = raw.strip().lower()
+        if lowered in ("true", "1", "yes"):
+            return True
+        if lowered in ("false", "0", "no"):
+            return False
+        return default
+
+    return field(default_factory=read)
 
 
 @dataclass(frozen=True)
 class GraphConfig:
     """Configuration for the Graph database provider."""
-    db_path: str = os.environ.get("LUMEN_GRAPH_DB_PATH", "./lumen_graph.db")
+
+    db_path: str = _env("LUMEN_GRAPH_DB_PATH", "./lumen_graph.db")
 
 
 @dataclass(frozen=True)
 class VectorConfig:
-    """Configuration for the Vector database provider."""
-    location: str = os.environ.get("LUMEN_VECTOR_LOCATION", ":memory:")
-    collection_name: str = "lumen_nodes"
-    vector_size: int = 768  # text-embedding-004 default
+    """
+    Configuration for the Vector database provider.
+
+    vector_size must match the width of whatever the EMBEDDING role produces.
+    The embedding provider checks this at startup rather than letting a
+    mismatch surface as a failed write much later.
+    """
+
+    location: str = _env("LUMEN_VECTOR_LOCATION", ":memory:")
+    collection_name: str = _env("LUMEN_VECTOR_COLLECTION", "lumen_nodes")
+    vector_size: int = _env_int("LUMEN_VECTOR_SIZE", 768)
 
 
 @dataclass(frozen=True)
@@ -46,10 +117,10 @@ class OperationalConfig:
       LUMEN_HITL_QUEUE_CAP       — maximum items allowed in the review queue
     """
 
-    db_url: str = os.environ.get("LUMEN_OPS_DB_URL", "sqlite:///./lumen_ops.db")
-    echo_sql: bool = os.environ.get("LUMEN_OPS_DB_ECHO", "").lower() == "true"
-    session_decay_minutes: int = int(os.environ.get("LUMEN_SESSION_DECAY_MINUTES", "120"))
-    hitl_queue_cap: int = int(os.environ.get("LUMEN_HITL_QUEUE_CAP", "40"))
+    db_url: str = _env("LUMEN_OPS_DB_URL", "sqlite:///./lumen_ops.db")
+    echo_sql: bool = _env_bool("LUMEN_OPS_DB_ECHO", False)
+    session_decay_minutes: int = _env_int("LUMEN_SESSION_DECAY_MINUTES", 120)
+    hitl_queue_cap: int = _env_int("LUMEN_HITL_QUEUE_CAP", 40)
 
 
 @dataclass(frozen=True)
@@ -66,9 +137,9 @@ class ObservabilityConfig:
       LUMEN_LOG_CONSOLE — "false" to silence console output
     """
 
-    log_level: str = os.environ.get("LUMEN_LOG_LEVEL", "INFO")
-    log_file: str = os.environ.get("LUMEN_LOG_FILE", "./logs/lumen.jsonl")
-    log_to_console: bool = os.environ.get("LUMEN_LOG_CONSOLE", "true").lower() != "false"
+    log_level: str = _env("LUMEN_LOG_LEVEL", "INFO")
+    log_file: str = _env("LUMEN_LOG_FILE", "./logs/lumen.jsonl")
+    log_to_console: bool = _env_bool("LUMEN_LOG_CONSOLE", True)
     console_json: bool = False
     max_bytes: int = 10 * 1024 * 1024
     backup_count: int = 5
@@ -81,14 +152,25 @@ class ProviderConfig:
 
     Each role (see lumen.schemas.enums.ModelRole) independently maps to a
     (provider, model) pair. This is the ONLY place a role resolves to an
-    actual vendor + model — the abstraction layers built in Goal 4 read
-    from here and never hardcode a vendor or assume a deployment locality.
+    actual vendor + model — the abstraction layers read from here and never
+    hardcode a vendor or assume a deployment locality.
 
-    Deliberately excludes any privacy/security-tier concept. An operator
+    Deliberately excludes any privacy/security-tier concept. A maintainer
     who wants guaranteed-local processing configures every *_provider
     field to a local provider (e.g. "ollama", "whisper_cpp") — that is a
     deployment choice made once, here, not a runtime decision the pipeline
-    makes per piece of content. See docs/hld/LLM_Abstraction_Architecture.md.
+    makes per piece of content.
+
+    Two rules this class exists to enforce:
+
+      - Provider selection belongs to whoever deploys Lumen, not to whoever
+        writes the journal entries. Values come from the environment and never
+        from the user_settings table; there is no runtime switcher and no UI.
+      - Credentials live in the environment and are never persisted. Lumen has
+        no api_keys table and no secrets store. Credentials are exposed here as
+        properties rather than fields, so they cannot be captured by asdict(),
+        a repr, an equality check, or anything else that walks the fields —
+        see the note on gemini_api_key.
 
     Environment variables override every field independently:
       LUMEN_LIGHTWEIGHT_PROVIDER / LUMEN_LIGHTWEIGHT_MODEL
@@ -98,20 +180,59 @@ class ProviderConfig:
       LUMEN_TTS_PROVIDER / LUMEN_TTS_MODEL
     """
 
-    lightweight_provider: str = os.environ.get("LUMEN_LIGHTWEIGHT_PROVIDER", "gemini")
-    lightweight_model: str = os.environ.get("LUMEN_LIGHTWEIGHT_MODEL", "gemini-2.5-flash")
+    lightweight_provider: str = _env("LUMEN_LIGHTWEIGHT_PROVIDER", "gemini")
+    lightweight_model: str = _env("LUMEN_LIGHTWEIGHT_MODEL", "gemini-2.5-flash")
 
-    thinking_provider: str = os.environ.get("LUMEN_THINKING_PROVIDER", "gemini")
-    thinking_model: str = os.environ.get("LUMEN_THINKING_MODEL", "gemini-2.5-pro")
+    thinking_provider: str = _env("LUMEN_THINKING_PROVIDER", "gemini")
+    thinking_model: str = _env("LUMEN_THINKING_MODEL", "gemini-2.5-pro")
 
-    embedding_provider: str = os.environ.get("LUMEN_EMBEDDING_PROVIDER", "gemini")
-    embedding_model: str = os.environ.get("LUMEN_EMBEDDING_MODEL", "text-embedding-004")
+    embedding_provider: str = _env("LUMEN_EMBEDDING_PROVIDER", "gemini")
+    embedding_model: str = _env("LUMEN_EMBEDDING_MODEL", "text-embedding-004")
 
-    transcription_provider: str = os.environ.get("LUMEN_TRANSCRIPTION_PROVIDER", "whisper_cpp")
-    transcription_model: str = os.environ.get("LUMEN_TRANSCRIPTION_MODEL", "base.en")
+    transcription_provider: str = _env("LUMEN_TRANSCRIPTION_PROVIDER", "whisper_cpp")
+    transcription_model: str = _env("LUMEN_TRANSCRIPTION_MODEL", "base.en")
 
-    tts_provider: str = os.environ.get("LUMEN_TTS_PROVIDER", "macos")
-    tts_model: str = os.environ.get("LUMEN_TTS_MODEL", "default")
+    tts_provider: str = _env("LUMEN_TTS_PROVIDER", "macos")
+    tts_model: str = _env("LUMEN_TTS_MODEL", "default")
+
+    # Where a local Ollama daemon is listening.
+    ollama_host: str = _env("LUMEN_OLLAMA_HOST", "http://localhost:11434")
+
+    # How long to wait for a model, and how hard to try again when a call fails
+    # for reasons that have nothing to do with the answer (a dropped
+    # connection, a busy server, a hit rate limit).
+    timeout_seconds: float = _env_float("LUMEN_LLM_TIMEOUT_SECONDS", 60.0)
+    thinking_timeout_seconds: float = _env_float("LUMEN_THINKING_TIMEOUT_SECONDS", 180.0)
+    max_attempts: int = _env_int("LUMEN_LLM_MAX_ATTEMPTS", 3)
+    backoff_base_seconds: float = _env_float("LUMEN_LLM_BACKOFF_BASE", 0.5)
+    backoff_max_seconds: float = _env_float("LUMEN_LLM_BACKOFF_MAX", 8.0)
+
+    # Rate limits get a much longer ceiling than other failures. Cloud quotas
+    # are usually counted per minute, so three quick retries all land inside
+    # the same exhausted minute and fail together. One longer wait that
+    # crosses into the next minute is worth more than several short ones.
+    rate_limit_backoff_max_seconds: float = _env_float("LUMEN_LLM_RATE_LIMIT_BACKOFF_MAX", 65.0)
+
+    # How many texts go into one embedding request, and how many requests run
+    # at the same time. Concurrency is off by default: firing several requests
+    # at a metered cloud API is the quickest way to trip its rate limit.
+    embed_batch_size: int = _env_int("LUMEN_EMBED_BATCH_SIZE", 32)
+    embed_max_workers: int = _env_int("LUMEN_EMBED_MAX_WORKERS", 1)
+
+    # How wide the vectors from the embedding model are, for a model Lumen has
+    # not been told about. Normally unset, because the widths of the models we
+    # know are already recorded. Setting it is how somebody says "this is a new
+    # model and I know its width", instead of being blocked.
+    embedding_dimensions: int | None = _env_optional_int("LUMEN_EMBEDDING_DIMENSIONS")
+
+    # Low temperature because extraction should give the same answer twice.
+    # Kept here rather than in each provider so switching providers cannot
+    # quietly change how repeatable the pipeline is.
+    temperature: float = _env_float("LUMEN_LLM_TEMPERATURE", 0.2)
+
+    # Prompts are journal text. Turning this on writes them to the log file,
+    # which is useful when debugging and a privacy problem otherwise.
+    log_prompts: bool = _env_bool("LUMEN_LOG_PROMPTS", False)
 
     def resolve(self, role: ModelRole) -> tuple[str, str]:
         """Return the (provider, model) pair configured for a given role."""
@@ -123,6 +244,34 @@ class ProviderConfig:
             ModelRole.TTS: (self.tts_provider, self.tts_model),
         }
         return mapping[role]
+
+    def resolve_timeout(self, role: ModelRole) -> float:
+        """
+        How long to wait for a given role before giving up.
+
+        Deep-reasoning models take much longer than fast ones, so they get a
+        larger budget rather than every call being held to the slowest.
+        """
+        if role is ModelRole.THINKING:
+            return self.thinking_timeout_seconds
+        return self.timeout_seconds
+
+    @property
+    def gemini_api_key(self) -> str | None:
+        """
+        The Gemini credential, read from the environment on every access.
+
+        This is a property, not a field, and that is the whole point. Config
+        objects get snapshotted — pipeline_jobs.config_snapshot stores one on
+        every run — and anything that walks the dataclass fields would carry a
+        plaintext key into the database with it. A property is invisible to
+        asdict(), replace(), repr(), and ==, so the key has no path into any
+        store, log line, or error message unless someone asks for it by name.
+
+        Reading it fresh each time also means a rotated key takes effect
+        without a restart.
+        """
+        return os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY")
 
 
 @dataclass(frozen=True)
@@ -136,6 +285,7 @@ class AppConfig:
       LUMEN_USER_ID         — identifier for the single local user
       See ProviderConfig, OperationalConfig and ObservabilityConfig for the rest.
     """
+
     graph: GraphConfig = field(default_factory=GraphConfig)
     vector: VectorConfig = field(default_factory=VectorConfig)
     providers: ProviderConfig = field(default_factory=ProviderConfig)
@@ -143,4 +293,4 @@ class AppConfig:
     observability: ObservabilityConfig = field(default_factory=ObservabilityConfig)
 
     # The personal build has one user. Multi-user deployments set this per request.
-    user_id: str = os.environ.get("LUMEN_USER_ID", "local")
+    user_id: str = _env("LUMEN_USER_ID", "local")

@@ -24,7 +24,7 @@ from typing import Any
 from sqlalchemy import Engine, delete, func, select
 from sqlalchemy.orm import Session, sessionmaker
 
-from lumen.config import AppConfig, OperationalConfig, ProviderConfig
+from lumen.config import AppConfig, OperationalConfig
 from lumen.observability.trace import get_trace_id, new_trace_id
 from lumen.operational import models
 from lumen.operational.engine import create_ops_engine, create_session_factory
@@ -60,7 +60,7 @@ from lumen.operational.schemas import (
     UserSettingRecord,
     WriteLogEntry,
 )
-from lumen.schemas.enums import HitlResolutionChoice, ModelRole, SignalStrength
+from lumen.schemas.enums import HitlResolutionChoice, SignalStrength
 from lumen.schemas.pipeline import BufferMessage, SessionDecayEvent
 
 logger = logging.getLogger(__name__)
@@ -78,19 +78,16 @@ def _known_setting_keys() -> frozenset[str]:
     """
     Every setting the application actually reads.
 
-    The provider keys are generated from the roles themselves, so adding a new
-    role makes its settings available without anyone remembering to update a
-    list here.
+    Deliberately absent: anything naming a model provider. Which model backs a
+    role is a deployment property the maintainer sets in the environment, read
+    once at startup. It is not a user preference, so it does not belong in a
+    table the user can write to.
     """
-    keys = {
+    return frozenset({
         "pipeline.session_decay_minutes",
         "hitl.queue_cap",
         "logging.level",
-    }
-    for role in ModelRole:
-        keys.add(f"providers.{role.value.lower()}.provider")
-        keys.add(f"providers.{role.value.lower()}.model")
-    return frozenset(keys)
+    })
 
 
 KNOWN_SETTING_KEYS: frozenset[str] = _known_setting_keys()
@@ -857,41 +854,6 @@ class SQLAlchemyOperationalStore:
         self.close()
 
 
-def resolve_provider_config(
-    base: ProviderConfig, overrides: dict[str, Any]
-) -> ProviderConfig:
-    """
-    Apply saved settings on top of the configured providers.
-
-    A value the user set wins over an environment variable, which wins over the
-    built-in default. Settings that are absent or empty change nothing, so a
-    half-filled settings table cannot blank out a working configuration.
-    """
-    replacements: dict[str, Any] = {}
-    for role in ModelRole:
-        prefix = f"providers.{role.value.lower()}"
-        for suffix in ("provider", "model"):
-            value = overrides.get(f"{prefix}.{suffix}")
-            if value:
-                replacements[f"{role.value.lower()}_{suffix}"] = value
-
-    if not replacements:
-        return base
-
-    current = {
-        field: getattr(base, field)
-        for field in (
-            "lightweight_provider", "lightweight_model",
-            "thinking_provider", "thinking_model",
-            "embedding_provider", "embedding_model",
-            "transcription_provider", "transcription_model",
-            "tts_provider", "tts_model",
-        )
-    }
-    current.update(replacements)
-    return ProviderConfig(**current)
-
-
 def build_operational_store(config: AppConfig | None = None) -> SQLAlchemyOperationalStore:
     """Create the store the application uses, wired from configuration."""
     settings = config or AppConfig()
@@ -1063,6 +1025,5 @@ __all__ = [
     "SqlAlchemyHitlQueueRepository",
     "SqlAlchemyUserSettingsRepository",
     "SqlAlchemyDataErasureAuditRepository",
-    "resolve_provider_config",
     "build_operational_store",
 ]

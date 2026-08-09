@@ -22,7 +22,6 @@ from lumen.operational.sqlalchemy_impl import (
     KNOWN_SETTING_KEYS,
     SQLAlchemyOperationalStore,
     build_operational_store,
-    resolve_provider_config,
 )
 
 __all__ = [
@@ -38,6 +37,5 @@ __all__ = [
     "UnknownSettingKeyError",
     "SQLAlchemyOperationalStore",
     "build_operational_store",
-    "resolve_provider_config",
     "KNOWN_SETTING_KEYS",
 ]

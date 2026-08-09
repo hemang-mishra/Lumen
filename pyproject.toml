@@ -6,7 +6,9 @@ readme = "README.md"
 requires-python = ">=3.13"
 dependencies = [
     "alembic>=1.18.5",
+    "google-genai>=2.17.0",
     "kuzu>=0.11.3",
+    "ollama>=0.6.2",
     "pydantic>=2.13.4",
     "qdrant-client>=1.18.0",
     "sqlalchemy>=2.0.51",
@@ -17,3 +19,11 @@ dev = [
     "pytest>=9.1.1",
     "pytest-cov>=7.1.0",
 ]
+
+[tool.pytest.ini_options]
+markers = [
+    "live: talks to a real model API; needs a credential or a running local daemon",
+]
+# Live tests are left out unless asked for, since they need credentials, cost
+# money and depend on a network. Run them with: uv run pytest -m live
+addopts = "-m 'not live'"

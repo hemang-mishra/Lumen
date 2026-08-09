@@ -161,18 +161,19 @@ keyed by model-capability **role**, not by content sensitivity. Each role's prov
 model are independently overridable via env var; the abstraction never assumes or
 enforces a deployment locality (cloud vs. local) for any role.
 
-| Role | Used By | Default Provider / Model |
-|---|---|---|
-| `LIGHTWEIGHT` | Quality-gate scoring, low-risk Reconciliation actions (MERGE/REINFORCE/BRANCH/REGULATE), Query Formulation turn classification, HyDE expansion | `gemini` / `gemini-2.5-flash` |
-| `THINKING` | High-consequence Reconciliation actions (EVOLVE/CONTRADICT/DIALECTIC), Macroextraction synthesis | `gemini` / `gemini-2.5-pro` |
-| `EMBEDDING` | Dense vector generation for the Vector Store | `gemini` / `text-embedding-004` |
-| `TRANSCRIPTION` | Voice-note speech-to-text | `whisper_cpp` / `base.en` |
-| `TTS` | Text-to-speech | `macos` / `default` |
+| Role | Used By | Default Provider / Model | Status |
+|---|---|---|---|
+| `LIGHTWEIGHT` | Quality-gate scoring, low-risk Reconciliation actions (MERGE/REINFORCE/BRANCH/REGULATE), Query Formulation turn classification, HyDE expansion | `gemini` / `gemini-2.5-flash` | Implemented (Goal 4) |
+| `THINKING` | High-consequence Reconciliation actions (EVOLVE/CONTRADICT/DIALECTIC), Macroextraction synthesis | `gemini` / `gemini-2.5-pro` | Implemented (Goal 4) |
+| `EMBEDDING` | Dense vector generation for the Vector Store | `gemini` / `text-embedding-004` | Implemented (Goal 4) |
+| `TRANSCRIPTION` | Voice-note speech-to-text | `whisper_cpp` / `base.en` | Protocol only |
+| `TTS` | Text-to-speech | `macos` / `default` | Protocol only |
 
-An operator who wants every AI call to run locally (for privacy or offline use)
-reconfigures all five roles to local providers (e.g. `ollama` for `LIGHTWEIGHT`/`THINKING`,
-`ollama` for `EMBEDDING`) — a one-time deployment choice, not a runtime routing decision
-the pipeline makes per piece of content.
+A maintainer who wants every AI call to run locally (for privacy or offline use)
+reconfigures all five roles to local providers (e.g. `ollama` for `LIGHTWEIGHT`/`THINKING`
+and `EMBEDDING`) — a one-time deployment choice, not a runtime routing decision the pipeline
+makes per piece of content, and not something the end user is offered. Configuration is read
+from the environment at process start; there is no runtime or user-facing switcher.
 
 ### 2.8 Audio (STT / TTS)
 
@@ -181,8 +182,11 @@ the pipeline makes per piece of content.
 | Speech → Text | `whisper.cpp` (local, fast, free) | `Deepgram` or `Assembly AI` (cloud) |
 | Text → Speech | macOS system neural voices | `ElevenLabs` or `OpenAI TTS` |
 
-Both behind `AudioTranscriptionProvider` and `TTSProvider` Protocols (already defined),
-configured via the same `ProviderConfig` `TRANSCRIPTION`/`TTS` roles described in §2.7.
+Both sit behind `AudioTranscriptionProvider` and `TTSProvider` Protocols, configured via the
+same `ProviderConfig` `TRANSCRIPTION`/`TTS` roles described in §2.7. Goal 4 **defines** these
+two Protocols but implements neither — the extraction pipeline (Goals 5–9) needs no audio, and
+whisper.cpp brings a binary and model-file dependency that belongs with the voice-ingestion
+work that first consumes it.
 
 ---
 
@@ -285,7 +289,6 @@ Lumen uses **three separate data stores**, each optimized for its access pattern
 │  hitl_queue: decisions pending human review             │
 │  user_settings: key/value config overrides              │
 │  data_erasure_audit: erasure records (no user content)  │
-│  api_keys: encrypted provider credentials  [Goal 4]     │
 │  Access pattern: standard CRUD, status polling          │
 └─────────────────────────────────────────────────────────┘
 
@@ -297,9 +300,16 @@ Notes on the table set (resolved in Goal 3):
   `rerun_from_stage` possible; `pipeline_write_log` is the trace→graph mapping
   described in Section 10.
 - `user_settings` holds generic `(user_id, key, value_json)` overrides, resolved as
-  **DB override > env var > code default**. It does *not* hold "sensitivity prefs" —
-  the sensitivity/routing-tier concept was removed in Goal 2 (see Section 2.7).
-- `api_keys` is deferred to Goal 4, where provider credentials first have a consumer.
+  **DB override > env var > code default**. Two things it does *not* hold:
+  - "Sensitivity prefs" — the sensitivity/routing-tier concept was removed in Goal 2
+    (see Section 2.7).
+  - **Provider selection or credentials.** Which model backs a `ModelRole` is a
+    deployment property owned by the maintainer, read from the environment once at
+    process start; the provider factory has no operational-DB dependency (Goal 4).
+- **There is no `api_keys` table.** Provider credentials are read from environment
+  variables and are never persisted by the application — no encrypted secrets store,
+  no key management, no settings row that can supply a key. Goal 3 listed this table as
+  deferred to Goal 4; Goal 4 cancelled it (see `implementation/Goal_4_Plan.md` A2-4).
 ```
 
 ### 4.2 Node ID as the Universal Key

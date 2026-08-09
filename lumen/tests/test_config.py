@@ -6,10 +6,32 @@ lumen.schemas.enums.ModelRole and implementation/Goal_2_Plan.md).
 
 from __future__ import annotations
 
+import dataclasses
+import os
+
 import pytest
 
-from lumen.config import AppConfig, GraphConfig, ProviderConfig, VectorConfig
+from lumen.config import (
+    AppConfig,
+    GraphConfig,
+    ObservabilityConfig,
+    OperationalConfig,
+    ProviderConfig,
+    VectorConfig,
+)
 from lumen.schemas.enums import ModelRole
+
+# Every setting here can be overridden from the environment, so a developer who
+# happens to export one would otherwise see these tests fail for no reason.
+_CONFIG_ENV_PREFIXES = ("LUMEN_", "GEMINI_API_KEY", "GOOGLE_API_KEY")
+
+
+@pytest.fixture(autouse=True)
+def clean_config_env(monkeypatch):
+    """Run every test in this module against a bare environment."""
+    for name in list(os.environ):
+        if name.startswith(_CONFIG_ENV_PREFIXES):
+            monkeypatch.delenv(name, raising=False)
 
 
 class TestProviderConfigDefaults:
@@ -53,10 +75,10 @@ class TestProviderConfigResolve:
         of not forcing a single local/cloud decision across all roles."""
         cfg = ProviderConfig(
             lightweight_provider="ollama", lightweight_model="phi-3",
-            embedding_provider="ollama", embedding_model="nomic-embed-large",
+            embedding_provider="ollama", embedding_model="nomic-embed-text",
         )
         assert cfg.resolve(ModelRole.LIGHTWEIGHT) == ("ollama", "phi-3")
-        assert cfg.resolve(ModelRole.EMBEDDING) == ("ollama", "nomic-embed-large")
+        assert cfg.resolve(ModelRole.EMBEDDING) == ("ollama", "nomic-embed-text")
         assert cfg.resolve(ModelRole.THINKING) == ("gemini", "gemini-2.5-pro")
 
 
@@ -70,3 +92,133 @@ class TestAppConfigComposesProviderConfig:
     def test_app_config_provider_role_resolvable(self):
         app_cfg = AppConfig()
         assert app_cfg.providers.resolve(ModelRole.THINKING) == ("gemini", "gemini-2.5-pro")
+
+
+class TestEnvironmentIsReadOnConstruction:
+    """
+    Config reads the environment when an object is built, not when the module
+    is imported. Field defaults evaluate once at class-creation time, so the
+    naive version of this silently ignores any variable set after the first
+    import — including everything in a .env file loaded during startup.
+    """
+
+    def test_a_role_can_be_redirected_from_the_environment(self, monkeypatch):
+        monkeypatch.setenv("LUMEN_THINKING_PROVIDER", "ollama")
+        monkeypatch.setenv("LUMEN_THINKING_MODEL", "llama3.3:70b")
+        assert ProviderConfig().resolve(ModelRole.THINKING) == ("ollama", "llama3.3:70b")
+
+    def test_each_role_is_overridable_independently(self, monkeypatch):
+        monkeypatch.setenv("LUMEN_EMBEDDING_PROVIDER", "ollama")
+        monkeypatch.setenv("LUMEN_EMBEDDING_MODEL", "nomic-embed-text")
+
+        cfg = ProviderConfig()
+        assert cfg.resolve(ModelRole.EMBEDDING) == ("ollama", "nomic-embed-text")
+        assert cfg.resolve(ModelRole.THINKING) == ("gemini", "gemini-2.5-pro")
+        assert cfg.resolve(ModelRole.LIGHTWEIGHT) == ("gemini", "gemini-2.5-flash")
+
+    def test_every_role_can_be_moved_to_a_local_provider(self, monkeypatch):
+        """The one-time deployment choice a maintainer makes to run offline."""
+        for role in ModelRole:
+            monkeypatch.setenv(f"LUMEN_{role.value}_PROVIDER", "ollama")
+            monkeypatch.setenv(f"LUMEN_{role.value}_MODEL", "local-model")
+
+        cfg = ProviderConfig()
+        for role in ModelRole:
+            assert cfg.resolve(role) == ("ollama", "local-model")
+
+    def test_a_later_change_is_picked_up_by_a_new_instance(self, monkeypatch):
+        monkeypatch.setenv("LUMEN_THINKING_MODEL", "first")
+        assert ProviderConfig().thinking_model == "first"
+
+        monkeypatch.setenv("LUMEN_THINKING_MODEL", "second")
+        assert ProviderConfig().thinking_model == "second"
+
+    def test_the_other_config_objects_read_the_environment_too(self, monkeypatch):
+        monkeypatch.setenv("LUMEN_GRAPH_DB_PATH", "/tmp/graph.db")
+        monkeypatch.setenv("LUMEN_VECTOR_SIZE", "1024")
+        monkeypatch.setenv("LUMEN_OPS_DB_URL", "sqlite:///./other.db")
+        monkeypatch.setenv("LUMEN_LOG_LEVEL", "DEBUG")
+        monkeypatch.setenv("LUMEN_USER_ID", "someone")
+
+        assert GraphConfig().db_path == "/tmp/graph.db"
+        assert VectorConfig().vector_size == 1024
+        assert OperationalConfig().db_url == "sqlite:///./other.db"
+        assert ObservabilityConfig().log_level == "DEBUG"
+        assert AppConfig().user_id == "someone"
+
+    def test_nested_config_inside_app_config_sees_the_environment(self, monkeypatch):
+        monkeypatch.setenv("LUMEN_LIGHTWEIGHT_PROVIDER", "ollama")
+        assert AppConfig().providers.lightweight_provider == "ollama"
+
+
+class TestBooleanEnvironmentValues:
+    @pytest.mark.parametrize("raw,expected", [
+        ("true", True), ("TRUE", True), ("1", True), ("yes", True),
+        ("false", False), ("FALSE", False), ("0", False), ("no", False),
+    ])
+    def test_recognised_values(self, monkeypatch, raw, expected):
+        monkeypatch.setenv("LUMEN_OPS_DB_ECHO", raw)
+        assert OperationalConfig().echo_sql is expected
+
+    def test_an_unrecognised_value_keeps_the_default(self, monkeypatch):
+        """Better to keep a working default than to guess what "maybe" meant."""
+        monkeypatch.setenv("LUMEN_OPS_DB_ECHO", "maybe")
+        assert OperationalConfig().echo_sql is False
+
+        monkeypatch.setenv("LUMEN_LOG_CONSOLE", "maybe")
+        assert ObservabilityConfig().log_to_console is True
+
+    def test_console_logging_is_on_unless_switched_off(self, monkeypatch):
+        assert ObservabilityConfig().log_to_console is True
+        monkeypatch.setenv("LUMEN_LOG_CONSOLE", "false")
+        assert ObservabilityConfig().log_to_console is False
+
+
+class TestCredentialsCannotLeak:
+    """
+    Credentials are a property, not a field. Config objects get snapshotted —
+    pipeline_jobs.config_snapshot holds one per run — and anything that walks
+    the dataclass fields would carry a plaintext key into the database.
+    """
+
+    SECRET = "sk-do-not-store-this-anywhere"
+
+    def test_the_key_is_readable_when_asked_for_by_name(self, monkeypatch):
+        monkeypatch.setenv("GEMINI_API_KEY", self.SECRET)
+        assert ProviderConfig().gemini_api_key == self.SECRET
+
+    def test_google_api_key_is_accepted_as_a_fallback(self, monkeypatch):
+        monkeypatch.setenv("GOOGLE_API_KEY", self.SECRET)
+        assert ProviderConfig().gemini_api_key == self.SECRET
+
+    def test_an_absent_key_reads_as_nothing(self):
+        assert ProviderConfig().gemini_api_key is None
+
+    def test_the_key_is_not_a_dataclass_field(self, monkeypatch):
+        monkeypatch.setenv("GEMINI_API_KEY", self.SECRET)
+        names = {f.name for f in dataclasses.fields(ProviderConfig())}
+        assert "gemini_api_key" not in names
+
+    def test_asdict_cannot_carry_the_key(self, monkeypatch):
+        """This is the path into pipeline_jobs.config_snapshot."""
+        monkeypatch.setenv("GEMINI_API_KEY", self.SECRET)
+        assert self.SECRET not in str(dataclasses.asdict(ProviderConfig()))
+        assert self.SECRET not in str(dataclasses.asdict(AppConfig()))
+
+    def test_repr_cannot_carry_the_key(self, monkeypatch):
+        monkeypatch.setenv("GEMINI_API_KEY", self.SECRET)
+        assert self.SECRET not in repr(ProviderConfig())
+        assert self.SECRET not in repr(AppConfig())
+
+    def test_two_configs_compare_equal_regardless_of_the_key(self, monkeypatch):
+        monkeypatch.setenv("GEMINI_API_KEY", self.SECRET)
+        with_key = ProviderConfig()
+        monkeypatch.delenv("GEMINI_API_KEY")
+        without_key = ProviderConfig()
+        assert with_key == without_key
+
+    def test_a_rotated_key_takes_effect_without_rebuilding_config(self, monkeypatch):
+        monkeypatch.setenv("GEMINI_API_KEY", "old-key")
+        cfg = ProviderConfig()
+        monkeypatch.setenv("GEMINI_API_KEY", "new-key")
+        assert cfg.gemini_api_key == "new-key"

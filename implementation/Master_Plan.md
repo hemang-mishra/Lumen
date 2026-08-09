@@ -62,8 +62,12 @@ This document outlines the systematic, stage-by-stage implementation plan for th
     (`compare_metadata`) fails if `models.py` and the migration disagree.
   - `api_keys` deferred to Goal 4; HITL cap/snooze/auto-resolve deferred to Goal 18;
     erasure anonymization pass deferred to Goal 19.
-  - *Result:* 435 tests passing (222 from Goals 1–2 + 213 new), 100% coverage on
-    `lumen/operational/` and `lumen/observability/`.
+  - *Amended by Goal 4:* `api_keys` was **cancelled**, not deferred — credentials come from
+    environment variables and are never persisted. `resolve_provider_config()` and the
+    `providers.*` settings keys were removed with it; provider selection is a deployment
+    property, not a user setting. See `Goal_3_Plan.md` C7.
+  - *Result:* 429 tests passing (222 from Goals 1–2 + 213 new, −6 from the Goal 4 amendment),
+    100% coverage on `lumen/operational/` and `lumen/observability/`.
   - *Plan:* [`implementation/Goal_3_Plan.md`](file:///Users/hemangmishra/Projects/Lumen/implementation/Goal_3_Plan.md)
 
 - [x] **Goal 3b: Structured Logging & Trace ID Infrastructure** ✅
@@ -78,16 +82,39 @@ This document outlines the systematic, stage-by-stage implementation plan for th
   - *Test:* Mock 3-stage run asserts one id reaches logs, DTOs, and DB rows; two concurrent
     runs on separate threads are proven not to leak into each other.
 
-- [ ] **Goal 4: LLM Provider Abstraction Layer**
-  - Implement `lumen/providers/llm_provider.py` (Protocol), `lumen/providers/gemini.py`, `lumen/providers/ollama.py`.
-  - Implement a role-resolution factory reading `lumen.config.ProviderConfig` (Goal 2):
-    resolves a `ModelRole` (`LIGHTWEIGHT`/`THINKING`/`EMBEDDING`/`TRANSCRIPTION`/`TTS`) to
-    a concrete Protocol-conforming provider instance. No content-sensitivity branching —
-    role selection is purely task-driven (see `docs/hld/LLM_Abstraction_Architecture.md`).
-  - Implement embedding provider(s) behind the `EMBEDDING` role: `text-embedding-004`
-    (Gemini) and `nomic-embed-large` (Ollama) as swappable options.
-  - *Test:* Mock LLM calls, verify prompt/response contracts, test that each role
+- [x] **Goal 4: LLM Provider Abstraction Layer** ✅
+  - Implemented `lumen/providers/protocols.py` (all four Protocols — the Master Plan originally
+    named `llm_provider.py`, but the file holds the embedding and audio Protocols too),
+    `lumen/providers/gemini.py`, `lumen/providers/ollama.py`, plus `errors.py`, `retry.py`,
+    `telemetry.py`, `fake.py`, `factory.py`.
+  - Implemented a role-resolution factory reading `lumen.config.ProviderConfig` (Goal 2):
+    resolves a `ModelRole` to a concrete Protocol-conforming provider instance. No
+    content-sensitivity branching — role selection is purely task-driven.
+  - **Three roles get implementations** (`LIGHTWEIGHT`, `THINKING`, `EMBEDDING`);
+    `TRANSCRIPTION` and `TTS` get Protocols only, until voice ingestion needs them.
+  - Implemented embedding providers behind the `EMBEDDING` role: `text-embedding-004`
+    (Gemini) and `nomic-embed-text` (Ollama) as swappable options.
+  - **Configuration is maintainer-owned and deployment-time**: read from env vars at process
+    start, never from `user_settings`, with credentials from the environment only. There is
+    no `api_keys` table (cancelled — see Goal 3 amendment above).
+  - Ship a `FakeLLMProvider`/`FakeEmbeddingProvider` in the package so Goals 5–10 can run
+    end-to-end offline.
+  - *Amends Goal 2's `config.py` (done):* every env var is now read when a config object is
+    **constructed**, not when the module is imported — the old form silently ignored anything
+    set after first import, and made the documented per-role override untestable. Credentials
+    are exposed as a property rather than a field so they cannot reach
+    `pipeline_jobs.config_snapshot` via `asdict()`. +24 tests; suite 429 → 453.
+  - *Test:* Mock the vendor SDKs, verify prompt/response contracts, test that each role
     resolves to its configured provider and that roles are independently overridable.
+    Opt-in `@pytest.mark.live` suite for real API smoke tests, deselected by default.
+  - Added `lumen/providers/base.py` (not originally planned): the send/retry/time/unpack/log
+    sequence lives there once, so each vendor supplies only request shaping and reply parsing.
+    The fakes share it too, so tests exercise the production path.
+  - *Result:* 799 tests passing (453 from Goals 1–3b + 346 new), **100% coverage** on
+    `lumen/providers/` and `lumen/config.py`. Four bugs caught during implementation, including
+    an unbounded `Retry-After` that could stall a run for an hour, and a shared `contextvars`
+    context that fails only under real thread contention.
+  - *Plan:* [`implementation/Goal_4_Plan.md`](file:///Users/hemangmishra/Projects/Lumen/implementation/Goal_4_Plan.md)
 
 ## Phase 2: Extraction Pipeline (Goals 5-9)
 **Objective:** Build the core pipeline that transforms raw conversational input into structured graph actions. Each stage is a pure function (HLD Rule 2): accepts Pydantic input, returns Pydantic output.

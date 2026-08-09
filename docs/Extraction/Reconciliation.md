@@ -258,7 +258,7 @@ DELETE /decisions/{decision_id}
 | `REGULATE` | 0.82 | `LIGHTWEIGHT` |
 | `AMBIGUOUS` | N/A (tie detection) | N/A — always HITL |
 
-> **Model roles:** `LIGHTWEIGHT` is used for low-to-medium-risk actions where speed matters more than deep reasoning. `THINKING` is used for high-consequence or nuanced-judgment actions. Which actual provider and model back each role — cloud or local — is a single operator-configured choice (`ProviderConfig`, see `docs/hld/LLM_Abstraction_Architecture.md`), not a decision the pipeline makes per observation based on content sensitivity.
+> **Model roles:** `LIGHTWEIGHT` is used for low-to-medium-risk actions where speed matters more than deep reasoning. `THINKING` is used for high-consequence or nuanced-judgment actions. Which actual provider and model back each role — cloud or local — is a single maintainer-configured deployment choice (`ProviderConfig`, see `docs/hld/LLM_Abstraction_Architecture.md`), not a decision the pipeline makes per observation based on content sensitivity, and not something the end user selects.
 
 ### The "Trial vs. Trait" Rule (Temporal Frequency Multiplier)
 
