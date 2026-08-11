@@ -18,6 +18,7 @@ from lumen.schemas.enums import (
     EntryClass,
     QualityGateDecision,
     ReconciliationAction,
+    SourceModality,
 )
 from lumen.schemas.pipeline import (
     AmbiguousRef,
@@ -79,6 +80,23 @@ class TestSessionDecayEvent:
                 timestamp=NOW, event_date=TODAY,
             )
 
+    def test_input_is_assumed_typed_unless_stated(self):
+        # The safe default. Speech cleanup removes words, so applying it to
+        # typed text by accident would delete things the person meant.
+        event = SessionDecayEvent(
+            session_id="s1", user_id="u1", event_date=TODAY,
+            message_count=0, triggered_at=NOW,
+        )
+        assert event.source_modality == SourceModality.TEXT_ENTRY
+
+    def test_a_spoken_session_can_say_so(self):
+        event = SessionDecayEvent(
+            session_id="s1", user_id="u1", event_date=TODAY,
+            source_modality=SourceModality.VOICE_NOTE,
+            message_count=0, triggered_at=NOW,
+        )
+        assert event.source_modality == SourceModality.VOICE_NOTE
+
 
 class TestCoreferenceMap:
     def test_constructs_from_doc_example(self):
@@ -105,6 +123,7 @@ class TestCoreferenceMap:
 class TestPreprocessedEpisode:
     def test_index_within_bounds_accepted(self):
         ep = PreprocessedEpisode(
+            episode_id="ep_2026_06_11_001", episode_summary="A workout struggle",
             episode_index=1, total_episodes_in_entry=2, cleaned_text="text",
             entry_class=EntryClass.REFLECTION, coherence_score=0.8,
             raw_text_hash="sha256:abc",
@@ -114,10 +133,30 @@ class TestPreprocessedEpisode:
     def test_index_exceeding_total_rejected(self):
         with pytest.raises(ValidationError, match="exceeds"):
             PreprocessedEpisode(
+                episode_id="ep_2026_06_11_003", episode_summary="A workout struggle",
                 episode_index=3, total_episodes_in_entry=2, cleaned_text="text",
                 entry_class=EntryClass.REFLECTION, coherence_score=0.8,
                 raw_text_hash="sha256:abc",
             )
+
+    def test_an_episode_must_be_identifiable_and_labelled(self):
+        # Both are required downstream and have no other producer: the id is
+        # what extraction refers back to, and the summary is what a person
+        # sees when scanning a day.
+        for missing in ("episode_id", "episode_summary"):
+            fields = {
+                "episode_id": "ep_2026_06_11_001",
+                "episode_summary": "A workout struggle",
+                "episode_index": 1,
+                "total_episodes_in_entry": 1,
+                "cleaned_text": "text",
+                "entry_class": EntryClass.REFLECTION,
+                "coherence_score": 0.8,
+                "raw_text_hash": "abc",
+            }
+            del fields[missing]
+            with pytest.raises(ValidationError):
+                PreprocessedEpisode(**fields)
 
     def test_coherence_score_out_of_range_rejected(self):
         with pytest.raises(ValidationError):

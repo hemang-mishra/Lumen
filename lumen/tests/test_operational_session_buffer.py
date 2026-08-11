@@ -9,7 +9,7 @@ import pytest
 from lumen.operational.enums import BufferSource, BufferStatus
 from lumen.operational.repositories import RecordNotFoundError
 from lumen.operational.schemas import BufferMessageRecord, SessionBufferRecord
-from lumen.schemas.enums import DialogueAct
+from lumen.schemas.enums import DialogueAct, SourceModality
 
 TODAY = date(2026, 6, 11)
 NOW = datetime(2026, 6, 11, 21, 0, tzinfo=UTC)
@@ -263,3 +263,33 @@ class TestBuildDecayEvent:
     def test_an_unknown_buffer_is_refused(self, ops_store):
         with pytest.raises(RecordNotFoundError):
             ops_store.buffers.build_decay_event("ghost")
+
+    def test_a_voice_buffer_is_handed_over_as_speech(self, ops_store):
+        """
+        Preprocessing skips its speech cleanup on typed input, so whether a
+        session was spoken has to survive the handover. If it does not, an
+        "um" someone actually said stays in their history forever.
+        """
+        buffer = ops_store.buffers.find_or_create(
+            user_id="local",
+            event_date=TODAY,
+            session_label="spoken",
+            source=BufferSource.VOICE_NOTE,
+        )
+        ops_store.buffers.append_message(buffer.session_id, _message(0, buffer.session_id))
+
+        event = ops_store.buffers.build_decay_event(buffer.session_id)
+        assert event.source_modality == SourceModality.VOICE_NOTE
+
+    @pytest.mark.parametrize(
+        "source",
+        [BufferSource.NATIVE_CHAT, BufferSource.IMPORT_MARKDOWN, BufferSource.IMPORT_JSON],
+    )
+    def test_every_other_source_is_handed_over_as_typing(self, ops_store, source):
+        buffer = ops_store.buffers.find_or_create(
+            user_id="local", event_date=TODAY, session_label=source.value, source=source
+        )
+        ops_store.buffers.append_message(buffer.session_id, _message(0, buffer.session_id))
+
+        event = ops_store.buffers.build_decay_event(buffer.session_id)
+        assert event.source_modality == SourceModality.TEXT_ENTRY

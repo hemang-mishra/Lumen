@@ -124,6 +124,29 @@ class OperationalConfig:
 
 
 @dataclass(frozen=True)
+class PipelineConfig:
+    """
+    Tuning knobs for the extraction pipeline stages.
+
+    These are thresholds that decide how much attention a piece of writing
+    earns. They live here rather than as constants in the code because the
+    right values are only discoverable by running real entries through the
+    pipeline and seeing what gets waved through or held back.
+
+    Environment variables:
+      LUMEN_MIN_REFLECTION_WORDS  — below this word count, skip deep analysis
+      LUMEN_COHERENCE_THRESHOLD   — score at or above this counts as a reflection
+      LUMEN_REFLECTION_PROMPT_COUNT — follow-up questions offered on thin entries
+      LUMEN_MAX_EPISODES          — ceiling on how many pieces one entry can split into
+    """
+
+    min_reflection_words: int = _env_int("LUMEN_MIN_REFLECTION_WORDS", 30)
+    coherence_threshold: float = _env_float("LUMEN_COHERENCE_THRESHOLD", 0.4)
+    reflection_prompt_count: int = _env_int("LUMEN_REFLECTION_PROMPT_COUNT", 3)
+    max_episodes_per_session: int = _env_int("LUMEN_MAX_EPISODES", 12)
+
+
+@dataclass(frozen=True)
 class ObservabilityConfig:
     """
     Configuration for logging.
@@ -291,6 +314,7 @@ class AppConfig:
     providers: ProviderConfig = field(default_factory=ProviderConfig)
     operational: OperationalConfig = field(default_factory=OperationalConfig)
     observability: ObservabilityConfig = field(default_factory=ObservabilityConfig)
+    pipeline: PipelineConfig = field(default_factory=PipelineConfig)
 
     # The personal build has one user. Multi-user deployments set this per request.
     user_id: str = _env("LUMEN_USER_ID", "local")

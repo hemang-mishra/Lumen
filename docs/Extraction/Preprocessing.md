@@ -46,7 +46,24 @@ Lumen fundamentally supports two sources of conversational input via the **Inges
 
 Instead, Lumen uses **Session-Level Extraction (Delayed Stage 1)**. Inputs from these sources are appended to a **Session Buffer**, with each payload carrying its Logical Event Date.
 
-**Session Decay & Semantic Day Grouping:** For the Active Chat Interface, the system waits for a conversation session to decay (defined as 2 hours of user inactivity, configurable via `LUMEN_SESSION_DECAY_MINUTES`) to prevent extracting mid-thought. However, Lumen uses **Semantic Day Grouping**: if a user returns hours later but explicitly references the same ongoing day (e.g., "So, talking about today..."), Preprocessing appends this to the day's meta-session and extracts it as one cohesive unit to preserve cross-session insights, rather than splitting it purely based on the inactivity decay window. If the buffer contains bulk-imported logs from multiple past days, Stage 0 splits the buffer into separate daily context chunks keyed by their historical `event_date`. It processes each chunk independently as a complete transcript for that specific date.
+**Session Decay:** For the Active Chat Interface, the system waits for a conversation session to decay (defined as 2 hours of user inactivity, configurable via `LUMEN_SESSION_DECAY_MINUTES`) to prevent extracting mid-thought.
+
+> **Scope boundary — buffer composition is the Ingestion Layer's job, not Stage 0's.**
+> Two related behaviours belong to whatever creates buffers, not to the stage that consumes
+> one:
+> - **Semantic Day Grouping:** if a user returns hours later but explicitly references the
+>   same ongoing day (e.g., "So, talking about today..."), that message is appended to the
+>   day's existing meta-session so it extracts as one cohesive unit, rather than opening a
+>   new buffer purely because the inactivity window elapsed.
+> - **Bulk-import splitting:** a set of imported logs spanning multiple past days is split
+>   into one buffer per historical `event_date` at ingestion, so each is processed
+>   independently as a complete transcript for that date.
+>
+> Both require reading and merging buffers *other than the one being processed*.
+> Preprocessing is a pure function of a single decayed buffer — it holds no database
+> handle and cannot see its siblings. A buffer that nonetheless arrives spanning several
+> `event_date`s is still processed, using the buffer's own date, and logs a warning naming
+> every date it saw.
 
 **Dialogue Act Classification:** Unlike monologues, chat introduces conversational noise: greetings, clarification loops, factual queries ("What did I say yesterday?"), and system generation. Stage 0 runs a classification pass over the buffer:
 1. **Factual/Task-oriented turns** (`OPERATIONAL_REQUEST`) are filtered out completely. *Note: Emotionally charged or rhetorical questions (e.g., "What is wrong with my brain?") must be classified as `EXPRESSIVE` rather than `OPERATIONAL_REQUEST` to prevent dropping vulnerable reflections.*
@@ -115,10 +132,21 @@ Detection patterns:
 
 All entries are normalized to English before any downstream step runs.
 
-1. Run a lightweight language-ID pass over the cleaned text (e.g., `fastText lid.176.ftz` on-device).
-2. If every span is English, pass the text through unchanged.
-3. If any non-English span is detected (including code-mixed Hindi/English), translate it into English via an on-device or API translation call. Interleaved code-mixed sentences are translated as a whole so meaning stays coherent.
-4. Completeness scoring, coreference, and extraction always receive English text.
+Language identification and translation happen **inside the same LLM pass that performs
+filler removal and self-correction handling**. That pass already holds the text, so a
+separate detection step would be a second read of the same string.
+
+1. The pass reports the languages it detected alongside the cleaned text.
+2. If every span is English, the text passes through with only the cleaning applied.
+3. If any non-English span is present (including code-mixed Hindi/English), it is translated into English. Interleaved code-mixed sentences are translated as a whole so meaning stays coherent.
+4. Completeness scoring, segmentation, coreference, and extraction always receive English text.
+
+> **Why not a dedicated language-ID model.** An on-device classifier such as
+> `fastText lid.176.ftz` would let pure-English entries skip a call, but it cannot be
+> trusted to make that decision here: the canonical code-mixed example below is romanized
+> Hindi written in plain ASCII, which is exactly the case a cheap script or encoding check
+> reads as English. Since the pass runs on every entry anyway to strip fillers, folding
+> detection into it costs nothing and removes a dependency plus a model file.
 
 **Example:**
 
@@ -169,6 +197,34 @@ Entry: {cleaned_entry_text}
 
 The output of Step 2 is a routing decision that determines which downstream pipeline runs.
 
+#### Ordering: gate, then segment, then score
+
+The two gates in Step 2 sit on opposite sides of episode segmentation, because they answer
+questions at different levels:
+
+1. **The structural gate runs on the whole session, before segmentation.** If the entire
+   cleaned entry falls under the word threshold, it is classified `RAW_CAPTURE` as a single
+   episode. No segmentation and no coherence call happen — there is nothing to segment and
+   nothing worth paying a reasoning model to score.
+2. **The semantic gate runs per episode, after segmentation.** Each conceptual episode is
+   scored independently, so a session holding one deep reflection and one throwaway aside
+   produces two episodes with different classifications rather than one blanket verdict.
+3. **The session-level decision aggregates upward.** The session is `REFLECTION` if *any*
+   of its episodes scored at or above the threshold, otherwise `RAW_CAPTURE`.
+
+#### DISCARD
+
+`DISCARD` is the one routing decision that throws user input away, so it is never a model
+judgement. It fires on a **structural** condition only: nothing extractable survives.
+Specifically, after AI turns are stripped, `OPERATIONAL_REQUEST` turns are filtered out,
+and cleaning has run, the remaining text is empty or whitespace-only.
+
+A buffer consisting entirely of factual queries ("What did I say yesterday?") discards. An
+empty buffer discards. A low-coherence voice dump **does not** — that is what `RAW_CAPTURE`
+is for. No coherence score, however low, can produce a `DISCARD`.
+
+A `DISCARD` result carries zero episodes and no reflection prompts.
+
 #### REFLECTION Path
 
 Entries classified as `REFLECTION` proceed to the full pipeline:
@@ -184,7 +240,7 @@ All observation types from the full enum taxonomy are eligible. Sensitivity tier
 Entries classified as `RAW_CAPTURE` receive:
 
 1. **Minimal extraction:** Only a `CONTEXT` observation type is extracted — a single sentence describing the surface topic of the entry, no emotional inference, no pattern detection.
-2. **Reflection prompts:** The system generates 3 targeted reflection questions based on the `CONTEXT` observation and stores them as a `pending_reflections` record linked to the entry.
+2. **Reflection prompts:** Stage 0 generates 3 targeted reflection questions from the cleaned episode text at the same time it scores coherence, and returns them on the preprocessing result. They are written a stage earlier than the `CONTEXT` observation that once sourced them, because that observation is a one-sentence restatement of the text the scoring pass has already read — deriving the questions from the text directly saves a round trip and produces the same questions.
 3. **No Reconciliation:** The `CONTEXT` observation is written directly to an `ObservationNode` with `status: RAW_CAPTURE` and is not routed through Reconciliation. It does not participate in candidate retrieval.
 
 **Reflection prompt generation example:**
@@ -204,7 +260,11 @@ Entries classified as `RAW_CAPTURE` receive:
 
 The user may respond to any reflection prompt; a response creates a new entry that is independently run through Stage 0.
 
-> **Storage:** `pending_reflections` records are stored in the **Operational DB** (SQLite/PostgreSQL), not in the knowledge graph. They are linked to the entry by `entry_id` and cleaned up once the user responds to at least one prompt or after a 30-day TTL, whichever comes first.
+> **Storage:** `pending_reflections` records belong in the **Operational DB** (SQLite/PostgreSQL), not in the knowledge graph. They are linked to the entry by `entry_id` and cleaned up once the user responds to at least one prompt or after a 30-day TTL, whichever comes first.
+>
+> Preprocessing itself only *returns* the questions on `PreprocessingResult` — it is a pure
+> function and writes nothing. Persistence is the orchestrator's job, and the table is
+> created alongside the review interface that reads it.
 
 ---
 

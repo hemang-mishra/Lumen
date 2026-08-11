@@ -145,15 +145,29 @@ A chain can have multiple `INTERNAL_STATE` steps (e.g., before and after an acti
 
 #### 3. Episode-Level Metadata
 
-**Historical Era Anchoring:** If the user explicitly anchors the reflection or psychological struggle to a specific past life chapter (e.g., "During my a major entrance exam prep days..."), the LLM must extract this as the `historical_era` attribute on the Episode. This allows the graph to link beliefs and traumas to specific epochs for semantic retrieval.
+**Episode metadata arrives from Stage 0, it is not extracted here.** Episode boundaries,
+`episode_summary`, `overarching_themes`, and `historical_era` are all produced by the
+segmentation pass in Preprocessing, which had to understand each episode's topic in order
+to split on it. Microextraction receives them on the `PreprocessedEpisode` and treats them
+as given.
 
-The **coreference map** is produced in Stage 0 (Preprocessing) and is passed to Microextraction as an input artifact. The Microextraction LLM does **not** need to re-derive it — it should consume the pre-computed map directly. This ensures the coreference pass runs exactly once per entry and that Microextraction remains a pure extraction step with no preprocessing side-effects.
+**Historical Era Anchoring:** If the user explicitly anchors the reflection or psychological struggle to a specific past life chapter (e.g., "During my a major entrance exam prep days..."), Stage 0 records this as the `historical_era` attribute on the episode. This allows the graph to link beliefs and traumas to specific epochs for semantic retrieval.
+
+The **coreference map** is likewise produced in Stage 0 (Preprocessing) and is passed to Microextraction as an input artifact. The Microextraction LLM does **not** need to re-derive it — it should consume the pre-computed map directly. This ensures the coreference pass runs exactly once per entry and that Microextraction remains a pure extraction step with no preprocessing side-effects.
+
+The map separates confident resolutions from unresolved ones, because the two mean
+different things to an extractor: a resolved span can be substituted, while an ambiguous
+one must be left alone rather than guessed at.
 
 ```json
 {
-  "coreference_map": [
-    { "canonical": "Alex", "aliases_in_document": ["Alex", "my mentor", "him"] },
-    { "canonical": "Rohan",  "aliases_in_document": ["him", "this guy"] }
+  "entry_id": "e_2026_06_11_002",
+  "resolved_entities": [
+    { "span": "my mentor", "resolved_to": "Alex", "confidence": 0.91, "resolution_basis": "role_established_in_document" },
+    { "span": "him",       "resolved_to": "Alex", "confidence": 0.88, "resolution_basis": "most_recent_named_antecedent" }
+  ],
+  "ambiguous_refs": [
+    { "span": "this guy", "candidates": ["Alex", "Rohan"], "reason": "two male referents introduced within 2 sentences" }
   ]
 }
 ```

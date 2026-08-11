@@ -21,7 +21,8 @@ When converting a raw journal entry into structured insights, the pipeline faces
 ```
 Stage 0: Preprocessing
   └── ASR normalization, filler removal, code-mix handling,
-      entry completeness scoring, quality gate, entry type classification
+      entry completeness scoring, quality gate, entry type classification,
+      coreference map, episode segmentation
         │
         ▼
 Stage 0.5: Session-Level Rollups (Conversational only)
@@ -30,8 +31,7 @@ Stage 0.5: Session-Level Rollups (Conversational only)
         │
         ▼
 Stage 1: Microextraction  (blind — no history)
-  └── Coreference map, episode segmentation, observations array,
-      causal mechanisms array, signal_strength,
+  └── Observations array, causal mechanisms array, signal_strength,
       provenance, extraction_confidence
         │
         ▼
@@ -63,11 +63,11 @@ Stage 4: Graph Write
 | Stage 3 — Reconciliation | ⚠️ No — see serialization rules | [`Reconciliation.md`](Reconciliation.md) |
 | Stage 4 — Graph Write | ⚠️ No — see serialization rules | [`Reconciliation.md`](Reconciliation.md) |
 
-**Stage 0 summary:** Normalizes raw voice or text input. Runs ASR correction, removes fillers, scores entry completeness, applies a quality gate (entries below threshold are held for HITL review rather than processed), and classifies the entry as `REFLECTION` or `RAW_CAPTURE`. See [`Preprocessing.md`](Preprocessing.md).
+**Stage 0 summary:** Normalizes raw voice or text input. Runs ASR correction, removes fillers, translates non-English spans, scores completeness, segments the entry into conceptual episodes, and builds the coreference map. Applies a quality gate that classifies each episode as `REFLECTION` or `RAW_CAPTURE`; sub-threshold episodes are routed to `RAW_CAPTURE` (minimal capture plus reflection prompts), **not** held for human review. The only input that is thrown away is input with nothing extractable left in it — see `DISCARD` in [`Preprocessing.md`](Preprocessing.md).
 
 **Stage 0.5 summary:** (For conversational data only). Intercepts raw multi-turn dialogue to extract settled conclusions (`REALIZATION`s) while discarding intermediate hypotheses and exploratory scaffolding. Outputs a clean Session Summary to prevent intra-session fragmentation in the graph. See [`Preprocessing.md`](Preprocessing.md).
 
-**Stage 1 summary:** Produces a structured extraction of the entry in complete isolation from historical context. Outputs a coreference map, episode segments, an `observations` array, and a `causal_mechanisms` array. See [`Microextraction.md`](Microextraction.md).
+**Stage 1 summary:** Produces a structured extraction of one preprocessed episode in complete isolation from historical context. Outputs an `observations` array and a `causal_mechanisms` array. The coreference map and the episode boundaries arrive from Stage 0 as inputs; Stage 1 consumes them and does not re-derive them. See [`Microextraction.md`](Microextraction.md).
 
 **Stage 2 summary:** Takes each extracted node and runs **two parallel retrieval passes** whose results are merged into a single candidate set before Reconciliation.
 
