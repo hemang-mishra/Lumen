@@ -60,7 +60,7 @@ from lumen.operational.schemas import (
     UserSettingRecord,
     WriteLogEntry,
 )
-from lumen.schemas.enums import HitlResolutionChoice, SignalStrength
+from lumen.schemas.enums import HitlResolutionChoice, SignalStrength, SourceModality
 from lumen.schemas.pipeline import BufferMessage, SessionDecayEvent
 
 logger = logging.getLogger(__name__)
@@ -305,6 +305,7 @@ class SqlAlchemySessionBufferRepository:
                 user_id=buffer.user_id,
                 event_date=buffer.event_date,
                 session_label=buffer.session_label,
+                source_modality=_source_modality(buffer.source),
                 message_count=len(messages),
                 raw_buffer=[_to_buffer_message(row) for row in messages],
                 triggered_at=_aware(buffer.decayed_at) or _utcnow(),
@@ -904,6 +905,21 @@ def _to_message_record(row: models.BufferMessage) -> BufferMessageRecord:
         dialogue_act=row.dialogue_act,
         co_created_marker=row.co_created_marker,
     )
+
+
+def _source_modality(source: str) -> SourceModality:
+    """
+    Say whether a buffer's messages came from speech or from typing.
+
+    A buffer records where its messages came from in more detail than the
+    pipeline needs — chat, a markdown import, a JSON import, a voice note.
+    Preprocessing only cares about one distinction: was this spoken? Only
+    spoken input gets the speech cleanup, because "um" in typed text was
+    typed on purpose.
+    """
+    if source == BufferSource.VOICE_NOTE.value:
+        return SourceModality.VOICE_NOTE
+    return SourceModality.TEXT_ENTRY
 
 
 def _to_buffer_message(row: models.BufferMessage) -> BufferMessage:

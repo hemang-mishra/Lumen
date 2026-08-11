@@ -119,11 +119,45 @@ This document outlines the systematic, stage-by-stage implementation plan for th
 ## Phase 2: Extraction Pipeline (Goals 5-9)
 **Objective:** Build the core pipeline that transforms raw conversational input into structured graph actions. Each stage is a pure function (HLD Rule 2): accepts Pydantic input, returns Pydantic output.
 
-- [ ] **Goal 5: Stage 0 — Preprocessing**
-  - Implement `lumen/pipeline/preprocessing.py` for ASR cleaning, coreference resolution, and episode chunking.
-  - Input: `SessionDecayEvent` → Output: `PreprocessingResult`
-  - Quality gate: classify each episode as `REFLECTION`, `RAW_CAPTURE`, or `DISCARD`.
-  - *Test:* Feed messy transcripts; verify clean `PreprocessedEpisode` output with correct quality classification.
+- [x] **Goal 5: Stage 0 — Preprocessing** ✅
+  - Implemented `lumen/pipeline/preprocessing/` as a package (`stage`, `transcript`, `fillers`,
+    `contracts`, `prompts`, `passes`) rather than the single `preprocessing.py` named above —
+    seven separable concerns that would otherwise be one 700-line file. `preprocess()` remains
+    the only public name.
+  - Input: `SessionDecayEvent` → Output: `PreprocessingResult`. A pure function: no DB handle,
+    both LLM providers injected, runs offline against `FakeLLMProvider`.
+  - **Four LLM passes, not one:** `CONVERSATION` (chat only, THINKING) rolls a dialogue up to
+    its settled conclusions; `NORMALIZE` (LIGHTWEIGHT) cleans and translates; `STRUCTURE`
+    (THINKING) segments into episodes and builds the coreference map; `TRIAGE` (LIGHTWEIGHT)
+    scores each episode and writes reflection prompts. Cost is 1 / 3 / 4 calls per session
+    depending on length and whether it was a conversation.
+  - **ASR cleaning is hybrid:** regex strips only the ten hesitation spellings that can never
+    mean anything; everything needing judgement (`like`, `right`, self-corrections) goes to
+    the model, because the documented preservation rule is stated in terms of syntactic
+    dependency and regex cannot evaluate it.
+  - **The gate runs before segmentation, the score after it.** A word count short-circuits
+    short entries with no reasoning call; above threshold, each episode is scored on its own,
+    so one session can hold both `REFLECTION` and `RAW_CAPTURE` episodes.
+  - **`DISCARD` is defined for the first time** — it fires only on a structural condition
+    (nothing extractable survives filtering and cleaning), never on a coherence score. No
+    model gets a vote in the one decision that throws input away.
+  - **Every pass has a conservative fallback**, so a model failure loses quality but never the
+    entry, and never promotes anything: failed segmentation keeps the entry whole, failed
+    scoring routes to `RAW_CAPTURE`.
+  - *Amends Goal 2's DTOs:* `SessionDecayEvent.source_modality` (without it Stage 0 cannot tell
+    voice from typed text), `PreprocessedEpisode.episode_id` and `.episode_summary` (both
+    required downstream, neither had a producer). Adds `PipelineConfig` to `AppConfig`.
+  - *Docs amended ahead of coding:* `Architecture.md` (segmentation and coreference belong to
+    Stage 0, not Stage 1; sub-threshold entries route to `RAW_CAPTURE`, not HITL),
+    `Preprocessing.md` (the `DISCARD` rule, LLM-based language detection replacing fastText,
+    reflection prompts sourced from cleaned text, Semantic Day Grouping and multi-day splitting
+    moved to the ingestion layer), `Microextraction.md` (coreference example corrected to the
+    shipped shape; themes/era arrive from Stage 0), `Technical_HLD.md` §5.
+  - *Flagged, not fixed:* `Preprocessing.md` says `RAW_CAPTURE` extracts `CONTEXT` only;
+    `Microextraction.md` says `CONTEXT` and `EMOTION`. Goal 6 owns that path and resolves it.
+  - *Result:* 968 tests passing (799 from Goals 1–4 + 169 new), **100% coverage** on
+    `lumen/pipeline/`, `lumen/config.py`, and `lumen/schemas/pipeline.py`.
+  - *Plan:* [`implementation/Goal_5_Plan.md`](file:///Users/hemangmishra/Projects/Lumen/implementation/Goal_5_Plan.md)
 
 - [ ] **Goal 6: Stage 1 — Microextraction Core**
   - Implement `lumen/pipeline/extraction.py` (LLM prompt + structured JSON extraction).

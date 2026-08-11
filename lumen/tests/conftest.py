@@ -387,6 +387,89 @@ def captured_logs():
         root.setLevel(previous_level)
 
 
+# ---------------------------------------------------------------------------
+# Preprocessing fixtures
+# ---------------------------------------------------------------------------
+
+# Phrases unique to each preprocessing prompt. A scripted fake provider is
+# keyed on these, so one script can answer every step of the stage and each
+# reply is matched to the step that asked for it.
+PROMPT_KEYS = {
+    "conversation": "CONVERSATION:",
+    "normalize_voice": "TRANSCRIPT:",
+    "normalize_text": "Below is a journal entry someone typed",
+    "structure": "SPLITTING",
+    "triage": "EPISODES:",
+    "reflection": "too short to analyse properly",
+}
+
+
+@pytest.fixture
+def make_event():
+    """
+    Build a decayed session out of plain strings.
+
+    Messages are given as (role, text) pairs so a test can describe the
+    conversation it needs on one line and ignore ids and timestamps.
+    """
+
+    def _build(
+        messages,
+        *,
+        session_id: str = "sess_test_001",
+        source_modality: SourceModality = SourceModality.TEXT_ENTRY,
+        event_date: date = TODAY,
+        message_dates: list[date] | None = None,
+    ):
+        from lumen.schemas.pipeline import BufferMessage, SessionDecayEvent
+
+        buffer = []
+        for index, (role, content) in enumerate(messages):
+            buffer.append(
+                BufferMessage(
+                    message_id=f"m{index}",
+                    role=role,
+                    content=content,
+                    timestamp=datetime(2026, 6, 11, 21, index, tzinfo=UTC),
+                    event_date=(
+                        message_dates[index] if message_dates else event_date
+                    ),
+                )
+            )
+        return SessionDecayEvent(
+            session_id=session_id,
+            user_id="local",
+            event_date=event_date,
+            source_modality=source_modality,
+            message_count=len(buffer),
+            raw_buffer=buffer,
+            triggered_at=datetime(2026, 6, 11, 23, 0, tzinfo=UTC),
+        )
+
+    return _build
+
+
+@pytest.fixture
+def scripted_providers():
+    """
+    Build a pair of fake models that answer preprocessing from a script.
+
+    The script is keyed by step name; each reply is the JSON that step's
+    response shape expects. Both models share the script, so a test does not
+    have to care which of the two a given step happens to use.
+    """
+    from lumen.providers.fake import FakeLLMProvider
+
+    def _build(replies: dict[str, str]):
+        script = {PROMPT_KEYS[step]: reply for step, reply in replies.items()}
+        return (
+            FakeLLMProvider(dict(script), role=ModelRole.LIGHTWEIGHT),
+            FakeLLMProvider(dict(script), role=ModelRole.THINKING),
+        )
+
+    return _build
+
+
 @pytest.fixture
 def buffer_with_messages(ops_store):
     """A buffer holding three messages, ready for tests that need real data."""

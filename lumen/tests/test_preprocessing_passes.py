@@ -1,0 +1,568 @@
+"""
+Tests for the preprocessing steps that ask a language model something.
+
+Two things get checked for each step: that a good reply is read correctly,
+and that a bad one is survived. The second is the larger half, because a
+model call can fail for reasons nobody controls and none of them are a
+reason to lose someone's journal entry.
+
+A reply can go wrong in three ways, and each step is checked against all
+three: the call itself fails, the reply is not JSON, or the JSON is the
+wrong shape.
+"""
+
+from __future__ import annotations
+
+import json
+
+import pytest
+
+from lumen.config import PipelineConfig
+from lumen.pipeline.preprocessing import passes
+from lumen.pipeline.preprocessing.contracts import SegmentedEpisode
+from lumen.providers.errors import ProviderTimeoutError
+from lumen.providers.fake import FakeLLMProvider
+from lumen.schemas.enums import DialogueAct
+from lumen.schemas.pipeline import BufferMessage
+
+CONFIG = PipelineConfig()
+
+# The three ways a reply can be unusable, each expressed as a script the
+# fake provider will follow.
+BROKEN_SCRIPTS = {
+    "not_json": ["this is prose, not JSON"],
+    "wrong_shape": [json.dumps({"unexpected": "keys only"})],
+}
+
+
+def failing_provider() -> FakeLLMProvider:
+    """A model that fails the call itself rather than returning anything."""
+
+    def _raise(_prompt: str) -> str:
+        raise ProviderTimeoutError("took too long", provider="fake")
+
+    return FakeLLMProvider(_raise)
+
+
+def broken_providers() -> list[FakeLLMProvider]:
+    """One provider per way a reply can be unusable."""
+    return [
+        failing_provider(),
+        FakeLLMProvider(BROKEN_SCRIPTS["not_json"]),
+        FakeLLMProvider(BROKEN_SCRIPTS["wrong_shape"]),
+    ]
+
+
+def messages(pairs) -> list[BufferMessage]:
+    from datetime import UTC, date, datetime
+
+    return [
+        BufferMessage(
+            message_id=f"m{index}",
+            role=role,
+            content=content,
+            timestamp=datetime(2026, 6, 11, 21, index, tzinfo=UTC),
+            event_date=date(2026, 6, 11),
+        )
+        for index, (role, content) in enumerate(pairs)
+    ]
+
+
+class TestConversation:
+    def test_returns_the_settled_summary_and_per_turn_verdicts(self):
+        provider = FakeLLMProvider(
+            [
+                json.dumps(
+                    {
+                        "turns": [
+                            {
+                                "message_id": "m0",
+                                "dialogue_act": "EXPRESSIVE",
+                                "co_created_marker": False,
+                            },
+                            {
+                                "message_id": "m2",
+                                "dialogue_act": "EXPRESSIVE",
+                                "co_created_marker": True,
+                            },
+                        ],
+                        "session_summary": "I was avoiding the tradeoff.",
+                    }
+                )
+            ]
+        )
+        result = passes.run_conversation(
+            messages([("USER", "rough day"), ("AI", "why?"), ("USER", "avoiding it")]),
+            provider=provider,
+        )
+
+        assert result.summary == "I was avoiding the tradeoff."
+        assert result.turn_acts["m0"] == DialogueAct.EXPRESSIVE
+        assert result.co_created_message_ids == ("m2",)
+        assert result.used_fallback is False
+
+    def test_the_assistant_side_is_shown_to_the_model(self):
+        provider = FakeLLMProvider([json.dumps({"turns": [], "session_summary": "x"})])
+        passes.run_conversation(
+            messages([("USER", "mine"), ("AI", "assistant words")]),
+            provider=provider,
+        )
+        # The assistant's turns are needed to judge what the person took up,
+        # even though they are never extracted from.
+        assert "assistant words" in provider.calls[0].prompt
+
+    def test_an_empty_summary_is_kept_when_every_turn_was_a_request(self):
+        provider = FakeLLMProvider(
+            [
+                json.dumps(
+                    {
+                        "turns": [
+                            {
+                                "message_id": "m0",
+                                "dialogue_act": "OPERATIONAL_REQUEST",
+                                "co_created_marker": False,
+                            }
+                        ],
+                        "session_summary": "",
+                    }
+                )
+            ]
+        )
+        result = passes.run_conversation(
+            messages([("USER", "what did I say yesterday?")]),
+            provider=provider,
+        )
+
+        assert result.summary == ""
+        assert result.used_fallback is False
+
+    def test_an_empty_summary_after_real_reflection_falls_back_to_their_words(self):
+        provider = FakeLLMProvider(
+            [
+                json.dumps(
+                    {
+                        "turns": [
+                            {
+                                "message_id": "m0",
+                                "dialogue_act": "EXPRESSIVE",
+                                "co_created_marker": False,
+                            }
+                        ],
+                        "session_summary": "   ",
+                    }
+                )
+            ]
+        )
+        result = passes.run_conversation(
+            messages([("USER", "I felt hollow all day")]),
+            provider=provider,
+        )
+
+        assert result.summary == "I felt hollow all day"
+        assert result.used_fallback is True
+
+    @pytest.mark.parametrize("provider", broken_providers())
+    def test_a_broken_reply_keeps_every_word_the_person_wrote(self, provider):
+        result = passes.run_conversation(
+            messages([("USER", "first thing"), ("AI", "ignore me"), ("USER", "second")]),
+            provider=provider,
+        )
+
+        assert result.summary == "first thing\n\nsecond"
+        assert result.used_fallback is True
+
+    def test_the_fallback_is_logged(self, captured_logs):
+        passes.run_conversation(
+            messages([("USER", "something")]),
+            provider=failing_provider(),
+        )
+        warnings = [line for line in captured_logs if line["level"] == "WARNING"]
+        assert any(line.get("preprocessing_pass") == "conversation" for line in warnings)
+
+
+class TestNormalize:
+    def test_returns_cleaned_text_and_what_was_translated(self):
+        provider = FakeLLMProvider(
+            [
+                json.dumps(
+                    {
+                        "cleaned_text": "I did not understand him.",
+                        "detected_languages": ["en", "hi"],
+                        "translated": True,
+                    }
+                )
+            ]
+        )
+        result = passes.run_normalize(
+            "mujhe samajh nahi aaya", is_voice=False, provider=provider
+        )
+
+        assert result.text == "I did not understand him."
+        assert result.detected_languages == ("en", "hi")
+        assert result.translated is True
+        assert result.used_fallback is False
+
+    def test_speech_gets_the_hesitations_stripped_before_the_model_sees_it(self):
+        provider = FakeLLMProvider([json.dumps({"cleaned_text": "I was frustrated"})])
+        result = passes.run_normalize(
+            "I was um frustrated", is_voice=True, provider=provider
+        )
+
+        assert result.fillers_removed == 1
+        assert "I was frustrated" in provider.calls[0].prompt
+        assert "I was um frustrated" not in provider.calls[0].prompt
+
+    def test_typed_text_keeps_its_hesitations(self):
+        provider = FakeLLMProvider([json.dumps({"cleaned_text": "I was um frustrated"})])
+        result = passes.run_normalize(
+            "I was um frustrated", is_voice=False, provider=provider
+        )
+
+        assert result.fillers_removed == 0
+        assert "I was um frustrated" in provider.calls[0].prompt
+
+    def test_speech_and_typing_are_given_different_instructions(self):
+        spoken = FakeLLMProvider([json.dumps({"cleaned_text": "x"})])
+        typed = FakeLLMProvider([json.dumps({"cleaned_text": "x"})])
+        passes.run_normalize("text", is_voice=True, provider=spoken)
+        passes.run_normalize("text", is_voice=False, provider=typed)
+
+        assert "self-correction" in spoken.calls[0].prompt
+        assert "self-correction" not in typed.calls[0].prompt
+        assert "typed, not spoken" in typed.calls[0].prompt
+
+    @pytest.mark.parametrize("provider", broken_providers())
+    def test_a_broken_reply_keeps_the_text_as_it_arrived(self, provider):
+        result = passes.run_normalize(
+            "the original words", is_voice=False, provider=provider
+        )
+
+        assert result.text == "the original words"
+        assert result.used_fallback is True
+
+    def test_a_reply_that_ate_the_text_is_treated_as_a_failure(self):
+        provider = FakeLLMProvider([json.dumps({"cleaned_text": "   "})])
+        result = passes.run_normalize(
+            "real content here", is_voice=False, provider=provider
+        )
+
+        assert result.text == "real content here"
+        assert result.used_fallback is True
+
+    def test_empty_input_returning_empty_is_not_a_failure(self):
+        provider = FakeLLMProvider([json.dumps({"cleaned_text": ""})])
+        result = passes.run_normalize(
+            "   ", is_voice=False, provider=provider
+        )
+
+        assert result.text == ""
+        assert result.used_fallback is False
+
+
+class TestStructure:
+    def _reply(self, episodes, coreference=None):
+        return json.dumps(
+            {
+                "episodes": episodes,
+                "coreference": coreference
+                or {"resolved_entities": [], "ambiguous_refs": []},
+            }
+        )
+
+    def test_returns_topics_and_the_resolved_references(self):
+        provider = FakeLLMProvider(
+            [
+                self._reply(
+                    [
+                        {
+                            "episode_summary": "The mentor conflict",
+                            "text": "Jordan pushed back on the plan.",
+                            "overarching_themes": ["Work"],
+                            "historical_era": "exam prep",
+                        }
+                    ],
+                    {
+                        "resolved_entities": [
+                            {
+                                "span": "he",
+                                "resolved_to": "Jordan",
+                                "confidence": 0.9,
+                                "resolution_basis": "most_recent_named_antecedent",
+                            }
+                        ],
+                        "ambiguous_refs": [],
+                    },
+                )
+            ]
+        )
+        result = passes.run_structure(
+            "text", entry_id="sess_1", provider=provider, config=CONFIG
+        )
+
+        assert len(result.episodes) == 1
+        assert result.episodes[0].historical_era == "exam prep"
+        assert result.coreference_map.entry_id == "sess_1"
+        assert result.coreference_map.resolved_entities[0].resolved_to == "Jordan"
+        assert result.used_fallback is False
+
+    @pytest.mark.parametrize("provider", broken_providers())
+    def test_a_broken_reply_keeps_the_entry_whole(self, provider):
+        result = passes.run_structure(
+            "the whole entry text", entry_id="sess_1", provider=provider, config=CONFIG
+        )
+
+        assert len(result.episodes) == 1
+        assert result.episodes[0].text == "the whole entry text"
+        assert result.coreference_map.resolved_entities == []
+        assert result.used_fallback is True
+
+    def test_zero_topics_is_treated_as_a_failure(self):
+        provider = FakeLLMProvider([self._reply([])])
+        result = passes.run_structure(
+            "real text", entry_id="sess_1", provider=provider, config=CONFIG
+        )
+
+        assert len(result.episodes) == 1
+        assert result.episodes[0].text == "real text"
+        assert result.used_fallback is True
+
+    def test_too_many_topics_are_folded_into_the_last_one(self):
+        episodes = [
+            {
+                "episode_summary": f"topic {index}",
+                "text": f"text {index}",
+                "overarching_themes": [f"theme{index}"],
+            }
+            for index in range(6)
+        ]
+        provider = FakeLLMProvider([self._reply(episodes)])
+        result = passes.run_structure(
+            "text",
+            entry_id="sess_1",
+            provider=provider,
+            config=PipelineConfig(max_episodes_per_session=3),
+        )
+
+        assert len(result.episodes) == 3
+        assert result.overflow_merged is True
+        # Every word survives the fold.
+        assert result.episodes[2].text == "text 2\n\ntext 3\n\ntext 4\n\ntext 5"
+        assert result.episodes[2].overarching_themes == [
+            "theme2",
+            "theme3",
+            "theme4",
+            "theme5",
+        ]
+
+    def test_an_era_survives_the_fold(self):
+        episodes = [
+            {"episode_summary": "a", "text": "a", "historical_era": None},
+            {"episode_summary": "b", "text": "b", "historical_era": None},
+            {"episode_summary": "c", "text": "c", "historical_era": "college"},
+        ]
+        provider = FakeLLMProvider([self._reply(episodes)])
+        result = passes.run_structure(
+            "text",
+            entry_id="sess_1",
+            provider=provider,
+            config=PipelineConfig(max_episodes_per_session=2),
+        )
+
+        assert result.episodes[1].historical_era == "college"
+
+    def test_a_split_within_the_limit_is_left_alone(self):
+        episodes = [
+            {"episode_summary": "a", "text": "a"},
+            {"episode_summary": "b", "text": "b"},
+        ]
+        provider = FakeLLMProvider([self._reply(episodes)])
+        result = passes.run_structure(
+            "text",
+            entry_id="sess_1",
+            provider=provider,
+            config=PipelineConfig(max_episodes_per_session=2),
+        )
+
+        assert len(result.episodes) == 2
+        assert result.overflow_merged is False
+
+
+class TestTriage:
+    def test_scores_are_matched_to_topics_by_position(self):
+        provider = FakeLLMProvider(
+            [
+                json.dumps(
+                    {
+                        "scores": [
+                            {
+                                "episode_index": 2,
+                                "coherence_score": 0.2,
+                                "reason": "thin",
+                                "reflection_prompts": ["what happened?"],
+                            },
+                            {
+                                "episode_index": 1,
+                                "coherence_score": 0.9,
+                                "reason": "clear",
+                                "reflection_prompts": [],
+                            },
+                        ]
+                    }
+                )
+            ]
+        )
+        result = passes.run_triage(["first", "second"], provider=provider, config=CONFIG)
+
+        # Returned out of order by the model, put back in order here.
+        assert [score.coherence_score for score in result.scores] == [0.9, 0.2]
+        assert result.used_fallback is False
+
+    def test_no_topics_means_no_call_and_no_scores(self):
+        provider = FakeLLMProvider([])
+        result = passes.run_triage([], provider=provider, config=CONFIG)
+
+        assert result.scores == ()
+        assert provider.calls == []
+
+    @pytest.mark.parametrize("provider", broken_providers())
+    def test_a_broken_reply_treats_everything_as_thin(self, provider):
+        result = passes.run_triage(["a", "b"], provider=provider, config=CONFIG)
+
+        assert [score.coherence_score for score in result.scores] == [0.0, 0.0]
+        assert result.used_fallback is True
+
+    def test_scores_for_topics_that_do_not_exist_count_as_no_match(self):
+        provider = FakeLLMProvider(
+            [json.dumps({"scores": [{"episode_index": 9, "coherence_score": 0.9}]})]
+        )
+        result = passes.run_triage(["only one"], provider=provider, config=CONFIG)
+
+        assert result.used_fallback is True
+        assert result.scores[0].coherence_score == 0.0
+
+    def test_a_topic_the_model_skipped_is_left_unscored(self, captured_logs):
+        provider = FakeLLMProvider(
+            [json.dumps({"scores": [{"episode_index": 1, "coherence_score": 0.9}]})]
+        )
+        result = passes.run_triage(["a", "b"], provider=provider, config=CONFIG)
+
+        assert [score.coherence_score for score in result.scores] == [0.9, 0.0]
+        assert result.used_fallback is False
+        assert any("without a score" in line["msg"] for line in captured_logs)
+
+    def test_extra_questions_are_trimmed_to_the_agreed_number(self):
+        provider = FakeLLMProvider(
+            [
+                json.dumps(
+                    {
+                        "scores": [
+                            {
+                                "episode_index": 1,
+                                "coherence_score": 0.1,
+                                "reflection_prompts": ["a", "b", "c", "d", "e"],
+                            }
+                        ]
+                    }
+                )
+            ]
+        )
+        result = passes.run_triage(
+            ["text"], provider=provider, config=PipelineConfig(reflection_prompt_count=3)
+        )
+
+        assert result.scores[0].reflection_prompts == ["a", "b", "c"]
+
+    def test_blank_questions_are_dropped(self):
+        provider = FakeLLMProvider(
+            [
+                json.dumps(
+                    {
+                        "scores": [
+                            {
+                                "episode_index": 1,
+                                "coherence_score": 0.1,
+                                "reflection_prompts": ["real question", "   ", ""],
+                            }
+                        ]
+                    }
+                )
+            ]
+        )
+        result = passes.run_triage(["text"], provider=provider, config=CONFIG)
+
+        assert result.scores[0].reflection_prompts == ["real question"]
+
+    def test_the_threshold_and_count_reach_the_prompt(self):
+        provider = FakeLLMProvider([json.dumps({"scores": []})])
+        passes.run_triage(
+            ["text"],
+            provider=provider,
+            config=PipelineConfig(coherence_threshold=0.55, reflection_prompt_count=4),
+        )
+
+        assert "0.55" in provider.calls[0].prompt
+        assert "exactly 4" in provider.calls[0].prompt
+
+
+class TestReflectionPrompts:
+    def test_returns_the_questions(self):
+        provider = FakeLLMProvider(
+            [json.dumps({"reflection_prompts": ["what bothered you?", "why now?"]})]
+        )
+        result = passes.run_reflection_prompts(
+            "short entry", provider=provider, config=CONFIG
+        )
+
+        assert result.prompts == ("what bothered you?", "why now?")
+        assert result.used_fallback is False
+
+    def test_extra_questions_are_trimmed(self):
+        provider = FakeLLMProvider(
+            [json.dumps({"reflection_prompts": ["a", "b", "c", "d"]})]
+        )
+        result = passes.run_reflection_prompts(
+            "short", provider=provider, config=PipelineConfig(reflection_prompt_count=2)
+        )
+
+        assert result.prompts == ("a", "b")
+
+    @pytest.mark.parametrize("provider", broken_providers())
+    def test_a_broken_reply_offers_nothing_rather_than_something_generic(self, provider):
+        result = passes.run_reflection_prompts("short", provider=provider, config=CONFIG)
+
+        assert result.prompts == ()
+        assert result.used_fallback is True
+
+
+class TestLocalSummary:
+    def test_short_text_is_used_whole(self):
+        assert passes.local_summary("A short line") == "A short line"
+
+    def test_long_text_is_cut_and_marked(self):
+        summary = passes.local_summary("word " * 40)
+        assert summary.endswith("…")
+        assert len(summary) <= 81
+
+    def test_line_breaks_are_flattened(self):
+        assert passes.local_summary("first\n\nsecond") == "first second"
+
+    def test_empty_text_gets_an_honest_label(self):
+        assert passes.local_summary("   ") == "Empty entry"
+
+
+class TestWholeTextEpisode:
+    def test_wraps_the_text_with_a_summary_taken_from_it(self):
+        episode = passes.whole_text_episode("The entire entry goes here.")
+
+        assert isinstance(episode, SegmentedEpisode)
+        assert episode.text == "The entire entry goes here."
+        assert episode.episode_summary == "The entire entry goes here."
+
+
+class TestPrivacy:
+    @pytest.mark.parametrize("provider", broken_providers())
+    def test_a_failure_never_logs_what_was_being_read(self, provider, captured_logs):
+        secret = "the specific thing I have never told anyone"
+        passes.run_normalize(secret, is_voice=False, provider=provider)
+
+        assert not any(secret in json.dumps(line) for line in captured_logs)

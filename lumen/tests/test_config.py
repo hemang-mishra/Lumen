@@ -16,6 +16,7 @@ from lumen.config import (
     GraphConfig,
     ObservabilityConfig,
     OperationalConfig,
+    PipelineConfig,
     ProviderConfig,
     VectorConfig,
 )
@@ -92,6 +93,51 @@ class TestAppConfigComposesProviderConfig:
     def test_app_config_provider_role_resolvable(self):
         app_cfg = AppConfig()
         assert app_cfg.providers.resolve(ModelRole.THINKING) == ("gemini", "gemini-2.5-pro")
+
+    def test_default_app_config_has_pipeline_config(self):
+        assert isinstance(AppConfig().pipeline, PipelineConfig)
+
+
+class TestPipelineConfig:
+    def test_the_documented_defaults_are_what_ship(self):
+        cfg = PipelineConfig()
+        assert cfg.min_reflection_words == 30
+        assert cfg.coherence_threshold == 0.4
+        assert cfg.reflection_prompt_count == 3
+        assert cfg.max_episodes_per_session == 12
+
+    @pytest.mark.parametrize(
+        "variable,value,field,expected",
+        [
+            ("LUMEN_MIN_REFLECTION_WORDS", "50", "min_reflection_words", 50),
+            ("LUMEN_COHERENCE_THRESHOLD", "0.65", "coherence_threshold", 0.65),
+            ("LUMEN_REFLECTION_PROMPT_COUNT", "5", "reflection_prompt_count", 5),
+            ("LUMEN_MAX_EPISODES", "4", "max_episodes_per_session", 4),
+        ],
+    )
+    def test_each_threshold_is_overridable_on_its_own(
+        self, monkeypatch, variable, value, field, expected
+    ):
+        monkeypatch.setenv(variable, value)
+        cfg = PipelineConfig()
+
+        assert getattr(cfg, field) == expected
+        # The others keep their defaults.
+        untouched = {
+            "min_reflection_words": 30,
+            "coherence_threshold": 0.4,
+            "reflection_prompt_count": 3,
+            "max_episodes_per_session": 12,
+        }
+        del untouched[field]
+        for name, default in untouched.items():
+            assert getattr(cfg, name) == default
+
+    def test_the_environment_is_read_when_the_config_is_built(self, monkeypatch):
+        # Set after this module was imported, so a value captured at import
+        # time would be the old one.
+        monkeypatch.setenv("LUMEN_MIN_REFLECTION_WORDS", "77")
+        assert PipelineConfig().min_reflection_words == 77
 
 
 class TestEnvironmentIsReadOnConstruction:

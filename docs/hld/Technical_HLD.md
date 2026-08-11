@@ -339,6 +339,8 @@ class SessionDecayEvent(BaseModel):
     session_id: str
     user_id: str
     event_date: date           # logical date of the session
+    session_label: str         # separates same-day conversations
+    source_modality: SourceModality   # VOICE_NOTE gates the ASR-only cleaning rules
     message_count: int
     raw_buffer: list[BufferMessage]
     triggered_at: datetime
@@ -346,9 +348,10 @@ class SessionDecayEvent(BaseModel):
 class PreprocessingResult(BaseModel):
     session_id: str
     episodes: list[PreprocessedEpisode]
-    coreference_map: dict
+    coreference_map: CoreferenceMap   # resolved_entities + ambiguous_refs
     quality_gate_decision: Literal["REFLECTION", "RAW_CAPTURE", "DISCARD"]
     processing_time_ms: int
+    pending_reflections: list[str]    # RAW_CAPTURE follow-up questions
 
 class ExtractionResult(BaseModel):
     episode_id: str

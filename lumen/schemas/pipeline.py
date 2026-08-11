@@ -3,18 +3,13 @@ Pipeline stage data transfer objects — the typed hand-offs between Stage 0
 through Stage 3 of the extraction pipeline.
 
 Each stage accepts one of these models as input and returns another as
-output (HLD Rule 2: pipeline stages are pure functions). The orchestrator
-(Goal 10) is the only component that chains them together.
+output — stages are pure functions, and the orchestrator is the only
+component that chains them together.
 
-Five top-level models are named explicitly in Technical_HLD.md Section 5:
-SessionDecayEvent, PreprocessingResult, ExtractionResult, RetrievalResult,
-ReconciliationResult. Two more are referenced there but never defined
-(BufferMessage, CandidateNode) — reconstructed here from their usage.
-Four supporting sub-models (CoreferenceMap, ResolvedEntity, AmbiguousRef,
-PreprocessedEpisode) are reconstructed from Preprocessing.md, whose JSON
-examples this module mirrors directly.
-
-See: docs/hld/Technical_HLD.md Section 5, docs/Extraction/Preprocessing.md
+Five of these are the stage boundaries themselves: SessionDecayEvent,
+PreprocessingResult, ExtractionResult, RetrievalResult, and
+ReconciliationResult. The rest are the smaller pieces those five are built
+from.
 """
 
 from __future__ import annotations
@@ -30,6 +25,7 @@ from lumen.schemas.enums import (
     EntryClass,
     QualityGateDecision,
     ReconciliationAction,
+    SourceModality,
     StructuralAnchorType,
 )
 from lumen.schemas.nodes import (
@@ -168,6 +164,12 @@ class PreprocessedEpisode(BaseModel):
     episodes if it covers more than one distinct topic.
 
     Attributes:
+        episode_id: Stable identifier for this episode, assigned as soon as
+            the episode is created. Everything downstream refers back to
+            the episode by this id.
+        episode_summary: A one-line description of what this episode is
+            about, useful for scanning a day's episodes without reading
+            them in full.
         episode_index: This episode's position within its entry
             (1-indexed).
         total_episodes_in_entry: How many episodes the entry was split
@@ -190,6 +192,8 @@ class PreprocessedEpisode(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
+    episode_id: str = Field(min_length=1)
+    episode_summary: str = Field(min_length=1)
     episode_index: int = Field(ge=1)
     total_episodes_in_entry: int = Field(ge=1)
     cleaned_text: str = Field(min_length=1)
@@ -271,6 +275,10 @@ class SessionDecayEvent(PipelineDTO):
             day can hold several, kept separate because the user split them
             by topic. Carried here so later stages can record which
             conversation their results came from.
+        source_modality: Whether these messages started life as a voice
+            recording or as typed text. Cleanup steps that only make sense
+            for speech — removing "um", undoing spoken false starts — are
+            skipped for typed input, where those words were meant.
         message_count: How many messages were buffered in this session.
         raw_buffer: The actual buffered messages to be processed.
         triggered_at: The exact time this decay event fired.
@@ -280,6 +288,7 @@ class SessionDecayEvent(PipelineDTO):
     user_id: str = Field(min_length=1)
     event_date: date
     session_label: str = ""
+    source_modality: SourceModality = SourceModality.TEXT_ENTRY
     message_count: int = Field(ge=0)
     raw_buffer: list[BufferMessage] = Field(default_factory=list)
     triggered_at: datetime
