@@ -117,6 +117,8 @@ status: ACTIVE
 
 A conversational session or period of internal realization that produces a cognitive shift without an external physical event. Used to anchor EVOLVE or CONTRADICT actions driven by internal dialogue or AI-facilitated breakthroughs.
 
+**One `SessionNode` is minted per `REFLECTION` episode by Stage 1 (Microextraction), in code rather than by the extraction model.** Rule 3 above forbids a belief or pattern from evolving without an intervening `EventNode` or `SessionNode`, so an anchor must always exist; leaving that to a model's judgement about what counts as an event would make a structural guarantee probabilistic. `RAW_CAPTURE` episodes get no anchor, since they bypass Reconciliation entirely.
+
 ```yaml
 node_type: SessionNode
 node_id: sess_example_001

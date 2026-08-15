@@ -42,6 +42,12 @@ Also set co_created_marker to true on any message where the person explicitly \
 takes up something the assistant just said — "I love that framing", "I'm \
 going to use that", "yes, exactly that".
 
+For every such moment, add the assistant's own wording that was taken up to \
+co_created_spans, quoted exactly as the assistant wrote it. Quote the phrase \
+or sentence carrying the idea, not the whole message. Leave the list empty if \
+the person took up nothing. Do not add the person's own words to this list — \
+only the assistant's.
+
 Second, write a session summary containing only what the conversation \
 actually settled on. A conversation is full of ideas that were raised, tested \
 and abandoned. Include only the conclusions the person arrived at and still \

@@ -314,6 +314,13 @@ class PreprocessingResult(PipelineDTO):
         pending_reflections: Follow-up questions generated for the user
             when the input was too thin for full analysis, inviting them
             to expand on it later.
+        co_created_spans: Phrasings the assistant offered that the user
+            explicitly took up as their own. Only a conversation produces
+            these, and only the step that still sees the conversation turn
+            by turn can find them — by the time the dialogue has been
+            summarized, there is no way to tell whose words were whose.
+            Later stages use them to credit an idea to the conversation
+            rather than to the person alone.
     """
 
     session_id: str = Field(min_length=1)
@@ -322,6 +329,48 @@ class PreprocessingResult(PipelineDTO):
     quality_gate_decision: QualityGateDecision
     processing_time_ms: int = Field(ge=0)
     pending_reflections: list[str] = Field(default_factory=list)
+    co_created_spans: list[str] = Field(default_factory=list)
+
+
+class MicroextractionInput(PipelineDTO):
+    """
+    One episode, packaged with everything needed to turn it into graph
+    nodes — and nothing about the user's history.
+
+    The episode alone is not enough. It carries no date, and every node
+    built from it has to record when the described experience happened.
+    It also carries no coreference map, because that is resolved once for
+    a whole entry rather than per episode. Both are gathered here so the
+    extraction step receives one complete object.
+
+    What is deliberately absent matters as much as what is present. There
+    is no place in this model for existing beliefs, patterns, or past
+    entries. Extraction reads today's writing on its own terms; comparing
+    it to what came before is a later step's job, and a model shown the
+    old answers stops reading and starts matching.
+
+    Attributes:
+        episode: The cleaned, topic-segmented piece of writing to read.
+        coreference_map: Who the entry's pronouns and nicknames refer to,
+            so the same person is not extracted as two different people.
+        entry_id: The entry the episode came from.
+        event_date: The calendar date the writing belongs to.
+        occurred_at: When the described experience happened, used as the
+            timestamp on every node built from this episode.
+        source_modality: Whether this started as speech or typing.
+        session_label: Distinguishes entries made on the same day.
+        co_created_spans: Assistant phrasings the person adopted as their
+            own, used to credit those ideas correctly.
+    """
+
+    episode: PreprocessedEpisode
+    coreference_map: CoreferenceMap
+    entry_id: str = Field(min_length=1)
+    event_date: date
+    occurred_at: datetime
+    source_modality: SourceModality = SourceModality.TEXT_ENTRY
+    session_label: str = ""
+    co_created_spans: list[str] = Field(default_factory=list)
 
 
 class ExtractionResult(PipelineDTO):
@@ -451,6 +500,7 @@ __all__ = [
     "CandidateNode",
     "SessionDecayEvent",
     "PreprocessingResult",
+    "MicroextractionInput",
     "ExtractionResult",
     "RetrievalResult",
     "ReconciliationResult",

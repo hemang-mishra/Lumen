@@ -176,6 +176,7 @@ def run_conversation(
 
     turn_acts = {turn.message_id: turn.dialogue_act for turn in response.turns}
     co_created = tuple(turn.message_id for turn in response.turns if turn.co_created_marker)
+    spans = tuple(span.strip() for span in response.co_created_spans if span.strip())
     summary = response.session_summary.strip()
 
     # An empty summary is the right answer when every message was a request
@@ -187,11 +188,15 @@ def run_conversation(
             summary=render_monologue(spoken_by_person),
             turn_acts=turn_acts,
             co_created_message_ids=co_created,
+            co_created_spans=spans,
             used_fallback=True,
         )
 
     return ConversationResult(
-        summary=summary, turn_acts=turn_acts, co_created_message_ids=co_created
+        summary=summary,
+        turn_acts=turn_acts,
+        co_created_message_ids=co_created,
+        co_created_spans=spans,
     )
 
 

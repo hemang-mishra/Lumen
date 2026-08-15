@@ -159,10 +159,47 @@ This document outlines the systematic, stage-by-stage implementation plan for th
     `lumen/pipeline/`, `lumen/config.py`, and `lumen/schemas/pipeline.py`.
   - *Plan:* [`implementation/Goal_5_Plan.md`](file:///Users/hemangmishra/Projects/Lumen/implementation/Goal_5_Plan.md)
 
-- [ ] **Goal 6: Stage 1 — Microextraction Core**
-  - Implement `lumen/pipeline/extraction.py` (LLM prompt + structured JSON extraction).
-  - Input: `PreprocessedEpisode` → Output: `ExtractionResult` (list of typed ObservationNodes, EventNodes, etc.)
-  - *Test:* Verify extraction of Belief, Pattern, Event, CausalChain nodes from known text blocks.
+- [x] **Goal 6: Stage 1 — Microextraction Core** ✅
+  - Implemented `lumen/pipeline/extraction/` as a package (`stage`, `passes`, `validation`,
+    `assembly`, `catalog`, `contracts`, `prompts`) rather than the single `extraction.py`
+    named above — same call Goal 5 made, for the same reason. `extract()` is the only
+    public name.
+  - Input: **`MicroextractionInput`** → Output: `ExtractionResult`. A new stage-boundary DTO:
+    `PreprocessedEpisode` carries no date, coreference map or modality, while every node this
+    stage builds requires `occurred_at`. A pure function — no DB, no graph, no history.
+  - **Two paths, one call each:** a `REFLECTION` episode gets one THINKING call producing
+    observations, events and causal chains together; a `RAW_CAPTURE` episode gets one
+    LIGHTWEIGHT call. The path is chosen from `entry_class`, which Stage 0 already decided.
+  - **Goal 6 validates, Goal 7 retries** (per explicit user decision). 13 rules enforced per
+    *item*: one invented type costs one observation, not the reply. Nothing is ever filled in.
+    `validation_passed` is false whenever anything was dropped or nothing survived — the flag
+    Goal 7 reads.
+  - **Resolves the `RAW_CAPTURE` conflict Goal 5 flagged:** `CONTEXT` **and** `EMOTION`, but
+    the emotion only when the person named a feeling themselves. Enforced mechanically — the
+    model must return the verbatim quote, and an emotion whose quote is not in the episode
+    text is dropped.
+  - **The causal anchor is minted in code.** One `SessionNode` per `REFLECTION` episode, so
+    Schema rule 5 (no EVOLVE without an intervening Event/Session) is a guarantee rather than
+    a model judgement. `EventNode`s are still extracted from content.
+  - **Three defences against invention**, all mechanical: `raw_evidence` quotes checked
+    against the source text and counted when absent; a `person_ref` naming someone who appears
+    nowhere in the entry is stripped; `PROSODY_SIGNAL` is excluded from the prompt and
+    discarded in code, since the stage only ever sees a transcript.
+  - *Amends Goal 5:* `PreprocessingResult.co_created_spans` — Stage 0's conversation pass
+    detected which turns adopted an AI framing and then discarded the wording when it rolled
+    the dialogue into a summary, leaving `provenance: CO_CREATED` with no possible input.
+    Session-scoped like `coreference_map`, since segmentation happens later. Adds
+    `make_scoped_node_id()` (`obs_2026_06_11_01_003`) — two episodes of one day are extracted
+    by independent calls that both count from 1 and would otherwise collide.
+  - *Docs amended ahead of coding:* `Microextraction.md` (the `RAW_CAPTURE` rule, `OPEN_LOOP`
+    as an observation, provenance sourced from the adopted spans), `Preprocessing.md` (same
+    `RAW_CAPTURE` rule, `co_created_spans`), `Architecture.md` (**re-extraction limit is 3,
+    not 1** — it contradicted `Reconciliation.md`; the mandatory signal-floor list completed
+    from 3 types to the 6 shipped; `OpenLoopNode` creation moved to Reconciliation; the
+    session anchor recorded), `Technical_HLD.md` §5, `Schema.md` §3.1.
+  - *Result:* 1151 tests passing (968 from Goals 1–5 + 183 new), **100% coverage** on
+    `lumen/pipeline/`, `lumen/config.py`, `lumen/schemas/pipeline.py`, `lumen/schemas/ids.py`.
+  - *Plan:* [`implementation/Goal_6_Plan.md`](file:///Users/hemangmishra/Projects/Lumen/implementation/Goal_6_Plan.md)
 
 - [ ] **Goal 7: Post-Extraction Validation Layer**
   - Enforce Pydantic schema validation on all LLM-generated JSON.

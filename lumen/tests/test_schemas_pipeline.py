@@ -8,7 +8,7 @@ rule reused from DecisionAuditNode.
 
 from __future__ import annotations
 
-from datetime import date, datetime
+from datetime import UTC, date, datetime
 
 import pytest
 from pydantic import ValidationError
@@ -26,6 +26,7 @@ from lumen.schemas.pipeline import (
     CandidateNode,
     CoreferenceMap,
     ExtractionResult,
+    MicroextractionInput,
     PreprocessedEpisode,
     PreprocessingResult,
     ReconciliationResult,
@@ -178,6 +179,70 @@ class TestPreprocessingResult:
         )
         assert result.quality_gate_decision == QualityGateDecision.RAW_CAPTURE
         assert len(result.pending_reflections) == 1
+
+    def test_adopted_framings_default_to_none_found(self):
+        result = PreprocessingResult(
+            session_id="s1",
+            coreference_map=CoreferenceMap(entry_id="e1"),
+            quality_gate_decision=QualityGateDecision.REFLECTION,
+            processing_time_ms=120,
+        )
+        assert result.co_created_spans == []
+
+    def test_adopted_framings_are_carried_when_found(self):
+        result = PreprocessingResult(
+            session_id="s1",
+            coreference_map=CoreferenceMap(entry_id="e1"),
+            quality_gate_decision=QualityGateDecision.REFLECTION,
+            processing_time_ms=120,
+            co_created_spans=["confidence is showing up scared"],
+        )
+        assert result.co_created_spans == ["confidence is showing up scared"]
+
+
+class TestMicroextractionInput:
+    def _episode(self):
+        return PreprocessedEpisode(
+            episode_id="ep_2026_06_11_001", episode_summary="a topic",
+            episode_index=1, total_episodes_in_entry=1, cleaned_text="text",
+            entry_class=EntryClass.REFLECTION, coherence_score=0.8,
+            raw_text_hash="sha256:abc",
+        )
+
+    def test_constructs_with_an_episode_and_its_entry_facts(self):
+        payload = MicroextractionInput(
+            episode=self._episode(),
+            coreference_map=CoreferenceMap(entry_id="e1"),
+            entry_id="e1",
+            event_date=date(2026, 6, 11),
+            occurred_at=datetime(2026, 6, 11, 20, 0, tzinfo=UTC),
+        )
+        assert payload.episode.episode_id == "ep_2026_06_11_001"
+        assert payload.source_modality == SourceModality.TEXT_ENTRY
+        assert payload.co_created_spans == []
+
+    def test_the_entry_must_be_named(self):
+        with pytest.raises(ValidationError):
+            MicroextractionInput(
+                episode=self._episode(),
+                coreference_map=CoreferenceMap(entry_id="e1"),
+                entry_id="",
+                event_date=date(2026, 6, 11),
+                occurred_at=datetime(2026, 6, 11, 20, 0, tzinfo=UTC),
+            )
+
+    def test_there_is_nowhere_to_put_history(self):
+        # The stage is blind to the past on purpose, and the contract is
+        # where that is enforced: a caller cannot hand it candidates.
+        with pytest.raises(ValidationError):
+            MicroextractionInput(
+                episode=self._episode(),
+                coreference_map=CoreferenceMap(entry_id="e1"),
+                entry_id="e1",
+                event_date=date(2026, 6, 11),
+                occurred_at=datetime(2026, 6, 11, 20, 0, tzinfo=UTC),
+                historical_candidates=["pat_decision_saturation"],
+            )
 
 
 class TestExtractionResult:

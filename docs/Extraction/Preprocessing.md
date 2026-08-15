@@ -69,6 +69,10 @@ Instead, Lumen uses **Session-Level Extraction (Delayed Stage 1)**. Inputs from 
 1. **Factual/Task-oriented turns** (`OPERATIONAL_REQUEST`) are filtered out completely. *Note: Emotionally charged or rhetorical questions (e.g., "What is wrong with my brain?") must be classified as `EXPRESSIVE` rather than `OPERATIONAL_REQUEST` to prevent dropping vulnerable reflections.*
 2. **CO_CREATED Marker Detection:** The layer scans for explicit adoption markers in user turns following an AI response (e.g., *"I love the narrative you gave for this"*, *"I'm going to use that framing"*). When detected, these markers are flagged so that downstream processes assign `provenance: CO_CREATED` to the resulting framework nodes.
 
+   Flagging the *turn* is not enough for Microextraction to act on, because the rollup below replaces the dialogue with a summary and the attribution disappears with it. The classification pass therefore also returns the **adopted framings themselves** — the assistant's phrasings the person took up, verbatim — on `PreprocessingResult.co_created_spans`. Those spans are session-scoped, exactly like the coreference map: episode boundaries are decided several steps later, so a span cannot be attributed to one episode at the point it is found. Microextraction marks any observation resting on one of them as `CO_CREATED`.
+
+   When the classification pass fails, the span list is empty and everything downstream reads as `USER_GENERATED`. That is the safe direction — `CO_CREATED` content carries a 0.5 trust weight, so wrongly marking a person's own words as assistant-derived would quietly demote their own history in retrieval.
+
 **Stage 0.5: Session-Level Rollups (Conversational Chat Only):**
 Do not stream raw dialogue directly to Microextraction. Because conversational interfaces involve active hypothesis generation, testing, and eventual realizations, streaming raw dialogue leads to intra-session graph fragmentation and Epistemic Churn (e.g., extracting a discarded hypothesis as a concrete belief node).
 
@@ -239,9 +243,9 @@ All observation types from the full enum taxonomy are eligible. Sensitivity tier
 
 Entries classified as `RAW_CAPTURE` receive:
 
-1. **Minimal extraction:** Only a `CONTEXT` observation type is extracted — a single sentence describing the surface topic of the entry, no emotional inference, no pattern detection.
+1. **Minimal extraction:** Only `CONTEXT` and `EMOTION` observation types are extracted — a single sentence describing the surface topic of the entry, and a feeling **only where the person named one in their own words**. No emotional inference, no pattern detection. The stated-feeling rule is enforced in code: Microextraction returns the supporting quote with the emotion, and an emotion whose quote is not present in the episode text is discarded.
 2. **Reflection prompts:** Stage 0 generates 3 targeted reflection questions from the cleaned episode text at the same time it scores coherence, and returns them on the preprocessing result. They are written a stage earlier than the `CONTEXT` observation that once sourced them, because that observation is a one-sentence restatement of the text the scoring pass has already read — deriving the questions from the text directly saves a round trip and produces the same questions.
-3. **No Reconciliation:** The `CONTEXT` observation is written directly to an `ObservationNode` with `status: RAW_CAPTURE` and is not routed through Reconciliation. It does not participate in candidate retrieval.
+3. **No Reconciliation:** These observations are written directly to `ObservationNode`s with `status: RAW_CAPTURE` and are not routed through Reconciliation. They do not participate in candidate retrieval, and no causal anchor (`SessionNode`) is minted for them.
 
 **Reflection prompt generation example:**
 

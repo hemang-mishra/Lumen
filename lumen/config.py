@@ -138,12 +138,22 @@ class PipelineConfig:
       LUMEN_COHERENCE_THRESHOLD   — score at or above this counts as a reflection
       LUMEN_REFLECTION_PROMPT_COUNT — follow-up questions offered on thin entries
       LUMEN_MAX_EPISODES          — ceiling on how many pieces one entry can split into
+      LUMEN_MAX_OBSERVATIONS      — ceiling on findings taken from one episode
+      LUMEN_MAX_CAUSAL_CHAINS     — ceiling on cause-and-effect sequences per episode
+      LUMEN_MAX_CAUSAL_STEPS      — ceiling on steps within one sequence
+
+    The last three are ceilings, not targets. They exist so that one runaway
+    reply cannot turn a single paragraph into two hundred nodes; a normal
+    entry never comes close to them.
     """
 
     min_reflection_words: int = _env_int("LUMEN_MIN_REFLECTION_WORDS", 30)
     coherence_threshold: float = _env_float("LUMEN_COHERENCE_THRESHOLD", 0.4)
     reflection_prompt_count: int = _env_int("LUMEN_REFLECTION_PROMPT_COUNT", 3)
     max_episodes_per_session: int = _env_int("LUMEN_MAX_EPISODES", 12)
+    max_observations_per_episode: int = _env_int("LUMEN_MAX_OBSERVATIONS", 25)
+    max_causal_chains_per_episode: int = _env_int("LUMEN_MAX_CAUSAL_CHAINS", 5)
+    max_causal_steps_per_chain: int = _env_int("LUMEN_MAX_CAUSAL_STEPS", 12)
 
 
 @dataclass(frozen=True)

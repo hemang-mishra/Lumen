@@ -50,7 +50,7 @@ Every observation must also carry these four required metadata fields:
 }
 ```
 
-* **`provenance`** — `USER_GENERATED` | `AI_GENERATED` | `CO_CREATED`. The Microextraction LLM populates this by parsing the Dialogue Act Classification generated in Stage 0. If the user explicitly affirmed an AI-facilitated insight (e.g., "Yes, exactly!"), the provenance must be recorded as `CO_CREATED`.
+* **`provenance`** — `USER_GENERATED` | `AI_GENERATED` | `CO_CREATED`. Defaults to `USER_GENERATED`. `CO_CREATED` is set from the **adopted framings** Stage 0 returns on `PreprocessingResult.co_created_spans` — the assistant phrasings a user explicitly took up ("Yes, exactly!", "I'm going to use that framing"). Stage 0's conversation pass is what detects the adoption, because it is the only step that still sees the dialogue turn by turn; by the time Microextraction runs, the conversation has been rolled up into a summary and the attribution would otherwise be lost. An observation whose content or evidence rests on one of those spans is recorded as `CO_CREATED`.
 * **`extraction_signal_strength`** — `STANDARD` | `HIGH` | `CRITICAL`. Marks observations that are disproportionately valuable (e.g., involuntary emotional reactions during recording). HIGH/CRITICAL observations receive a weighted boost in vector retrieval and are always included in Macroextraction.
 * **`person_ref`** — If the observation involves a named person, set this to their canonical name. Used to link the observation to a Person Entity node during Reconciliation. Set to `null` if no person is involved.
 
@@ -66,6 +66,8 @@ Every observation must also carry these four required metadata fields:
 * `COGNITIVE_FRICTION`: Distinguishing between physical "fatigue", "attention drift", and psychological "escape/avoidance" during cognitive tasks.
 * `TRIGGER_CATALYST`: The specific trigger that led to an emotional/somatic state.
 * `PROSODY_SIGNAL`: A signal derived from the **paralinguistic features** of a voice recording — pitch variation, vocal tension, speech rhythm, mid-sentence breaks — that indicates emotional state **independent of transcript content.** Only applicable to voice entries. **Always set `extraction_signal_strength: HIGH`.** Distinct from `EMOTION` (which captures content-derived feelings). A `PROSODY_SIGNAL` represents what the body communicated before the words caught up. If the voice audio is unavailable (text-only entry), this type is skipped entirely.
+
+  > Until voice ingestion ships, the pipeline never has the audio — Microextraction reads a transcript in every case. The type is therefore excluded from the extraction prompt and discarded in code if a model produces one anyway, so a deferred capability cannot be faked from words alone.
 
 *— Coping & Response Types —*
 * `ENVIRONMENTAL_REANCHORING`: Deliberate actions taken to overwrite the historical emotional association or neural map of a physical space (e.g., cooking a complex meal in a childhood home specifically to break a historical pattern of passivity in that house).
@@ -106,7 +108,7 @@ Every observation must also carry these four required metadata fields:
 
 *— Pattern & Environment Types —*
 * `PATTERN`: Recurring behaviors or thought loops. **CRITICAL:** Must use formula `[Behavior] + [Trigger/Context] + [Internal State]`.
-* `OPEN_LOOP`: Unresolved psychological investigations.
+* `OPEN_LOOP`: Unresolved psychological investigations. Extracted here as an **observation**, never as an `OpenLoopNode`. Deciding that an unresolved question is a *standing* investigation rather than a passing one requires knowing whether it has surfaced before — that is historical context, which Microextraction is forbidden to see. The promotion to an `OpenLoopNode` happens during Reconciliation. This applies equally to questions the assistant raised: they are extracted as `OPEN_LOOP` observations with `provenance: AI_GENERATED`.
 * `ENVIRONMENTAL_CONTEXT`: Captures crucial distinctions the user makes between different environments based on cognitive load or constraints (e.g., "Office" meaning low decision fatigue vs "Home" meaning high decision fatigue).
 * `ENVIRONMENTAL_DEPENDENCY`: An identified rule about how a specific environment, social context, or physical setting modulates capability, motivation, or emotional state. Not just what the environment was, but what it *enables or disables* (e.g., "The gym enables workout consistency that home cannot — the environment is the forcing function, not the will").
 
@@ -182,7 +184,11 @@ Microextraction behaves differently based on the `entry_type` classification pro
 
 - **`REFLECTION` entries:** Full extraction. All observation types are eligible. Causal mechanism arrays are expected and required for episodic content. `extraction_signal_strength` is assessed per-observation by the LLM.
 
-- **`RAW_CAPTURE` entries:** Lightweight extraction only. Only `CONTEXT` and `EMOTION` observations are extracted. Causal mechanism arrays are not produced. `extraction_signal_strength` defaults to `STANDARD` for all observations unless an involuntary signal (e.g., `PROSODY_SIGNAL` from voice) is detected. After basic extraction, the system generates 3 reflection questions surfaced to the user to invite deeper processing.
+- **`RAW_CAPTURE` entries:** Lightweight extraction only. At most one `CONTEXT` observation and one `EMOTION` observation are extracted. Causal mechanism arrays are not produced. `extraction_signal_strength` is always `STANDARD` on this path.
+
+  The `EMOTION` observation is produced **only when the person named a feeling in their own words.** No emotional tone may be inferred from a low-coherence entry — that is exactly the invention the quality gate exists to prevent. The rule is enforced in code, not by prompt instruction: the extraction returns the supporting quote alongside the emotion, and an emotion whose quote cannot be found in the episode text is discarded. An entry that states no feeling yields a `CONTEXT` observation alone.
+
+  Reflection questions for this path are generated in Stage 0, from the cleaned episode text, and arrive on the preprocessing result.
 
 ⚠️ The schema note below still applies to both entry types: `extraction_signal_strength` is a required field on every observation, regardless of entry type. A missing field is a hard validation failure.
 

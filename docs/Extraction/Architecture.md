@@ -67,7 +67,9 @@ Stage 4: Graph Write
 
 **Stage 0.5 summary:** (For conversational data only). Intercepts raw multi-turn dialogue to extract settled conclusions (`REALIZATION`s) while discarding intermediate hypotheses and exploratory scaffolding. Outputs a clean Session Summary to prevent intra-session fragmentation in the graph. See [`Preprocessing.md`](Preprocessing.md).
 
-**Stage 1 summary:** Produces a structured extraction of one preprocessed episode in complete isolation from historical context. Outputs an `observations` array and a `causal_mechanisms` array. The coreference map and the episode boundaries arrive from Stage 0 as inputs; Stage 1 consumes them and does not re-derive them. See [`Microextraction.md`](Microextraction.md).
+**Stage 1 summary:** Produces a structured extraction of one preprocessed episode in complete isolation from historical context. Outputs an `observations` array and a `causal_mechanisms` array. The coreference map, the adopted-framing spans, and the episode boundaries arrive from Stage 0 as inputs; Stage 1 consumes them and does not re-derive them. See [`Microextraction.md`](Microextraction.md).
+
+**Causal anchor:** Stage 1 also mints exactly one `SessionNode` per `REFLECTION` episode, in code rather than by asking the model. The Bipartite Causal Graph rule forbids a `BeliefNode` or `PatternNode` from evolving without an intervening `EventNode` or `SessionNode`, so Reconciliation must always have something to anchor against; making that anchor's existence depend on a model's judgement about what counts as an event would turn a structural guarantee into a probabilistic one. `EventNode`s are still extracted from content wherever the person describes something that actually happened — an event that anchors a shift and the session in which the shift occurred are different claims, and Reconciliation chooses between them. `RAW_CAPTURE` episodes get no anchor, since they never reach Reconciliation.
 
 **Stage 2 summary:** Takes each extracted node and runs **two parallel retrieval passes** whose results are merged into a single candidate set before Reconciliation.
 
@@ -149,12 +151,13 @@ The full set of validation rules is defined in [`Reconciliation.md`](Reconciliat
 
 1. Every observation must have a `type` from the fixed Enum Dictionary (unknown types are rejected). Newly added enums include `COGNITIVE_DISTORTION_STATE`, `PHYSIOLOGICAL_CAPACITY_STATE`, and `EXISTENTIAL_REFLECTION`.
 2. Every observation must have an `extraction_signal_strength` (`STANDARD` | `HIGH` | `CRITICAL`). A missing value is a hard failure.
-3. Types with mandatory signal floors: `SUPPRESSED_EMOTION_SURFACING`, `METACOGNITIVE_INTERRUPT`, and `METACOGNITIVE_BREAKTHROUGH` must have `extraction_signal_strength: HIGH` or `CRITICAL`.
+3. Types with mandatory signal floors: `SUPPRESSED_EMOTION_SURFACING`, `METACOGNITIVE_INTERRUPT`, `METACOGNITIVE_BREAKTHROUGH`, `PROSODY_SIGNAL`, `IDENTITY_FUSION_STATE`, and `EXISTENTIAL_REFLECTION` must have `extraction_signal_strength: HIGH` or `CRITICAL`. (Each type's own definition in [`Microextraction.md`](Microextraction.md) states its floor; this is the consolidated list.)
 4. Causal chain `type` values must be from the set `{TRIGGER, INTERNAL_STATE, ACTION, OUTCOME, LESSON}`. Unknown step types are rejected.
 
 **On validation failure:**
-- Re-extraction is attempted once, with a correction prompt that names the violated rule and the offending field.
-- If re-extraction also fails validation: the entry is flagged, no graph write occurs, and the entry is routed to the HITL Review Queue with the violation attached.
+- Validation is **per item**, not per response. A single bad observation is dropped on its own; its valid siblings in the same response survive. Rejecting a whole extraction over one malformed entry would discard good work and pay for a second call to recover it.
+- Re-extraction is attempted for the failing items, with a correction prompt that names the violated rule and the offending field.
+- **An observation may be re-extracted at most 3 times.** On the third failure it is written with `status: EXTRACTION_FAILED`, linked to its episode with a `failed_extraction` edge, and surfaced in the next HITL queue session. This matches the re-extraction limit in [`Reconciliation.md`](Reconciliation.md); an earlier version of this document said one attempt, which was wrong.
 
 ---
 
@@ -212,7 +215,7 @@ Recency decay ensures that the retrieval layer reflects how the user currently i
 Because Stage 0 preserves the raw multi-turn dialogue (both User and AI turns), the Stage 1 Microextraction LLM is explicitly instructed to capture AI-assisted psychological work:
 
 1. **CO_CREATED Observations**: Using the adoption markers flagged by Stage 0, when the user agrees with and adopts an AI's framework or reframing, the Microextraction LLM extracts this as an observation and explicitly sets `provenance: CO_CREATED`. This ensures the graph ingests the AI's wisdom as part of the user's cognitive record, properly attributed.
-2. **AI-Initiated Open Loops**: If the dialogue session ends with a profound, unanswered question or framing presented by the AI, the Microextraction LLM must extract this as an `OpenLoopNode` (with `provenance: AI_GENERATED`). This allows the system to queue the open question for the user's next interface interaction.
+2. **AI-Initiated Open Loops**: If the dialogue session ends with a profound, unanswered question or framing presented by the AI, the Microextraction LLM extracts this as an `OPEN_LOOP` **observation** with `provenance: AI_GENERATED`. Promotion to a first-class `OpenLoopNode` happens in Reconciliation, not here: deciding that a question is a standing investigation rather than a passing one requires knowing whether it has come up before, and Microextraction is blind to history by design. Once promoted, the system can queue the open question for the user's next interface interaction.
 
 ---
 

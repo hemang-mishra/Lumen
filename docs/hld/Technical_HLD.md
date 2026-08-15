@@ -352,12 +352,33 @@ class PreprocessingResult(BaseModel):
     quality_gate_decision: Literal["REFLECTION", "RAW_CAPTURE", "DISCARD"]
     processing_time_ms: int
     pending_reflections: list[str]    # RAW_CAPTURE follow-up questions
+    co_created_spans: list[str]       # assistant framings the user adopted
+
+class MicroextractionInput(BaseModel):
+    """Everything Stage 1 needs about one episode, and nothing about history.
+
+    PreprocessedEpisode carries no date, no coreference map and no modality,
+    while every node Stage 1 builds needs occurred_at — so the stage boundary
+    is this wrapper rather than the bare episode.
+    """
+    episode: PreprocessedEpisode
+    coreference_map: CoreferenceMap
+    entry_id: str                     # the session the episode came from
+    event_date: date
+    occurred_at: datetime             # logical event time for this episode
+    source_modality: SourceModality
+    session_label: str
+    co_created_spans: list[str]
 
 class ExtractionResult(BaseModel):
     episode_id: str
     observations: list[ObservationNode]
+    events: list[EventNode]
+    sessions: list[SessionNode]       # the minted causal anchor
+    causal_chains: list[CausalChainNode]
+    causal_steps: list[CausalStepNode]
     extraction_model: str
-    validation_passed: bool
+    validation_passed: bool           # false if anything was dropped or nothing survived
     retry_count: int
 
 class RetrievalResult(BaseModel):

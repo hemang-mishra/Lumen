@@ -101,6 +101,59 @@ class TestConversation:
         assert result.co_created_message_ids == ("m2",)
         assert result.used_fallback is False
 
+    def test_the_wording_the_person_took_up_is_carried_out(self):
+        # Knowing which message showed agreement is not enough later on. The
+        # summary replaces the conversation, so unless the assistant's actual
+        # phrasing leaves here, nothing downstream can tell whose idea it was.
+        provider = FakeLLMProvider(
+            [
+                json.dumps(
+                    {
+                        "turns": [
+                            {
+                                "message_id": "m2",
+                                "dialogue_act": "EXPRESSIVE",
+                                "co_created_marker": True,
+                            }
+                        ],
+                        "session_summary": "Avoidance is the cost of the tradeoff.",
+                        "co_created_spans": ["  avoidance is the cost  ", "   "],
+                    }
+                )
+            ]
+        )
+
+        result = passes.run_conversation(
+            messages([("USER", "rough day"), ("AI", "avoidance is the cost"), ("USER", "yes, exactly")]),
+            provider=provider,
+        )
+
+        assert result.co_created_spans == ("avoidance is the cost",)
+
+    def test_no_adopted_wording_is_the_normal_case(self):
+        provider = FakeLLMProvider(
+            [json.dumps({"turns": [], "session_summary": "I was avoiding it."})]
+        )
+
+        result = passes.run_conversation(
+            messages([("USER", "rough day"), ("AI", "why?")]), provider=provider
+        )
+
+        assert result.co_created_spans == ()
+
+    def test_a_failed_reading_credits_nothing_to_the_assistant(self):
+        # Ideas credited to the assistant are trusted less when the history
+        # is searched, so guessing at them would quietly demote the person's
+        # own words.
+        provider = FakeLLMProvider(["not json"])
+
+        result = passes.run_conversation(
+            messages([("USER", "rough day"), ("AI", "why?")]), provider=provider
+        )
+
+        assert result.co_created_spans == ()
+        assert result.used_fallback is True
+
     def test_the_assistant_side_is_shown_to_the_model(self):
         provider = FakeLLMProvider([json.dumps({"turns": [], "session_summary": "x"})])
         passes.run_conversation(

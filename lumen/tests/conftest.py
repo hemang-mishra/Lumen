@@ -470,6 +470,140 @@ def scripted_providers():
     return _build
 
 
+# ---------------------------------------------------------------------------
+# Extraction fixtures
+# ---------------------------------------------------------------------------
+
+# Phrases unique to each extraction prompt, used the same way as the
+# preprocessing keys above.
+EXTRACTION_PROMPT_KEYS = {
+    "reflection": "FINDINGS (observations)",
+    "raw_capture": "Below is a short or unclear journal entry",
+}
+
+# A worked example with enough in it to produce several kinds of finding: an
+# event that happened, a feeling, a named person, and a sequence running from
+# a trigger to a lesson.
+EPISODE_TEXT = (
+    "I went to the cafe alone today and ate there without the usual dread. "
+    "Then I saw what Alex had shipped this week and felt small and behind. "
+    "I sat with it for a while and the pressure lifted on its own. "
+    "I think the comparing is the thing that hurts, not the gap itself."
+)
+
+
+@pytest.fixture
+def make_episode():
+    """Build one preprocessed episode, with sensible defaults for everything."""
+
+    def _build(
+        text: str = EPISODE_TEXT,
+        *,
+        entry_class: EntryClass = EntryClass.REFLECTION,
+        episode_index: int = 1,
+        total: int = 1,
+        summary: str = "Comparing himself to Alex after a good morning",
+    ):
+        from lumen.schemas.pipeline import PreprocessedEpisode
+
+        return PreprocessedEpisode(
+            episode_id=f"ep_2026_06_11_{episode_index:03d}",
+            episode_summary=summary,
+            episode_index=episode_index,
+            total_episodes_in_entry=total,
+            cleaned_text=text,
+            entry_class=entry_class,
+            coherence_score=0.8 if entry_class is EntryClass.REFLECTION else 0.1,
+            raw_text_hash="hash_of_the_text",
+        )
+
+    return _build
+
+
+@pytest.fixture
+def make_extraction_input(make_episode):
+    """
+    Build the object the extraction stage takes in.
+
+    People named in the entry are given as plain strings, since almost every
+    test cares only about whether a name was known, not how it was resolved.
+    """
+
+    def _build(
+        text: str = EPISODE_TEXT,
+        *,
+        entry_class: EntryClass = EntryClass.REFLECTION,
+        episode_index: int = 1,
+        total: int = 1,
+        people: list[str] | None = None,
+        ambiguous: list[tuple[str, list[str]]] | None = None,
+        co_created_spans: list[str] | None = None,
+        session_label: str = "A",
+    ):
+        from lumen.schemas.pipeline import (
+            AmbiguousRef,
+            CoreferenceMap,
+            MicroextractionInput,
+            ResolvedEntity,
+        )
+
+        coreference = CoreferenceMap(
+            entry_id="sess_test_001",
+            resolved_entities=[
+                ResolvedEntity(
+                    span="he",
+                    resolved_to=name,
+                    confidence=0.9,
+                    resolution_basis="named earlier in the entry",
+                )
+                for name in (people or [])
+            ],
+            ambiguous_refs=[
+                AmbiguousRef(span=span, candidates=names, reason="two people nearby")
+                for span, names in (ambiguous or [])
+            ],
+        )
+        return MicroextractionInput(
+            episode=make_episode(
+                text,
+                entry_class=entry_class,
+                episode_index=episode_index,
+                total=total,
+            ),
+            coreference_map=coreference,
+            entry_id="sess_test_001",
+            event_date=TODAY,
+            occurred_at=datetime(2026, 6, 11, 20, 0, tzinfo=UTC),
+            source_modality=SourceModality.TEXT_ENTRY,
+            session_label=session_label,
+            co_created_spans=co_created_spans or [],
+        )
+
+    return _build
+
+
+@pytest.fixture
+def extraction_providers():
+    """
+    Build a pair of fake models that answer extraction from a script.
+
+    Keyed by path name — "reflection" or "raw_capture" — so a test writes
+    only the reply for the path it is exercising. Both models share the
+    script, so a test does not have to track which of the two the stage
+    picks.
+    """
+    from lumen.providers.fake import FakeLLMProvider
+
+    def _build(replies: dict[str, str]):
+        script = {EXTRACTION_PROMPT_KEYS[path]: reply for path, reply in replies.items()}
+        return (
+            FakeLLMProvider(dict(script), role=ModelRole.LIGHTWEIGHT, model="fake-light"),
+            FakeLLMProvider(dict(script), role=ModelRole.THINKING, model="fake-thinker"),
+        )
+
+    return _build
+
+
 @pytest.fixture
 def buffer_with_messages(ops_store):
     """A buffer holding three messages, ready for tests that need real data."""

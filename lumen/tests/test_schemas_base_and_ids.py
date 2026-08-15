@@ -24,6 +24,7 @@ from lumen.schemas.ids import (
     NODE_ID_PREFIXES,
     SEMANTIC_ID_RE,
     make_node_id,
+    make_scoped_node_id,
     make_slug_node_id,
 )
 
@@ -112,6 +113,44 @@ class TestMakeNodeId:
     def test_empty_prefix_rejected(self):
         with pytest.raises(ValueError):
             make_node_id("", date(2026, 6, 11), 1)
+
+
+class TestMakeScopedNodeId:
+    def test_produces_expected_format(self):
+        assert (
+            make_scoped_node_id("obs", date(2026, 6, 11), 1, 3)
+            == "obs_2026_06_11_01_003"
+        )
+
+    def test_zero_pads_both_numbers(self):
+        assert (
+            make_scoped_node_id("evt", date(2026, 1, 5), 12, 7)
+            == "evt_2026_01_05_12_007"
+        )
+
+    def test_two_episodes_of_one_day_cannot_produce_the_same_name(self):
+        # Each episode is read by its own call and both count from one, so
+        # the episode number is the only thing keeping them apart.
+        first = make_scoped_node_id("obs", date(2026, 6, 11), 1, 1)
+        second = make_scoped_node_id("obs", date(2026, 6, 11), 2, 1)
+
+        assert first != second
+
+    def test_matches_semantic_id_regex(self):
+        node_id = make_scoped_node_id("obs", date(2026, 6, 11), 2, 4)
+        assert SEMANTIC_ID_RE.match(node_id)
+
+    def test_negative_seq_rejected(self):
+        with pytest.raises(ValueError):
+            make_scoped_node_id("obs", date(2026, 6, 11), 1, -1)
+
+    def test_episode_index_below_one_rejected(self):
+        with pytest.raises(ValueError):
+            make_scoped_node_id("obs", date(2026, 6, 11), 0, 1)
+
+    def test_empty_prefix_rejected(self):
+        with pytest.raises(ValueError):
+            make_scoped_node_id("", date(2026, 6, 11), 1, 1)
 
 
 class TestMakeSlugNodeId:
