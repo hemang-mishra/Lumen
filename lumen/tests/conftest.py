@@ -1479,3 +1479,37 @@ def reconciliation_outcome(sample_pattern, sample_decision_audit):
         ],
         decision_model="fake-light",
     )
+
+
+# ---------------------------------------------------------------------------
+# Web API fixtures
+#
+# The application is built by a function, so a test points the whole thing at
+# temporary databases by replacing the two dependencies rather than by
+# reaching into it. That is also how the real deployment is wired, so what
+# these tests exercise is the shipped path.
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def api_client(graph_store, ops_store):
+    """A client for the web API, wired to the test databases."""
+    from fastapi.testclient import TestClient
+
+    from lumen.api.deps import get_graph, get_ops
+    from lumen.api.main import create_app
+
+    app = create_app()
+    app.dependency_overrides[get_graph] = lambda: graph_store
+    app.dependency_overrides[get_ops] = lambda: ops_store
+
+    # The stores are supplied directly, so the application's own startup —
+    # which would open a second pair against the configured paths — is
+    # skipped rather than run and thrown away.
+    app.state.graph = graph_store
+    app.state.ops = ops_store
+
+    # Server-side failures are answered rather than re-raised, because
+    # what the caller receives when something breaks is the thing being
+    # tested — and a leaked stack trace is the failure being guarded against.
+    return TestClient(app, raise_server_exceptions=False)

@@ -606,6 +606,22 @@ Every node and every edge carries timestamps that enable time-range queries and 
 | `invalidated_at` | All edges | Null if active. Set to a timestamp when the edge is rolled back. |
 | `decision_id` | All Reconciliation edges | Foreign key to the `DecisionAuditNode` that produced this edge |
 
+### Reading the Graph at a Past Date
+
+Because every node carries `valid_from` and every edge carries `valid_from` plus
+`invalidated_at`, "what did this look like in March" needs no separate history — it is two
+comparisons:
+
+```
+node.valid_from <= T
+edge.invalidated_at IS NULL OR edge.invalidated_at > T
+```
+
+An edge withdrawn *after* T was still live at T and is followed. `CausalStepNode`,
+`PersonEntityNode`, `DecisionAuditNode` and `MacroextractionReportNode` have no
+`valid_from` at all — a step belongs to whenever its chain was, a person does not start on
+a date — so a date filter does not apply to them and they are never excluded by one.
+
 ### Temporal Decay
 
 Temporal decay applies to `PatternNode` and `BeliefNode` instances during retrieval scoring. Nodes are **never deleted** due to age. They are downweighted.

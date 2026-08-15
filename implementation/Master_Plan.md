@@ -408,10 +408,45 @@ This document outlines the systematic, stage-by-stage implementation plan for th
     `lumen/pipeline/orchestration/` and `lumen/operational/`, 98% on `lumen/graph/`.
   - *Plan:* [`implementation/Goal_10_Plan.md`](file:///Users/hemangmishra/Projects/Lumen/implementation/Goal_10_Plan.md)
 
-- [ ] **Goal 11: Graph Read/Debug APIs**
-  - Implement graph traversal queries in `lumen/graph/kuzu_impl.py` (multi-hop, time-range, domain filter).
-  - Expose in `lumen/api/routes/graph.py` as FastAPI endpoints.
-  - *Test:* Programmatically traverse the graph to verify edges, version chains, and causal anchors.
+- [x] **Goal 11: Graph Read & Debug APIs** ✅
+  - Implemented seven named traversals on `GraphProvider` (`find_nodes`, `get_neighborhood`,
+    `get_version_chain`, `get_decision_history`, `get_episode_contents`, `get_causal_chain`,
+    `count_by_type`) plus `lumen/graph/queries.py` for filter composition and row tidying —
+    `kuzu_impl.py` was already ~800 lines and the fiddly half is checkable with no database.
+  - Implemented `lumen/api/` (`main`, `deps`, `schemas`, `errors`, `routes/graph`,
+    `routes/debug`) — eleven read-only endpoints, the project's first HTTP surface.
+  - **No general query method, and Goal 1's `execute_cypher()` is cancelled rather than
+    deferred again.** It would push query building out to callers, spread Cypher into the
+    web layer, and end the promise that Kuzu can be swapped for Neo4j. Anything the system
+    cannot answer is now a deliberate addition, visible in review.
+  - **`ReadOnlyGraph` extracted; `GraphProvider` extends it.** The API is handed the
+    narrower type, so a write endpoint is not merely discouraged — the method is not on the
+    object it was given. Asserted by a test, along with "every exposed verb is GET".
+  - **Nothing raw crosses the boundary.** A node read from Kuzu arrives as the union of
+    every column across every table — 121 fields, almost all empty, lists stored as text.
+    Responses are tidied, checked models instead.
+  - **`truncated` on every subgraph.** A piece that was cut and a piece that was genuinely
+    that size look identical otherwise, and a partial graph drawn as a complete one is a
+    wrong answer that looks right. Depth is capped at three hops.
+  - **Time travel is a filter, not a feature:** `as_of` compares `valid_from`, and a link
+    withdrawn *after* that date was still live then. Withdrawn links are hidden by default
+    and reachable on request.
+  - *Amends Goal 8:* `find_linked_to_person` now takes the second hop it recorded as
+    "belongs with Goal 11's traversal work" — beliefs and patterns reached through the
+    observation that produced them, withdrawn links not followed, duplicates offered once.
+  - *Bugs found by running it:* `OpenLoopNode` has `resolution_status`, not `status`, and
+    four tables have no `valid_from` at all — both would have crashed an ordinary listing
+    rather than returning nothing, so both lists are now derived from the schema with a
+    test asserting every named column exists. And **a node's shape depends on how it was
+    fetched** (121 columns untyped, 21 typed), which made a version chain describe the same
+    history differently depending on where the walk started; chains now collect ids and
+    fetch once.
+  - *Test:* The API tests build their graph by **actually running the pipeline** on Goal
+    10's entry rather than seeding fixtures — a hand-seeded graph agrees with whatever
+    shape the test author imagined.
+  - *Result:* 1937 tests passing (1799 from Goals 1–10 + 138 new), **100% coverage** on
+    `lumen/api/` and `lumen/graph/queries.py`, 99% on `lumen/graph/`.
+  - *Plan:* [`implementation/Goal_11_Plan.md`](file:///Users/hemangmishra/Projects/Lumen/implementation/Goal_11_Plan.md)
 
 - [ ] **Goal 12: Multi-Session Integrity Test**
   - Feed 3–5 consecutive days of simulated journal logs.

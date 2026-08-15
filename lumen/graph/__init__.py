@@ -7,6 +7,6 @@ the vector package: naming the Protocol should not drag a database driver
 into whatever did the naming.
 """
 
-from lumen.graph.provider import GraphProvider
+from lumen.graph.provider import EdgeRow, GraphProvider, GraphSlice, ReadOnlyGraph
 
-__all__ = ["GraphProvider"]
+__all__ = ["GraphProvider", "ReadOnlyGraph", "GraphSlice", "EdgeRow"]

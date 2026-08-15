@@ -480,6 +480,12 @@ existing fakes. No network, no credentials.
    types with no route, logging that it did. The second hop belongs with Goal 11's
    traversal work.
 
+   > **Closed in Goal 11.** `find_linked_to_person` now takes the second step for
+   > `PatternNode` and `BeliefNode`, through whichever link a decision made from the
+   > finding — `branches_to`, `reinforces`, or `same_as`. Withdrawn links are not
+   > followed, and a record reachable by two routes is offered once, since a duplicate
+   > wastes one of very few candidate places.
+
 4. **The purity test was rewritten, as B2 anticipated — and then a second one was added.**
    See C3-1.
 
