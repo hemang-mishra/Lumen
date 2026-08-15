@@ -400,7 +400,31 @@ class ReconciliationResult(BaseModel):
     decision_model: str
     escalated_to_hitl: bool
     audit_node_id: str
+
+class ReconciliationOutcome(BaseModel):
+    """
+    What Stage 3 actually returns for one episode. An episode produces many
+    decisions and many audit nodes, plus the writes they imply, and all of it
+    has to arrive together or the orchestrator cannot execute it atomically.
+    """
+    episode_id: str
+    results: list[ReconciliationResult]
+    audit_nodes: list[DecisionAuditNode]
+    write_plan: GraphWritePlan       # nodes + edges + bookkeeping; nothing written
+    escalations: list[HitlEscalation]
+    episode_status: ReconciliationStatus   # COMPLETE | SUSPENDED
+    decision_model: str
+    decision_time_ms: int
+    decision_failed: bool            # no readable answer, as distinct from few decisions
 ```
+
+**The write plan is the hand-off.** Stage 3 decides and builds; the orchestrator
+executes without interpreting. A `GraphWritePlan` validates its own internal
+consistency on construction — every edge endpoint is either created earlier in the
+same plan or listed in `existing_node_ids` (records already in the graph, plus the
+nodes this same run extracted, which the orchestrator writes immediately before the
+plan runs). A dangling reference fails while planning rather than halfway through
+saving.
 
 Each worker accepts an input model and emits an output model. The orchestrator is the only component that chains them. This means any stage can be tested in complete isolation by constructing its input model and asserting its output model — no real DB, no real LLM required.
 
@@ -523,6 +547,14 @@ Each stage function accepts a Pydantic input model and returns a Pydantic output
 
 ### Rule 3: Graph is append-only; queue is the write path
 No component writes directly to the graph from outside the Graph Service. All graph writes go through the Graph Service API (or its module equivalent in the personal version). This creates one place to audit all writes.
+
+**Precisely: no *content* field is ever modified.** Three bookkeeping operations do
+change an existing node — `mark_superseded`, `record_reinforcement` and
+`touch_person` — each touching a fixed set of counters, timestamps and version
+status, with no caller-supplied field names. Nothing the user wrote is rewritten by
+any of them. The exception is named and enumerated in `Graph/Schema.md` rather than
+left implicit, because a rule with a hidden exception is worse than one with a
+visible exception.
 
 ### Rule 4: Every inter-service call is schema-validated
 Pydantic models are the contracts. Any call that crosses a service boundary (even within the personal monolith) validates its input against the schema. Schema mismatches are caught at the boundary, not deep inside a stage.

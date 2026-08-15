@@ -438,6 +438,44 @@ class StructuralAnchorType(StrEnum):
     HIGH_SENSITIVITY_OPEN = "HIGH_SENSITIVITY_OPEN"
 
 
+class HitlEntryType(StrEnum):
+    """
+    Why an item needs a person to look at it.
+
+    AMBIGUOUS_TIE     — two candidate actions scored too close to separate.
+    BELOW_THRESHOLD   — one clear action, but not enough confidence to take it.
+    EXTRACTION_FAILED — reading the entry kept producing unusable output.
+
+    The order here is also the priority order: a tie outranks a
+    low-confidence call, which outranks a failed reading.
+
+    This lives here rather than with the review queue's own vocabularies
+    because reconciliation decides it. The queue only stores what it is
+    told.
+    """
+
+    AMBIGUOUS_TIE = "AMBIGUOUS_TIE"
+    BELOW_THRESHOLD = "BELOW_THRESHOLD"
+    EXTRACTION_FAILED = "EXTRACTION_FAILED"
+
+
+class BookkeepingOperation(StrEnum):
+    """
+    The only three changes ever made to a record that already exists.
+
+    Nothing a person wrote is touched by any of them — they move counts,
+    dates and a status flag, and nothing else.
+
+    MARK_SUPERSEDED       — a newer version of this belief or pattern exists.
+    RECORD_REINFORCEMENT  — one more piece of evidence for it, and when.
+    TOUCH_PERSON          — this person was mentioned again, and when.
+    """
+
+    MARK_SUPERSEDED = "MARK_SUPERSEDED"
+    RECORD_REINFORCEMENT = "RECORD_REINFORCEMENT"
+    TOUCH_PERSON = "TOUCH_PERSON"
+
+
 class HitlResolutionChoice(StrEnum):
     """See Schema.md DecisionAuditNode.hitl_resolution_user_choice."""
 
@@ -485,6 +523,8 @@ __all__ = [
     "ReportType",
     "CandidateRetrievalSource",
     "StructuralAnchorType",
+    "HitlEntryType",
+    "BookkeepingOperation",
     "HitlResolutionChoice",
     "DialogueAct",
 ]

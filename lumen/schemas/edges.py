@@ -4,7 +4,7 @@ edge-table resolver.
 
 Kuzu requires typed edge tables (FROM TableA TO TableB), so
 lumen/graph/kuzu_impl.py fans the 20 *logical* edge types documented in
-docs/Graph/Schema.md out into 43 *physical* tables (EDGE_REGISTRY) — one per
+docs/Graph/Schema.md out into 48 *physical* tables (EDGE_REGISTRY) — one per
 valid (from_table, to_table) pair per logical type, e.g. `contains` becomes
 `contains_obs` / `contains_evt` / `contains_sess` / `contains_chain`.
 
@@ -14,16 +14,11 @@ resolve_edge_table() to translate (logical type, from node type, to node type)
 into the correct physical table name, keeping that translation the provider
 layer's problem to execute, not the caller's problem to know.
 
-⚠️ KNOWN GAP (flagged, not silently fixed — see implementation/Goal_2_Plan.md):
-lumen/graph/kuzu_impl.py generates every one of the 43 physical edge tables
-with the SAME four columns (valid_from, invalidated_at, decision_id,
-confidence). Schema.md's edge schema examples require `dialectic` edges to
-carry `tension_summary` and `regulates` edges to carry `regulation_summary` —
-neither column exists in the Kuzu DDL. DialecticEdge and RegulatesEdge below
-are modeled faithfully per the docs; writing one through the current
-GraphProvider.write_edge() will fail against Kuzu until the edge DDL is
-extended. This is out of Goal 2's scope (which only touches write_node());
-it must be resolved before Goal 9 (Reconciliation) writes real edges.
+Two of these links carry a sentence of their own: a tension link has to say
+what the tension is, and a regulation link has to say what was interrupted.
+Both now have a column to hold it (see EDGE_EXTRA_COLUMNS in
+lumen/graph/kuzu_impl.py); until reconciliation needed to write one, neither
+did.
 
 See: docs/Graph/Schema.md Section "Edge Types"
 """
@@ -207,6 +202,7 @@ LOGICAL_TO_PHYSICAL: dict[tuple[LogicalEdgeType, str, str], str] = {
     (LogicalEdgeType.DECIDED_BY, "PatternNode", "DecisionAuditNode"): "decided_by_pat",
     (LogicalEdgeType.DECIDED_BY, "BeliefNode", "DecisionAuditNode"): "decided_by_bel",
     (LogicalEdgeType.DECIDED_BY, "EventNode", "DecisionAuditNode"): "decided_by_evt",
+    (LogicalEdgeType.DECIDED_BY, "SessionNode", "DecisionAuditNode"): "decided_by_sess",
     (LogicalEdgeType.DECIDED_BY, "ContradictionNode", "DecisionAuditNode"): "decided_by_con",
     (LogicalEdgeType.ANALYZED_IN, "EpisodeNode", "MacroextractionReportNode"): "analyzed_in",
     (LogicalEdgeType.ALIAS_OF, "PersonEntityNode", "PersonEntityNode"): "alias_of",

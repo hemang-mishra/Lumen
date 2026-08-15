@@ -11,6 +11,8 @@ from __future__ import annotations
 
 from enum import StrEnum
 
+from lumen.schemas.enums import HitlEntryType
+
 
 class BufferStatus(StrEnum):
     """
@@ -82,21 +84,10 @@ class WriteTarget(StrEnum):
     VECTOR = "VECTOR"
 
 
-class HitlEntryType(StrEnum):
-    """
-    Why an item needs a human to look at it.
-
-    AMBIGUOUS_TIE     — two candidate actions scored too close to separate.
-    BELOW_THRESHOLD   — one clear action, but the model was not confident enough.
-    EXTRACTION_FAILED — extraction kept producing invalid output.
-
-    The order here is also the priority order: a tie outranks a low-confidence
-    call, which outranks a failed extraction.
-    """
-
-    AMBIGUOUS_TIE = "AMBIGUOUS_TIE"
-    BELOW_THRESHOLD = "BELOW_THRESHOLD"
-    EXTRACTION_FAILED = "EXTRACTION_FAILED"
+# Why an item is waiting for a person is decided by reconciliation, not by
+# the queue, so that vocabulary lives with the pipeline schemas. It is
+# imported at the top of this module and re-exported below for the code
+# that stores it.
 
 
 class HitlItemStatus(StrEnum):

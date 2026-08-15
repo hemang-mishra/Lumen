@@ -142,6 +142,7 @@ class PipelineConfig:
       LUMEN_MAX_CAUSAL_CHAINS     — ceiling on cause-and-effect sequences per episode
       LUMEN_MAX_CAUSAL_STEPS      — ceiling on steps within one sequence
       LUMEN_MAX_EXTRACTION_ATTEMPTS — tries at reading one episode before giving up
+      LUMEN_MAX_DECISION_ATTEMPTS — tries at getting a readable decision reply
       LUMEN_PASS_A_KEEP           — how many search matches survive ranking
       LUMEN_PASS_A_OVERFETCH      — how many are fetched before ranking
       LUMEN_PASS_B_KEEP           — how many anchor matches survive per anchor
@@ -165,6 +166,12 @@ class PipelineConfig:
     max_causal_chains_per_episode: int = _env_int("LUMEN_MAX_CAUSAL_CHAINS", 5)
     max_causal_steps_per_chain: int = _env_int("LUMEN_MAX_CAUSAL_STEPS", 12)
     max_extraction_attempts: int = _env_int("LUMEN_MAX_EXTRACTION_ATTEMPTS", 3)
+
+    # Reading an entry again can recover a finding that came back malformed.
+    # A decision reply has nothing to correct — either it arrived readable or
+    # it did not — so it gets one repeat rather than two, and a run that
+    # still cannot be read hands the whole episode to a person.
+    max_decision_attempts: int = _env_int("LUMEN_MAX_DECISION_ATTEMPTS", 2)
 
     # More matches are fetched than are kept, because ranking happens after
     # the search: a rare and weighty node can sit just below the cut on raw

@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 import logging
+from datetime import datetime
 from typing import Any
 
 import kuzu
@@ -94,6 +95,7 @@ EDGE_REGISTRY: list[tuple[str, str, str]] = [
     ("PatternNode", "DecisionAuditNode", "decided_by_pat"),
     ("BeliefNode", "DecisionAuditNode", "decided_by_bel"),
     ("EventNode", "DecisionAuditNode", "decided_by_evt"),
+    ("SessionNode", "DecisionAuditNode", "decided_by_sess"),
     ("ContradictionNode", "DecisionAuditNode", "decided_by_con"),
 
     # analyzed_in — macroextraction coverage
@@ -169,6 +171,49 @@ _ACTIVE_CLAUSES: dict[str, str] = {
 def _active_clause(table: str) -> str:
     """The condition that means a node of this table is still live."""
     return _ACTIVE_CLAUSES.get(table, "n.status = 'ACTIVE'")
+
+
+# Which episodes still have reconciliation outstanding. An episode is
+# suspended when one of its findings is waiting for the user to decide
+# something, and pending re-reconciliation when a past decision was rolled
+# back. Both mean the same thing here: what that episode holds has not been
+# settled yet, so it is still worth surfacing.
+UNSETTLED_EPISODE_STATUSES: tuple[str, ...] = ("PENDING_RERECONCILIATION", "SUSPENDED")
+
+
+# ---------------------------------------------------------------------------
+# Extra edge columns
+#
+# Most links only need to record when they were made and by which decision.
+# Two of them carry a sentence as well, because the link is meaningless
+# without it: a tension link has to say what the tension is, and a regulation
+# link has to say what was interrupted. Keyed by the start of the table name,
+# since each of those two logical links fans out into several typed tables.
+# ---------------------------------------------------------------------------
+
+EDGE_EXTRA_COLUMNS: dict[str, str] = {
+    "dialectic": "tension_summary STRING",
+    "regulates": "regulation_summary STRING",
+}
+
+
+def _extra_edge_columns(edge_name: str) -> str:
+    """The extra columns this link table needs, as a DDL fragment."""
+    for prefix, columns in EDGE_EXTRA_COLUMNS.items():
+        if edge_name.startswith(prefix):
+            return f", {columns}"
+    return ""
+
+
+# Which tables each bookkeeping operation is allowed to touch, and what it
+# does to them. This is the whole of the exception to "nothing already
+# written is ever changed": three operations, fixed columns, no way for a
+# caller to name a column of its own.
+_BOOKKEEPING_TABLES: dict[str, tuple[str, ...]] = {
+    "mark_superseded": ("PatternNode", "BeliefNode"),
+    "record_reinforcement": ("PatternNode", "BeliefNode"),
+    "touch_person": ("PersonEntityNode",),
+}
 
 
 # ---------------------------------------------------------------------------
@@ -382,7 +427,8 @@ class KuzuGraphProvider(GraphProvider):
                     f"CREATE REL TABLE {edge_name} ("
                     f"FROM {from_table} TO {to_table}, "
                     "valid_from STRING, invalidated_at STRING, "
-                    "decision_id STRING, confidence DOUBLE)"
+                    "decision_id STRING, confidence DOUBLE"
+                    f"{_extra_edge_columns(edge_name)})"
                 )
                 logger.debug("Creating edge table: %s (%s → %s)", edge_name, from_table, to_table)
                 self.conn.execute(ddl)
@@ -592,11 +638,96 @@ class KuzuGraphProvider(GraphProvider):
 
         return self._collect(
             "MATCH (e:EpisodeNode)-[:contains_obs]->(n:ObservationNode) "
-            "WHERE e.reconciliation_status = 'PENDING_RERECONCILIATION' "
+            "WHERE e.reconciliation_status IN $episode_statuses "
             "AND n.type IN $types AND n.status = 'ACTIVE' "
             f"RETURN n LIMIT {int(limit)}",
-            {"types": list(observation_types)},
+            {
+                "types": list(observation_types),
+                "episode_statuses": list(UNSETTLED_EPISODE_STATUSES),
+            },
         )
+
+    def count_prior_decisions(
+        self, target_node_id: str, *, actions: list[str]
+    ) -> int:
+        """
+        Count the live decisions of the given kinds already recorded against
+        a node.
+
+        Rolled-back decisions are left out: something that was undone should
+        not count as evidence that it happened.
+        """
+        if not actions:
+            return 0
+
+        res = self.conn.execute(
+            "MATCH (d:DecisionAuditNode) "
+            "WHERE d.target_node_id = $target AND d.action IN $actions "
+            "AND d.status <> 'ROLLED_BACK' "
+            "RETURN count(d)",
+            {"target": target_node_id, "actions": list(actions)},
+        )
+        if res.has_next():
+            return int(res.get_next()[0])
+        return 0
+
+    # ------------------------------------------------------------------
+    # Bookkeeping Writes
+    # ------------------------------------------------------------------
+
+    def mark_superseded(self, node_id: str, *, at: datetime) -> None:
+        """Record that a newer version of this belief or pattern now exists."""
+        table = self._table_for(node_id, operation="mark_superseded")
+        self.conn.execute(
+            f"MATCH (n:{table}) WHERE n.node_id = $node_id "
+            "SET n.status = 'SUPERSEDED'",
+            {"node_id": node_id},
+        )
+        logger.debug("Marked %s superseded at %s", node_id, at.isoformat())
+
+    def record_reinforcement(self, node_id: str, *, at: datetime) -> None:
+        """Add one to a belief or pattern's evidence, and note when."""
+        table = self._table_for(node_id, operation="record_reinforcement")
+        self.conn.execute(
+            f"MATCH (n:{table}) WHERE n.node_id = $node_id "
+            "SET n.evidence_count = n.evidence_count + 1, "
+            "n.last_reinforced_at = $at",
+            {"node_id": node_id, "at": at.isoformat()},
+        )
+        logger.debug("Recorded reinforcement of %s", node_id)
+
+    def touch_person(self, node_id: str, *, at: datetime) -> None:
+        """Note that a person was mentioned again, and when."""
+        table = self._table_for(node_id, operation="touch_person")
+        self.conn.execute(
+            f"MATCH (n:{table}) WHERE n.node_id = $node_id "
+            "SET n.mention_count = n.mention_count + 1, "
+            "n.last_mentioned_at = $at",
+            {"node_id": node_id, "at": at.isoformat()},
+        )
+        logger.debug("Touched person %s", node_id)
+
+    def _table_for(self, node_id: str, *, operation: str) -> str:
+        """
+        Find which table a node lives in, and refuse if this operation has no
+        business touching it.
+
+        The check is what keeps the bookkeeping operations narrow. Without
+        it, a mistyped id could quietly point one of them at a table it was
+        never meant to reach.
+        """
+        row = self.get_node(node_id)
+        if row is None:
+            raise ValueError(f"No node with id '{node_id}'")
+
+        table = row.get("_label")
+        allowed = _BOOKKEEPING_TABLES[operation]
+        if table not in allowed:
+            raise ValueError(
+                f"{operation} cannot be applied to a {table}. "
+                f"Allowed: {', '.join(allowed)}"
+            )
+        return str(table)
 
     def _collect(self, query: str, params: dict[str, Any]) -> list[dict[str, Any]]:
         """Run a query that returns single nodes and gather them into a list."""

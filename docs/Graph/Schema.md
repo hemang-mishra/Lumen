@@ -5,6 +5,22 @@ The knowledge graph is the persistent memory of the Lumen system. It stores ever
 Three rules govern the graph at the implementation layer:
 
 1. **Content nodes are immutable (append-only).** Once written, a node's `content` fields are never updated. Changes produce new versioned nodes with `evolved_from` edges.
+
+   **The one exception, stated openly.** Three bookkeeping fields on an existing node
+   do change, and pretending otherwise would leave a hidden exception instead of a
+   visible one. They are reached only through three named operations on
+   `GraphProvider`, each touching a hard-coded set of columns with no caller-supplied
+   field names, so there is no path from a caller to a content column:
+
+   | Operation | Node types | Columns touched |
+   |---|---|---|
+   | `mark_superseded` | `PatternNode`, `BeliefNode` | `status` |
+   | `record_reinforcement` | `PatternNode`, `BeliefNode` | `evidence_count`, `last_reinforced_at` |
+   | `touch_person` | `PersonEntityNode` | `mention_count`, `last_mentioned_at` |
+
+   Nothing the user wrote is ever rewritten. The precise rule is: **no content field
+   is ever modified.** Counts, timestamps and version status are not content.
+
 2. **Only connections are modifiable — and only via the Decision Audit Trail.** Edges carry `invalidated_at` timestamps. An invalidated edge is a soft-delete: it is retained in the graph for audit purposes but excluded from active traversal.
 3. **Bipartite Causal Graph:** `BeliefNode` and `PatternNode` instances cannot directly mutate or evolve out of nowhere. A new version (`EVOLVE`) or a new conflict (`CONTRADICT`) must be anchored by an intervening `EventNode` or `SessionNode` to guarantee precise causal chains.
 
@@ -207,7 +223,7 @@ domain: COGNITIVE_STYLE                  # COGNITIVE_STYLE | EMOTIONAL | BEHAVIO
 signal_strength: HIGH                    # STANDARD | HIGH | CRITICAL
 provenance: USER_GENERATED
 verification_status: IMPLICIT            # IMPLICIT | UNVERIFIED | VERIFIED — gates retrieval trust_weight (see Architecture.md)
-evidence_count: 7                        # count of ObservationNodes linked via reinforces or same_as edges
+evidence_count: 7                        # stored counter, incremented by record_reinforcement (NOT derived at read time)
 archetype_tags: ["high_conscientiousness", "risk_averse"]
 era_tag: null                            # Optional historical era anchor (e.g. "a major entrance exam_PREP"). Used by Pass B structural retrieval.
 query_frequency: 0                       # Incremented each time this node is surfaced in a user query. Retrieval boost: +0.1x per query hit, max 1.5x total.
@@ -485,7 +501,7 @@ last_referenced_at: "2026-06-01T06:00:00Z"
 | `dialectic` | `BeliefNode` / `PatternNode` | `BeliefNode` / `PatternNode` | Yes (via audit) | DIALECTIC result. Links two simultaneously true but conflicting nodes. |
 | `regulates` | `SessionNode` / `ObservationNode` | `PatternNode` | Yes (via audit) | REGULATE result. Marks when a user actively catches and interrupts a negative pattern. Bypasses EVOLVE confidence threshold. |
 | `mentions` | `ObservationNode` / `EventNode` / `SessionNode` | `PersonEntityNode` | No | Created when an observation, event, or session references a named person. |
-| `decided_by` | any Reconciliation edge above | `DecisionAuditNode` | N/A | Meta-edge linking every Reconciliation-produced edge to its audit record. |
+| `decided_by` | `ObservationNode` / `EventNode` / `SessionNode` / `PatternNode` / `BeliefNode` / `ContradictionNode` | `DecisionAuditNode` | N/A | Meta-edge linking the node a decision was made about to its audit record. `decided_by_sess` was added in Goal 9: a session is one of the three things Reconciliation decides about, and was previously the only one with no way to record the decision made about it. |
 | `analyzed_in` | `EpisodeNode` | `MacroextractionReportNode` | No | Documents which episodes a Macroextraction report drew on. |
 | `alias_of` | `PersonEntityNode` (alias) | `PersonEntityNode` (canonical) | No | Cross-entry person merge. Alias node is preserved; canonical node is the traversal target. |
 | `investigated_by` | `OpenLoopNode` | `EpisodeNode` | No | Links an open loop to each episode where the loop is explicitly addressed or referenced. |
@@ -495,7 +511,21 @@ last_referenced_at: "2026-06-01T06:00:00Z"
 | `superseded_by` | `AdoptedPrincipleNode` (old) | `AdoptedPrincipleNode` (new) | No (append-only) | Written when the user adopts a refined or replacement version of a prior principle. |
 | `failed_extraction` | `EpisodeNode` | `ObservationNode` | No | Written when an observation fails validation on all 3 attempts. The `ObservationNode` carries `status: EXTRACTION_FAILED` and is linked to its episode for HITL surfacing. Its `type` is `CONTEXT` — the failure is usually the type itself, so the one field that cannot be trusted is set to the neutral value and the type the model attempted, plus the rule that refused it, are preserved in `raw_evidence` for the review card. The observation's content is kept exactly as produced, since that is what a person reads when deciding what to do about it. |
 
-**Reversibility note:** "Yes (via audit)" means the edge's `invalidated_at` timestamp is set (not deleted), and a new `DecisionAuditNode` with `action: ROLLBACK` is written.
+**Reversibility note:** "Yes (via audit)" means the edge's `invalidated_at` timestamp is set (not deleted), and a new `DecisionAuditNode` with `action: ROLLBACK` is written. Edges have no id column of their own — the edge to invalidate is located by its `decision_id`. See "How an edge is identified for rollback" in [`Reconciliation.md`](../Extraction/Reconciliation.md).
+
+**Edge columns.** Every physical edge table carries `valid_from`, `invalidated_at`,
+`decision_id` and `confidence`. Two logical edge types carry one more, because the
+edge means nothing without it:
+
+| Logical edge | Extra column |
+|---|---|
+| `dialectic` (all four physical tables) | `tension_summary STRING` |
+| `regulates` (both physical tables) | `regulation_summary STRING` |
+
+Both columns were specified in the edge schemas below from the start but had no
+backing column until Goal 9; writing either edge would have failed. Stage 3 refuses
+to record one of these actions without its sentence rather than inventing it, since
+the sentence is a claim about somebody's inner life.
 
 ### Edge Schemas for Key Reconciliation Edges
 
