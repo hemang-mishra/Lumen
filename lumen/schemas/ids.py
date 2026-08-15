@@ -58,6 +58,30 @@ def make_node_id(prefix: str, occurred_at: date, seq: int) -> str:
     return f"{prefix}_{occurred_at.strftime('%Y_%m_%d')}_{seq:03d}"
 
 
+def make_scoped_node_id(
+    prefix: str, occurred_at: date, episode_index: int, seq: int
+) -> str:
+    """
+    Build a node_id that is unique within a day even when several episodes
+    are processed separately, e.g.
+    make_scoped_node_id("obs", d, 1, 3) -> "obs_2026_06_11_01_003".
+
+    Each episode is extracted by its own independent call, and every one of
+    them starts counting its nodes from 1. Without the episode number in
+    the middle, the second episode of a day would mint ids the first one
+    had already used.
+    """
+    if not prefix:
+        raise ValueError("prefix must not be empty")
+    if episode_index < 1:
+        raise ValueError(f"episode_index must be at least 1 (got {episode_index})")
+    if seq < 0:
+        raise ValueError(f"seq must be non-negative (got {seq})")
+    return (
+        f"{prefix}_{occurred_at.strftime('%Y_%m_%d')}_{episode_index:02d}_{seq:03d}"
+    )
+
+
 def make_slug_node_id(prefix: str, slug: str) -> str:
     """
     Build a stable, content-derived semantic node_id, e.g.
@@ -74,4 +98,10 @@ def make_slug_node_id(prefix: str, slug: str) -> str:
     return f"{prefix}_{normalized}"
 
 
-__all__ = ["NODE_ID_PREFIXES", "SEMANTIC_ID_RE", "make_node_id", "make_slug_node_id"]
+__all__ = [
+    "NODE_ID_PREFIXES",
+    "SEMANTIC_ID_RE",
+    "make_node_id",
+    "make_scoped_node_id",
+    "make_slug_node_id",
+]

@@ -67,11 +67,24 @@ Stage 4: Graph Write
 
 **Stage 0.5 summary:** (For conversational data only). Intercepts raw multi-turn dialogue to extract settled conclusions (`REALIZATION`s) while discarding intermediate hypotheses and exploratory scaffolding. Outputs a clean Session Summary to prevent intra-session fragmentation in the graph. See [`Preprocessing.md`](Preprocessing.md).
 
-**Stage 1 summary:** Produces a structured extraction of one preprocessed episode in complete isolation from historical context. Outputs an `observations` array and a `causal_mechanisms` array. The coreference map and the episode boundaries arrive from Stage 0 as inputs; Stage 1 consumes them and does not re-derive them. See [`Microextraction.md`](Microextraction.md).
+**Stage 1 summary:** Produces a structured extraction of one preprocessed episode in complete isolation from historical context. Outputs an `observations` array and a `causal_mechanisms` array. The coreference map, the adopted-framing spans, and the episode boundaries arrive from Stage 0 as inputs; Stage 1 consumes them and does not re-derive them. See [`Microextraction.md`](Microextraction.md).
+
+**Causal anchor:** Stage 1 also mints exactly one `SessionNode` per `REFLECTION` episode, in code rather than by asking the model. The Bipartite Causal Graph rule forbids a `BeliefNode` or `PatternNode` from evolving without an intervening `EventNode` or `SessionNode`, so Reconciliation must always have something to anchor against; making that anchor's existence depend on a model's judgement about what counts as an event would turn a structural guarantee into a probabilistic one. `EventNode`s are still extracted from content wherever the person describes something that actually happened — an event that anchors a shift and the session in which the shift occurred are different claims, and Reconciliation chooses between them. `RAW_CAPTURE` episodes get no anchor, since they never reach Reconciliation.
 
 **Stage 2 summary:** Takes each extracted node and runs **two parallel retrieval passes** whose results are merged into a single candidate set before Reconciliation.
 
 - **Pass A — Semantic Retrieval:** Uses HyDE (Hypothetical Document Embedding) to generate a synthetic "ideal historical match" for embedding, then runs Hybrid Search (BM25 + cosine similarity) to retrieve the top 3–5 closest historical nodes. This handles most cases where the current and historical descriptions share semantic proximity.
+
+  > **Sparse search is not yet enabled.** The vector collection is created without a sparse
+  > vector configuration, so "hybrid" search is dense-only today and `hybrid_search` logs a
+  > warning if a sparse vector is passed to it. Retrieval quality is correspondingly weaker
+  > for rare proper nouns and exact phrases, which is what BM25 is good at. Stated here
+  > rather than left implicit, because "hybrid" otherwise reads as a capability that ships.
+
+  > **One HyDE call per episode, not per node.** The hypothetical match for every extracted
+  > node in an episode is generated in a single call and embedded in a single batch. A rich
+  > episode can produce twenty-plus nodes, and a call each would make this stage the most
+  > expensive thing in the pipeline by a wide margin.
 
   > **Embedding task type:** the synthetic match is embedded as a **document**
   > (`EmbeddingTaskType.DOCUMENT`), not a query. Turning the query into a document is precisely
@@ -81,7 +94,12 @@ Stage 4: Graph Write
 - **Pass B — Structural Retrieval:** A deterministic, graph-keyed lookup that bypasses embedding entirely. It runs whenever any of the following anchors are present in the current episode:
   1. **Named persons** from the coreference map — retrieves all active `BeliefNode`, `PatternNode`, and `ObservationNode` instances linked to that `PersonEntityNode`.
   2. **`historical_era` tags** — retrieves all nodes tagged with that era (e.g., `a major entrance exam_PREP`).
-  3. **High-sensitivity open nodes** — retrieves any `INAUTHENTICITY_STATE`, `IDENTITY_FUSION_STATE`, `EXISTENTIAL_REFLECTION`, or `SUPPRESSED_EMOTION_SURFACING` nodes with `reconciliation_status: PENDING_RERECONCILIATION` linked to referenced entities.
+  3. **High-sensitivity open nodes** — retrieves any `INAUTHENTICITY_STATE`, `IDENTITY_FUSION_STATE`, `EXISTENTIAL_REFLECTION`, or `SUPPRESSED_EMOTION_SURFACING` observations **belonging to an episode whose `reconciliation_status` is `PENDING_RERECONCILIATION`**.
+
+     > These four are observation types, and `ObservationNode` has no `reconciliation_status` —
+     > only `EpisodeNode` does. An earlier version of this line asked for a field that does not
+     > exist on the nodes it names. The implementable reading is the one above: the observation
+     > is reached through the episode that contains it, a two-hop lookup along `contains_obs`.
 
   Pass B guarantees that emotionally significant history (heartbreak, identity-defining relationships, historical trauma) is always surfaced during Reconciliation even when embedding distance is high due to semantic drift — i.e., when the user is describing *resolution* using vocabulary entirely different from the original *wound*.
 
@@ -149,12 +167,34 @@ The full set of validation rules is defined in [`Reconciliation.md`](Reconciliat
 
 1. Every observation must have a `type` from the fixed Enum Dictionary (unknown types are rejected). Newly added enums include `COGNITIVE_DISTORTION_STATE`, `PHYSIOLOGICAL_CAPACITY_STATE`, and `EXISTENTIAL_REFLECTION`.
 2. Every observation must have an `extraction_signal_strength` (`STANDARD` | `HIGH` | `CRITICAL`). A missing value is a hard failure.
-3. Types with mandatory signal floors: `SUPPRESSED_EMOTION_SURFACING`, `METACOGNITIVE_INTERRUPT`, and `METACOGNITIVE_BREAKTHROUGH` must have `extraction_signal_strength: HIGH` or `CRITICAL`.
+3. Types with mandatory signal floors: `SUPPRESSED_EMOTION_SURFACING`, `METACOGNITIVE_INTERRUPT`, `METACOGNITIVE_BREAKTHROUGH`, `PROSODY_SIGNAL`, `IDENTITY_FUSION_STATE`, and `EXISTENTIAL_REFLECTION` must have `extraction_signal_strength: HIGH` or `CRITICAL`. (Each type's own definition in [`Microextraction.md`](Microextraction.md) states its floor; this is the consolidated list.)
 4. Causal chain `type` values must be from the set `{TRIGGER, INTERNAL_STATE, ACTION, OUTCOME, LESSON}`. Unknown step types are rejected.
 
 **On validation failure:**
-- Re-extraction is attempted once, with a correction prompt that names the violated rule and the offending field.
-- If re-extraction also fails validation: the entry is flagged, no graph write occurs, and the entry is routed to the HITL Review Queue with the violation attached.
+- Validation is **per item**, not per response. A single bad observation is dropped on its own; its valid siblings in the same response survive. Rejecting a whole extraction over one malformed entry would discard good work and pay for a second call to recover it.
+- Re-extraction is attempted for the failing items only, with a correction prompt that names the violated rule and the offending field. Items that already validated are never re-asked, so a good observation from the first attempt cannot be re-rolled into a worse one on the second.
+- **An observation gets at most 3 attempts in total** — the first reading plus two corrections. On the third failure it is written with `status: EXTRACTION_FAILED`, linked to its episode with a `failed_extraction` edge, and surfaced in the next HITL queue session. Matches [`Reconciliation.md`](Reconciliation.md).
+
+### Which Rejections Are Re-Asked
+
+A retry is a request for output, and a model asked twice will produce something. So the retryable set is fixed and deliberately small.
+
+| Rejection | Re-asked | Reason |
+|---|---|---|
+| Unrecognised observation type | ✅ | The commonest failure and the most recoverable — the model can be shown the dictionary again. |
+| Unrecognised enum value (provenance, signal strength, confidence) | ✅ | The same mistake in a smaller field. |
+| Mandatory signal floor violated | ✅ | The model contradicted itself: it chose a type that marks unusual weight, then called it ordinary. |
+| Unrecognised causal step type | ✅ | One unreadable step costs the whole sequence, so recovery is worth a call. |
+| Empty content | ✅ | An item that arrived blank may simply have been truncated. |
+| Type requires audio (`PROSODY_SIGNAL`) | ❌ | The pipeline has a transcript. No number of attempts changes that. |
+| Type not permitted on this path | ❌ | The wrong reading was run over a thin entry; re-asking repeats the mistake. |
+| Causal chain shorter than two steps | ❌ | A one-step sequence is a finding, not a chain. Asking again invites the model to pad it into one. |
+| Over the per-episode ceiling | ❌ | Nothing was wrong with the item; there were simply too many. |
+| **Stated-feeling quote not found in the entry** | ❌ **never** | This fires when a thin entry produced a feeling the person never put into words. A correction prompt asking for the missing quote is a direct instruction to produce one, and the fabricated quote would then pass the check. Retrying this rule would convert the strongest guard in the pipeline into the mechanism for defeating it. |
+
+Rejections in the ❌ rows are discarded outright and never become `EXTRACTION_FAILED` records.
+
+**When the reading itself fails** — a provider error, an unparseable reply, or a reply of the wrong shape — the request is re-issued rather than corrected, since there is nothing to correct. After the last attempt the episode is marked unreadable so its `EpisodeNode` is written with `reconciliation_status: SUSPENDED` rather than being stored as an episode that merely looks empty. Nothing is ever invented to fill the gap.
 
 ---
 
@@ -172,11 +212,24 @@ Not all observations carry equal retrieval weight. The pipeline applies a priori
 
 ### Final Score Formula
 
-At retrieval time (Stage 2 and query layer), the final similarity score for a candidate node is:
-
 ```
 final_score = cosine_similarity × signal_weight_multiplier × recency_weight × trust_weight
 ```
+
+**Not every layer applies every factor, and the split is deliberate.**
+
+| Factor | Applied by | Why there |
+|---|---|---|
+| `cosine_similarity` | Stage 2 and the query layer | Comes straight from the vector store. |
+| `signal_weight_multiplier` | Stage 2 and the query layer | Available on the node itself, and it decides which candidates Reconciliation ever sees. A `CRITICAL` node ranked just below the cut on raw distance has to be able to climb back above it. |
+| `recency_weight` | Query layer (temporal decay, Goal 19) | Needs aged data to be meaningful, and Stage 2's candidate set is small enough that decay would mostly reorder things Reconciliation will judge on content anyway. |
+| `trust_weight` | Query layer | Same. |
+
+**What is stored versus what is ranked on.** `CandidateNode.similarity_score` is bounded
+`0.0–1.0` and holds the **raw cosine**. The weighted score is a ranking step, not a
+recorded value — a `CRITICAL` node's weighted score reaches `2.0` and would not fit the
+field. Any layer that needs the weighted number recomputes it from the node's own signal
+strength.
 
 ### Trust Weight (Verification Status)
 
@@ -212,7 +265,7 @@ Recency decay ensures that the retrieval layer reflects how the user currently i
 Because Stage 0 preserves the raw multi-turn dialogue (both User and AI turns), the Stage 1 Microextraction LLM is explicitly instructed to capture AI-assisted psychological work:
 
 1. **CO_CREATED Observations**: Using the adoption markers flagged by Stage 0, when the user agrees with and adopts an AI's framework or reframing, the Microextraction LLM extracts this as an observation and explicitly sets `provenance: CO_CREATED`. This ensures the graph ingests the AI's wisdom as part of the user's cognitive record, properly attributed.
-2. **AI-Initiated Open Loops**: If the dialogue session ends with a profound, unanswered question or framing presented by the AI, the Microextraction LLM must extract this as an `OpenLoopNode` (with `provenance: AI_GENERATED`). This allows the system to queue the open question for the user's next interface interaction.
+2. **AI-Initiated Open Loops**: If the dialogue session ends with a profound, unanswered question or framing presented by the AI, the Microextraction LLM extracts this as an `OPEN_LOOP` **observation** with `provenance: AI_GENERATED`. Promotion to a first-class `OpenLoopNode` happens in Reconciliation, not here: deciding that a question is a standing investigation rather than a passing one requires knowing whether it has come up before, and Microextraction is blind to history by design. Once promoted, the system can queue the open question for the user's next interface interaction.
 
 ---
 

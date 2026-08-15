@@ -314,6 +314,13 @@ class PreprocessingResult(PipelineDTO):
         pending_reflections: Follow-up questions generated for the user
             when the input was too thin for full analysis, inviting them
             to expand on it later.
+        co_created_spans: Phrasings the assistant offered that the user
+            explicitly took up as their own. Only a conversation produces
+            these, and only the step that still sees the conversation turn
+            by turn can find them — by the time the dialogue has been
+            summarized, there is no way to tell whose words were whose.
+            Later stages use them to credit an idea to the conversation
+            rather than to the person alone.
     """
 
     session_id: str = Field(min_length=1)
@@ -322,6 +329,48 @@ class PreprocessingResult(PipelineDTO):
     quality_gate_decision: QualityGateDecision
     processing_time_ms: int = Field(ge=0)
     pending_reflections: list[str] = Field(default_factory=list)
+    co_created_spans: list[str] = Field(default_factory=list)
+
+
+class MicroextractionInput(PipelineDTO):
+    """
+    One episode, packaged with everything needed to turn it into graph
+    nodes — and nothing about the user's history.
+
+    The episode alone is not enough. It carries no date, and every node
+    built from it has to record when the described experience happened.
+    It also carries no coreference map, because that is resolved once for
+    a whole entry rather than per episode. Both are gathered here so the
+    extraction step receives one complete object.
+
+    What is deliberately absent matters as much as what is present. There
+    is no place in this model for existing beliefs, patterns, or past
+    entries. Extraction reads today's writing on its own terms; comparing
+    it to what came before is a later step's job, and a model shown the
+    old answers stops reading and starts matching.
+
+    Attributes:
+        episode: The cleaned, topic-segmented piece of writing to read.
+        coreference_map: Who the entry's pronouns and nicknames refer to,
+            so the same person is not extracted as two different people.
+        entry_id: The entry the episode came from.
+        event_date: The calendar date the writing belongs to.
+        occurred_at: When the described experience happened, used as the
+            timestamp on every node built from this episode.
+        source_modality: Whether this started as speech or typing.
+        session_label: Distinguishes entries made on the same day.
+        co_created_spans: Assistant phrasings the person adopted as their
+            own, used to credit those ideas correctly.
+    """
+
+    episode: PreprocessedEpisode
+    coreference_map: CoreferenceMap
+    entry_id: str = Field(min_length=1)
+    event_date: date
+    occurred_at: datetime
+    source_modality: SourceModality = SourceModality.TEXT_ENTRY
+    session_label: str = ""
+    co_created_spans: list[str] = Field(default_factory=list)
 
 
 class ExtractionResult(PipelineDTO):
@@ -341,12 +390,22 @@ class ExtractionResult(PipelineDTO):
             episode's observations and events.
         causal_steps: The individual steps making up each causal chain
             above.
+        failed_observations: Observations that broke a rule and could not
+            be corrected within the allowed attempts. Kept apart from the
+            good ones rather than marked among them, so nothing can
+            accidentally treat a failed reading as a real finding. They
+            are held onto so a person can be shown what could not be read
+            and put it right themselves.
         extraction_model: The name of the model used to perform the
             extraction.
         validation_passed: Whether the extracted data passed schema
             validation.
         retry_count: How many times extraction had to be retried before
             it validated successfully.
+        read_failed: True when the episode could not be read at all, as
+            opposed to being read and found to hold little. The two look
+            identical from the outside — both leave an empty result — but
+            only one of them is worth trying again.
     """
 
     episode_id: str = Field(min_length=1)
@@ -355,9 +414,11 @@ class ExtractionResult(PipelineDTO):
     sessions: list[SessionNode] = Field(default_factory=list)
     causal_chains: list[CausalChainNode] = Field(default_factory=list)
     causal_steps: list[CausalStepNode] = Field(default_factory=list)
+    failed_observations: list[ObservationNode] = Field(default_factory=list)
     extraction_model: str = Field(min_length=1)
     validation_passed: bool
     retry_count: int = Field(default=0, ge=0)
+    read_failed: bool = False
 
 
 class RetrievalResult(PipelineDTO):
@@ -375,12 +436,20 @@ class RetrievalResult(PipelineDTO):
         pass_b_candidates: Candidates found via structural (direct-link)
             search, e.g. by shared named person or historical era.
         retrieval_time_ms: How long retrieval took, in milliseconds.
+        search_failed: True when the search could not be carried out, as
+            opposed to being carried out and finding nothing. The two look
+            identical from outside — both leave an empty list — but they
+            mean opposite things. Finding nothing means the thought is
+            genuinely new and should become a new node. Failing to look
+            means nobody knows, and treating that as novelty would record
+            a long-standing pattern as a fresh discovery.
     """
 
     source_node_id: str = Field(min_length=1)
     pass_a_candidates: list[CandidateNode] = Field(default_factory=list)
     pass_b_candidates: list[CandidateNode] = Field(default_factory=list)
     retrieval_time_ms: int = Field(ge=0)
+    search_failed: bool = False
 
     @model_validator(mode="after")
     def _validate_candidate_cap(self) -> "RetrievalResult":
@@ -451,6 +520,7 @@ __all__ = [
     "CandidateNode",
     "SessionDecayEvent",
     "PreprocessingResult",
+    "MicroextractionInput",
     "ExtractionResult",
     "RetrievalResult",
     "ReconciliationResult",

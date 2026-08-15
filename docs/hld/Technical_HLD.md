@@ -352,19 +352,44 @@ class PreprocessingResult(BaseModel):
     quality_gate_decision: Literal["REFLECTION", "RAW_CAPTURE", "DISCARD"]
     processing_time_ms: int
     pending_reflections: list[str]    # RAW_CAPTURE follow-up questions
+    co_created_spans: list[str]       # assistant framings the user adopted
+
+class MicroextractionInput(BaseModel):
+    """Everything Stage 1 needs about one episode, and nothing about history.
+
+    PreprocessedEpisode carries no date, no coreference map and no modality,
+    while every node Stage 1 builds needs occurred_at — so the stage boundary
+    is this wrapper rather than the bare episode.
+    """
+    episode: PreprocessedEpisode
+    coreference_map: CoreferenceMap
+    entry_id: str                     # the session the episode came from
+    event_date: date
+    occurred_at: datetime             # logical event time for this episode
+    source_modality: SourceModality
+    session_label: str
+    co_created_spans: list[str]
 
 class ExtractionResult(BaseModel):
     episode_id: str
     observations: list[ObservationNode]
+    events: list[EventNode]
+    sessions: list[SessionNode]       # the minted causal anchor
+    causal_chains: list[CausalChainNode]
+    causal_steps: list[CausalStepNode]
+    failed_observations: list[ObservationNode]   # spent all 3 attempts; for HITL
     extraction_model: str
-    validation_passed: bool
-    retry_count: int
+    validation_passed: bool           # false if anything was dropped or nothing survived
+    retry_count: int                  # corrections spent, 0 when the first reading was clean
+    read_failed: bool                 # the episode could not be read at all
 
 class RetrievalResult(BaseModel):
+    """One per searchable node — Stage 2 returns a list of these, not one."""
     source_node_id: str  # ObservationNode | EventNode | SessionNode
     pass_a_candidates: list[CandidateNode]  # semantic
     pass_b_candidates: list[CandidateNode]  # structural
     retrieval_time_ms: int
+    search_failed: bool  # could not search, as distinct from found nothing
 
 class ReconciliationResult(BaseModel):
     source_node_id: str  # ObservationNode | EventNode | SessionNode
@@ -493,6 +518,8 @@ No direct imports of `google.generativeai`, `openai`, `kuzu`, or `qdrant_client`
 
 ### Rule 2: Pipeline stages are pure functions
 Each stage function accepts a Pydantic input model and returns a Pydantic output model. No global state. No direct DB calls from within a stage — the stage returns its result and the orchestrator handles persistence. This means any stage is unit-testable with no infrastructure.
+
+**The rule is about writes and hidden state, not about reading.** Stage 2 (Candidate Retrieval) exists to query the graph and the vector store, and it does so through `GraphProvider`, `VectorProvider` and `EmbeddingProvider` handed in as parameters — exactly as Stages 0 and 1 take their language models. What the rule forbids is a stage reaching for a connection of its own, holding state between calls, or writing anything: persistence stays the orchestrator's, so replaying a stage can never change what is stored. A stage that reads through an injected Protocol is still swappable, still testable against a seeded store or a stand-in, and still has no idea which vendor is on the other side.
 
 ### Rule 3: Graph is append-only; queue is the write path
 No component writes directly to the graph from outside the Graph Service. All graph writes go through the Graph Service API (or its module equivalent in the personal version). This creates one place to audit all writes.

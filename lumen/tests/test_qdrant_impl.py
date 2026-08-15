@@ -89,7 +89,7 @@ class TestUpsert:
         """Can upsert a vector and retrieve it via search."""
         provider.upsert("obs_001", _dummy_vector(), {"node_type": "ObservationNode"})
         results = provider.hybrid_search(_dummy_vector(), limit=1)
-        assert "obs_001" in results
+        assert [hit.node_id for hit in results] == ["obs_001"]
 
     def test_upsert_idempotent(self, provider):
         """Upserting the same node_id twice must replace, not duplicate."""
@@ -99,7 +99,7 @@ class TestUpsert:
         # Search with the second vector should find it
         results = provider.hybrid_search(_dummy_vector(val=0.2), limit=10)
         # Should only appear once
-        assert results.count("obs_dup") == 1
+        assert [hit.node_id for hit in results].count("obs_dup") == 1
 
     def test_payload_contains_node_id(self, provider):
         """Payload must always contain node_id after upsert."""
@@ -131,7 +131,7 @@ class TestSearch:
 
         # Query vector is close to node_a
         results = provider.hybrid_search(vec_a, limit=1)
-        assert "node_a" in results
+        assert [hit.node_id for hit in results] == ["node_a"]
 
     def test_respects_limit(self, provider):
         """Search must respect the limit parameter."""
@@ -145,6 +145,26 @@ class TestSearch:
         """Search on empty collection must return empty list."""
         results = provider.hybrid_search(_dummy_vector(), limit=5)
         assert results == []
+
+    def test_every_hit_carries_its_score(self, provider):
+        # The score is most of what a caller needs: it is the difference
+        # between "the same thing said again" and "something adjacent".
+        provider.upsert("near", _dummy_vector(val=0.5), {"node_type": "PatternNode"})
+
+        results = provider.hybrid_search(_dummy_vector(val=0.5), limit=1)
+
+        assert results[0].score == pytest.approx(1.0, abs=1e-4)
+
+    def test_hits_come_back_closest_first(self, provider):
+        near = [1.0] * 384 + [0.0] * 384
+        far = [0.0] * 384 + [1.0] * 384
+        provider.upsert("near", near, {"node_type": "PatternNode"})
+        provider.upsert("far", far, {"node_type": "BeliefNode"})
+
+        results = provider.hybrid_search(near, limit=2)
+
+        assert [hit.node_id for hit in results] == ["near", "far"]
+        assert results[0].score > results[1].score
 
     def test_sparse_vector_logs_warning(self, provider, caplog):
         """Providing sparse_vector must log a warning about fallback."""
@@ -171,6 +191,6 @@ class TestContextManager:
             p.init_collection()
             p.upsert("ctx_001", _dummy_vector(), {"node_type": "test"})
             results = p.hybrid_search(_dummy_vector(), limit=1)
-            assert "ctx_001" in results
+            assert [hit.node_id for hit in results] == ["ctx_001"]
         # After exiting, client should be None
         assert p.client is None

@@ -364,6 +364,8 @@ def _finish(
     """
     elapsed_ms = int((time.perf_counter() - started) * 1000)
     normalized = outcome.trail.normalized
+    conversation = outcome.trail.conversation
+    adopted = list(conversation.co_created_spans) if conversation else []
 
     logger.info(
         "preprocessing complete",
@@ -380,6 +382,7 @@ def _finish(
             "translated": bool(normalized and normalized.translated),
             "fillers_removed": normalized.fillers_removed if normalized else 0,
             "fallbacks": outcome.trail.fallbacks(),
+            "adopted_span_count": len(adopted),
             "duration_ms": elapsed_ms,
         },
     )
@@ -391,6 +394,7 @@ def _finish(
         quality_gate_decision=outcome.decision,
         processing_time_ms=elapsed_ms,
         pending_reflections=outcome.pending_reflections,
+        co_created_spans=adopted,
     )
 
 

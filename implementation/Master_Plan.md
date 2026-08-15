@@ -159,23 +159,131 @@ This document outlines the systematic, stage-by-stage implementation plan for th
     `lumen/pipeline/`, `lumen/config.py`, and `lumen/schemas/pipeline.py`.
   - *Plan:* [`implementation/Goal_5_Plan.md`](file:///Users/hemangmishra/Projects/Lumen/implementation/Goal_5_Plan.md)
 
-- [ ] **Goal 6: Stage 1 — Microextraction Core**
-  - Implement `lumen/pipeline/extraction.py` (LLM prompt + structured JSON extraction).
-  - Input: `PreprocessedEpisode` → Output: `ExtractionResult` (list of typed ObservationNodes, EventNodes, etc.)
-  - *Test:* Verify extraction of Belief, Pattern, Event, CausalChain nodes from known text blocks.
+- [x] **Goal 6: Stage 1 — Microextraction Core** ✅
+  - Implemented `lumen/pipeline/extraction/` as a package (`stage`, `passes`, `validation`,
+    `assembly`, `catalog`, `contracts`, `prompts`) rather than the single `extraction.py`
+    named above — same call Goal 5 made, for the same reason. `extract()` is the only
+    public name.
+  - Input: **`MicroextractionInput`** → Output: `ExtractionResult`. A new stage-boundary DTO:
+    `PreprocessedEpisode` carries no date, coreference map or modality, while every node this
+    stage builds requires `occurred_at`. A pure function — no DB, no graph, no history.
+  - **Two paths, one call each:** a `REFLECTION` episode gets one THINKING call producing
+    observations, events and causal chains together; a `RAW_CAPTURE` episode gets one
+    LIGHTWEIGHT call. The path is chosen from `entry_class`, which Stage 0 already decided.
+  - **Goal 6 validates, Goal 7 retries** (per explicit user decision). 13 rules enforced per
+    *item*: one invented type costs one observation, not the reply. Nothing is ever filled in.
+    `validation_passed` is false whenever anything was dropped or nothing survived — the flag
+    Goal 7 reads.
+  - **Resolves the `RAW_CAPTURE` conflict Goal 5 flagged:** `CONTEXT` **and** `EMOTION`, but
+    the emotion only when the person named a feeling themselves. Enforced mechanically — the
+    model must return the verbatim quote, and an emotion whose quote is not in the episode
+    text is dropped.
+  - **The causal anchor is minted in code.** One `SessionNode` per `REFLECTION` episode, so
+    Schema rule 5 (no EVOLVE without an intervening Event/Session) is a guarantee rather than
+    a model judgement. `EventNode`s are still extracted from content.
+  - **Three defences against invention**, all mechanical: `raw_evidence` quotes checked
+    against the source text and counted when absent; a `person_ref` naming someone who appears
+    nowhere in the entry is stripped; `PROSODY_SIGNAL` is excluded from the prompt and
+    discarded in code, since the stage only ever sees a transcript.
+  - *Amends Goal 5:* `PreprocessingResult.co_created_spans` — Stage 0's conversation pass
+    detected which turns adopted an AI framing and then discarded the wording when it rolled
+    the dialogue into a summary, leaving `provenance: CO_CREATED` with no possible input.
+    Session-scoped like `coreference_map`, since segmentation happens later. Adds
+    `make_scoped_node_id()` (`obs_2026_06_11_01_003`) — two episodes of one day are extracted
+    by independent calls that both count from 1 and would otherwise collide.
+  - *Docs amended ahead of coding:* `Microextraction.md` (the `RAW_CAPTURE` rule, `OPEN_LOOP`
+    as an observation, provenance sourced from the adopted spans), `Preprocessing.md` (same
+    `RAW_CAPTURE` rule, `co_created_spans`), `Architecture.md` (**re-extraction limit is 3,
+    not 1** — it contradicted `Reconciliation.md`; the mandatory signal-floor list completed
+    from 3 types to the 6 shipped; `OpenLoopNode` creation moved to Reconciliation; the
+    session anchor recorded), `Technical_HLD.md` §5, `Schema.md` §3.1.
+  - *Result:* 1151 tests passing (968 from Goals 1–5 + 183 new), **100% coverage** on
+    `lumen/pipeline/`, `lumen/config.py`, `lumen/schemas/pipeline.py`, `lumen/schemas/ids.py`.
+  - *Plan:* [`implementation/Goal_6_Plan.md`](file:///Users/hemangmishra/Projects/Lumen/implementation/Goal_6_Plan.md)
 
-- [ ] **Goal 7: Post-Extraction Validation Layer**
-  - Enforce Pydantic schema validation on all LLM-generated JSON.
-  - Implement 3-attempt retry loop with re-extraction on validation failure.
-  - Write `failed_extraction` edge on 3rd failure.
-  - *Test:* Feed broken/hallucinated JSON; verify errors are caught and retries fire.
+- [x] **Goal 7: Post-Extraction Validation Layer** ✅
+  - Implemented `lumen/pipeline/extraction/retry.py` plus a correction prompt, correction
+    validation, and failure records. Goal 6 already validated every item and dropped what
+    broke a rule; this goal asks again for what a second question could plausibly fix, and
+    keeps what it cannot.
+  - **A correction re-asks only the refused items**, quoted back with the rule each broke.
+    Items that already validated are never re-rolled, so the output is stable across
+    attempts. Three attempts in total — the first reading plus two corrections.
+  - **The retryable set is a frozen table of five rules**, and what is absent from it is the
+    point. `QUOTE_NOT_FOUND` — the Goal 6 rule that drops a feeling the person never put
+    into words — is **never** re-asked: the correction would be a direct instruction to
+    produce the missing quote, and the produced one would pass the check it exists to fail.
+    Four other rules are terminal for duller reasons (audio-only types, wrong path,
+    one-step chains, over-limit truncation). Terminal rejections are discarded, not failed.
+  - **A failed item becomes a real `ObservationNode`** with `status: EXTRACTION_FAILED`, its
+    content untouched, typed `CONTEXT` because the type is usually the thing that was wrong,
+    with the attempted type and the refusing rule preserved in `raw_evidence` for the review
+    card. Returned on a separate `failed_observations` list so nothing downstream can mistake
+    one for a real finding.
+  - **An unreadable reply is re-read rather than corrected** — there is nothing to correct —
+    and after the last attempt `read_failed` says so, so Goal 10 can mark the episode
+    `SUSPENDED` instead of storing one that merely looks empty. Nothing is ever invented.
+  - **A correction that recovers nothing ends the loop.** A model that returned an unusable
+    answer once returns it again; the remaining call only pays to watch it happen.
+  - *Amends Goal 6:* `ExtractionResult.failed_observations` and `.read_failed`;
+    `retry_count` and `extraction_attempt` now record what actually happened rather than
+    being fixed at 0 and 1. `validation_passed` now means *something was lost for good*, so
+    a fully recovered reading is trusted again.
+  - *Docs amended ahead of coding:* `Reconciliation.md` (**"3 re-extractions" against "on the
+    third failure" resolved to three total attempts** — the same paragraph said both),
+    `Architecture.md` (the retryable/terminal table with the reason each rule sits where it
+    does), `Schema.md`, `Technical_HLD.md` §5.
+  - *Flagged, not fixed:* `hitl_queue.audit_node_id` is `NOT NULL` and unique, but an
+    extraction failure never reaches Reconciliation and so has no `DecisionAuditNode` —
+    which cannot be built honestly for one. Recorded in `Schema.md` §9 for Goal 18. Also:
+    the `failed_extraction` edge is `EpisodeNode → ObservationNode` only, so a failed *event*
+    or *chain* has nowhere to be recorded and is discarded with a warning.
+  - *Result:* 1253 tests passing (1151 from Goals 1–6 + 102 new), **100% coverage** on
+    `lumen/pipeline/`, `lumen/config.py`, `lumen/schemas/pipeline.py`.
+  - *Plan:* [`implementation/Goal_7_Plan.md`](file:///Users/hemangmishra/Projects/Lumen/implementation/Goal_7_Plan.md)
 
-- [ ] **Goal 8: Stage 2 — Retrieval (HyDE + Hybrid Search)**
-  - Implement `lumen/pipeline/retrieval.py`.
-  - Pass A: Semantic search via Qdrant (HyDE expansion).
-  - Pass B: Structural retrieval via Kuzu (named persons, historical eras).
-  - Input: `ExtractionResult` → Output: `RetrievalResult` (candidate nodes per observation).
-  - *Test:* Seed Qdrant + Kuzu, run observation through Stage 2, verify semantic + structural matches.
+- [x] **Goal 8: Stage 2 — Retrieval (HyDE + Structural)** ✅
+  - Implemented `lumen/pipeline/retrieval/` as a package (`stage`, `hyde`, `semantic`,
+    `structural`, `hydrate`, `merge`, `contracts`, `prompts`). Input: `ExtractionResult` →
+    Output: **a list of** `RetrievalResult`, one per searchable node — the Master Plan's
+    singular signature was never possible.
+  - **Providers are injected, like the language models.** `retrieve()` takes `GraphProvider`,
+    `VectorProvider` and `EmbeddingProvider` as parameters. `Technical_HLD.md` §8 now says
+    the purity rule is about writes and hidden state, not about reading — as written it read
+    as though this stage could not exist.
+  - **Pass A:** one batched HyDE call writes a hypothetical historical record per extracted
+    node, one `embed_batch` turns them into vectors. A rich episode costs 2 calls, not 40.
+    Results are hydrated from the graph, filtered, ranked on closeness × signal weight, and
+    cut — with more fetched than kept, so a weighty node just below the cut on raw distance
+    can climb back above it.
+  - **Pass B:** three anchor lookups that read no text at all — by named person, by era tag,
+    and for weighty material whose episode is still awaiting reconciliation. That third one
+    is why this half exists: someone describing recovery uses none of the words they used
+    describing the injury, so no measure of distance will ever connect the two.
+  - **`search_failed` on the result.** A search that returns nothing and a search that could
+    not run look identical from outside, and Stage 3 answers both by writing a new node —
+    correct for the first, and for the second it records a long-standing pattern as a fresh
+    discovery, permanently and silently.
+  - *Amends Goal 1:* `hybrid_search` returns `ScoredHit` instead of bare ids — it was
+    discarding the similarity that `CandidateNode` requires. `GraphProvider` gains three
+    narrow anchor reads (no general query method: that would leak graph-shaped thinking into
+    the pipeline). **`lumen.graph` and `lumen.vector` now export only their Protocols** —
+    naming a Protocol was executing the package `__init__` and importing the vendor driver,
+    so the pipeline was transitively importing both databases to name two types.
+  - *Amends Goal 2:* `StructuralAnchorType.HIGH_SENSITIVITY_OPEN` — the retrieval spec has
+    described three anchors all along and the enum had two, which would have failed
+    `DecisionAuditNode`'s validator in Goal 9. Adds `RetrievalResult.search_failed` and four
+    `PipelineConfig` limits.
+  - *Docs amended ahead of coding:* `Architecture.md` (**the score formula split by layer** —
+    it listed four factors while `Schema.md` listed three and the Master Plan put two of them
+    in Goal 19; **Pass B's third anchor named a field that does not exist** on the node types
+    it names, now stated as the two-hop lookup through the episode; sparse search called out
+    as not enabled), `Schema.md`, `Technical_HLD.md` §8 and §5.
+  - **Tested against real embedded Kuzu and Qdrant**, seeded per test, since every question
+    this stage asks is a query and a stand-in would agree with whatever it was told.
+  - *Result:* 1395 tests passing (1253 from Goals 1–7 + 142 new), **100% coverage** on
+    `lumen/pipeline/`, `lumen/config.py`, `lumen/schemas/pipeline.py`.
+  - *Plan:* [`implementation/Goal_8_Plan.md`](file:///Users/hemangmishra/Projects/Lumen/implementation/Goal_8_Plan.md)
 
 - [ ] **Goal 9: Stage 3 — Reconciliation Logic**
   - Implement `lumen/pipeline/reconciliation.py`.

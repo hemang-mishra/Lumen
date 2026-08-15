@@ -135,6 +135,43 @@ for from_t, to_t, _ in EDGE_REGISTRY:
 
 
 # ---------------------------------------------------------------------------
+# Anchor lookup tables
+#
+# Three small maps that say how each node table answers a question the
+# anchor lookups ask. They exist so those methods stay one query each
+# instead of a chain of special cases.
+# ---------------------------------------------------------------------------
+
+# Which edge leads from a node table to a person. Only these three tables
+# have one: a belief or a pattern reaches a person only through the
+# observation that produced it, which is a second hop nothing needs yet.
+MENTIONS_EDGES: dict[str, str] = {
+    "ObservationNode": "mentions_obs",
+    "EventNode": "mentions_evt",
+    "SessionNode": "mentions_sess",
+}
+
+# Where each table records the past period a node belongs to. The column is
+# not named the same in both places, and only these three record one at all.
+ERA_COLUMNS: dict[str, str] = {
+    "PatternNode": "era_tag",
+    "BeliefNode": "era_tag",
+    "EpisodeNode": "historical_era",
+}
+
+# How to tell that a node is still in play. Most tables answer with a plain
+# status column; episodes have none and are always considered current.
+_ACTIVE_CLAUSES: dict[str, str] = {
+    "EpisodeNode": "true",
+}
+
+
+def _active_clause(table: str) -> str:
+    """The condition that means a node of this table is still live."""
+    return _ACTIVE_CLAUSES.get(table, "n.status = 'ACTIVE'")
+
+
+# ---------------------------------------------------------------------------
 # Node Table DDL
 # ---------------------------------------------------------------------------
 
@@ -465,7 +502,7 @@ class KuzuGraphProvider(GraphProvider):
     def get_nodes_by_ids(self, node_ids: list[str]) -> list[dict[str, Any]]:
         """
         Retrieve multiple nodes by their IDs.
-        
+
         Used by the HLD read path (Section 4.2):
             candidate_ids = vector_store.hybrid_search(...)
             candidates = graph_store.get_nodes_by_ids(candidate_ids)
@@ -481,3 +518,90 @@ class KuzuGraphProvider(GraphProvider):
         while res.has_next():
             nodes.append(res.get_next()[0])
         return nodes
+
+    # ------------------------------------------------------------------
+    # Anchor Lookups
+    # ------------------------------------------------------------------
+
+    def find_linked_to_person(
+        self, canonical_name: str, *, node_types: list[str], limit: int = 10
+    ) -> list[dict[str, Any]]:
+        """
+        Find active nodes that mention a particular person.
+
+        Only the three node types that actually carry a mentions edge can be
+        found this way. Beliefs and patterns are linked to a person only
+        through the observation that produced them, which is a second hop
+        this method does not make — see MENTIONS_EDGES below.
+        """
+        found: list[dict[str, Any]] = []
+        for table in node_types:
+            edge = MENTIONS_EDGES.get(table)
+            if edge is None:
+                logger.debug("no mentions edge from %s to a person; skipping", table)
+                continue
+            found.extend(
+                self._collect(
+                    f"MATCH (n:{table})-[:{edge}]->(p:PersonEntityNode) "
+                    f"WHERE p.canonical_name = $name AND {_active_clause(table)} "
+                    f"RETURN n LIMIT {int(limit)}",
+                    {"name": canonical_name},
+                )
+            )
+        return found[:limit]
+
+    def find_by_era(
+        self, era_tag: str, *, node_types: list[str], limit: int = 10
+    ) -> list[dict[str, Any]]:
+        """
+        Find active nodes anchored to a named period of the person's past.
+
+        The column holding that period is not named the same everywhere —
+        patterns and beliefs carry era_tag, episodes carry historical_era —
+        so the lookup asks each table for its own.
+        """
+        found: list[dict[str, Any]] = []
+        for table in node_types:
+            column = ERA_COLUMNS.get(table)
+            if column is None:
+                logger.debug("%s records no era; skipping", table)
+                continue
+            found.extend(
+                self._collect(
+                    f"MATCH (n:{table}) "
+                    f"WHERE n.{column} = $era AND {_active_clause(table)} "
+                    f"RETURN n LIMIT {int(limit)}",
+                    {"era": era_tag},
+                )
+            )
+        return found[:limit]
+
+    def find_unresolved_high_signal(
+        self, observation_types: list[str], *, limit: int = 10
+    ) -> list[dict[str, Any]]:
+        """
+        Find weighty observations whose episode is still awaiting
+        reconciliation.
+
+        Reached through the episode, because that is where the record of
+        outstanding reconciliation lives — an observation has no such field
+        of its own.
+        """
+        if not observation_types:
+            return []
+
+        return self._collect(
+            "MATCH (e:EpisodeNode)-[:contains_obs]->(n:ObservationNode) "
+            "WHERE e.reconciliation_status = 'PENDING_RERECONCILIATION' "
+            "AND n.type IN $types AND n.status = 'ACTIVE' "
+            f"RETURN n LIMIT {int(limit)}",
+            {"types": list(observation_types)},
+        )
+
+    def _collect(self, query: str, params: dict[str, Any]) -> list[dict[str, Any]]:
+        """Run a query that returns single nodes and gather them into a list."""
+        res = self.conn.execute(query, params)
+        rows: list[dict[str, Any]] = []
+        while res.has_next():
+            rows.append(res.get_next()[0])
+        return rows

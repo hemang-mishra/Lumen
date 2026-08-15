@@ -293,7 +293,11 @@ These rules are enforced in code at the point of the Reconciliation response par
 
 > ⚠️ Rule R5 is the only rule that *overrides* rather than *rejects*. This is intentional: if the model failed to detect a tie but the scores reveal one, the system corrects automatically without burning an additional LLM call. All other rules reject and re-extract.
 
-**Re-extraction limit:** A single observation may be re-extracted at most **3 times** due to validation failures. On the third failure, the observation is written as `status: EXTRACTION_FAILED`, linked to the episode with a `failed_extraction` edge, and surfaced in the next HITL queue session.
+**Re-extraction limit:** A single observation gets at most **3 attempts** in total — the first reading plus two corrections. On the third failure it is written as `status: EXTRACTION_FAILED`, linked to the episode with a `failed_extraction` edge, and surfaced in the next HITL queue session. (An earlier version of this paragraph said "re-extracted at most 3 times" alongside "on the third failure", which are four attempts and three. Three total is the rule, matching `ObservationNode.extraction_attempt`, which counts attempts rather than repeats.)
+
+**Not every rejection is re-asked.** A rejection is only worth another attempt when a model could plausibly answer it correctly the second time — an unrecognised type, a self-contradictory signal strength, an unreadable causal step. Rejections that no number of attempts can fix are discarded outright and never become `EXTRACTION_FAILED` records, since those exist to ask a person for help and there is nothing a person can do about a type that requires audio the pipeline does not have. The full classification lives in [`Architecture.md`](Architecture.md)'s Validation Layer.
+
+**Only observations carry a failure record.** The `failed_extraction` edge is defined `EpisodeNode → ObservationNode`, so a failed event or a failed causal chain has nowhere to be recorded. Those are discarded once their attempts are spent, with a logged warning. The failure record is therefore incomplete by construction — a known limitation, not an oversight.
 
 ---
 

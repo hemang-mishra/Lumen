@@ -117,6 +117,8 @@ status: ACTIVE
 
 A conversational session or period of internal realization that produces a cognitive shift without an external physical event. Used to anchor EVOLVE or CONTRADICT actions driven by internal dialogue or AI-facilitated breakthroughs.
 
+**One `SessionNode` is minted per `REFLECTION` episode by Stage 1 (Microextraction), in code rather than by the extraction model.** Rule 3 above forbids a belief or pattern from evolving without an intervening `EventNode` or `SessionNode`, so an anchor must always exist; leaving that to a model's judgement about what counts as an event would make a structural guarantee probabilistic. `RAW_CAPTURE` episodes get no anchor, since they bypass Reconciliation entirely.
+
 ```yaml
 node_type: SessionNode
 node_id: sess_example_001
@@ -368,7 +370,7 @@ hitl_resolution_user_choice: null        # "ACTION_A" | "ACTION_B" | "CREATE_NEW
 snooze_count: 0                          # number of times the user has snoozed this HITL item
 last_snoozed_at: null
 candidate_retrieval_source: SEMANTIC     # SEMANTIC | STRUCTURAL
-structural_anchor_type: null            # NAMED_PERSON | HISTORICAL_ERA — populated when candidate_retrieval_source == STRUCTURAL
+structural_anchor_type: null            # NAMED_PERSON | HISTORICAL_ERA | HIGH_SENSITIVITY_OPEN — populated when candidate_retrieval_source == STRUCTURAL
 structural_anchor_value: null           # the anchor value (person node ID or era tag string)
 co_created_origin: false                # true when the source node carried provenance: CO_CREATED and action == EVOLVE (Rule R6 ownership transfer)
 rollback_pointer:
@@ -386,7 +388,17 @@ status: ACTIVE                           # ACTIVE | ROLLED_BACK | PENDING_HITL |
 - `PENDING_HITL` — awaiting user resolution (AMBIGUOUS tie detected)
 - `BELOW_THRESHOLD` — model confidence fell below action threshold; in HITL queue
 - `SUSPENDED_QUEUE_FULL` — HITL queue at its item cap; item waiting to enter
-- `EXTRACTION_FAILED` — observation failed validation 3 times; graph write skipped
+- `EXTRACTION_FAILED` — observation failed validation on all 3 attempts; graph write skipped
+
+> ⚠️ **Open conflict, owned by the HITL queue goal.** `hitl_queue.audit_node_id` is `NOT NULL`
+> and unique, so every queue item needs a `DecisionAuditNode` behind it — but an extraction
+> failure never reaches Reconciliation, and this node type cannot be built honestly for one:
+> it requires an `action`, a `confidence` and a `rollback_pointer`, none of which exist for a
+> reading that never happened. Writing a placeholder decision would put a fabricated record in
+> the one table whose entire purpose is being trustworthy. Either `audit_node_id` becomes
+> optional for `EXTRACTION_FAILED` entries, or that entry type is queued by a different route.
+> The extraction stage produces the failed `ObservationNode`s regardless; only the queue row is
+> blocked on this.
 
 ---
 
@@ -481,7 +493,7 @@ last_referenced_at: "2026-06-01T06:00:00Z"
 | `follows_from` | `EpisodeNode` | `EpisodeNode` | No | Links micro-segmented episodes from the same `(event_date, session_label)` to preserve intra-session narrative flow. |
 | `adopted_as` | `ObservationNode` / `SessionNode` | `AdoptedPrincipleNode` | Yes (via audit) | Written when a session or observation applies, references, or reinforces an adopted principle. |
 | `superseded_by` | `AdoptedPrincipleNode` (old) | `AdoptedPrincipleNode` (new) | No (append-only) | Written when the user adopts a refined or replacement version of a prior principle. |
-| `failed_extraction` | `EpisodeNode` | `ObservationNode` | No | Written when an observation fails validation 3 times. The `ObservationNode` carries `status: EXTRACTION_FAILED` and is linked to its episode for HITL surfacing. |
+| `failed_extraction` | `EpisodeNode` | `ObservationNode` | No | Written when an observation fails validation on all 3 attempts. The `ObservationNode` carries `status: EXTRACTION_FAILED` and is linked to its episode for HITL surfacing. Its `type` is `CONTEXT` — the failure is usually the type itself, so the one field that cannot be trusted is set to the neutral value and the type the model attempted, plus the rule that refused it, are preserved in `raw_evidence` for the review card. The observation's content is kept exactly as produced, since that is what a person reads when deciding what to do about it. |
 
 **Reversibility note:** "Yes (via audit)" means the edge's `invalidated_at` timestamp is set (not deleted), and a new `DecisionAuditNode` with `action: ROLLBACK` is written.
 
@@ -572,7 +584,14 @@ Temporal decay applies to `PatternNode` and `BeliefNode` instances during retrie
 final_score = cosine_similarity(query_vector, node_vector)
             × signal_weight_multiplier
             × recency_weight(last_reinforced_at)
+            × trust_weight(verification_status)
 ```
+
+See [`Extraction/Architecture.md`](../Extraction/Architecture.md) for which layer applies
+which factor: Stage 2 ranks on cosine × signal only, and recency and trust arrive with the
+query layer. `CandidateNode.similarity_score` stores the **raw cosine** — the weighted
+score can reach `2.0` and the field is bounded at `1.0`, so weighting is a ranking step
+rather than something recorded.
 
 **Signal weight multipliers:**
 

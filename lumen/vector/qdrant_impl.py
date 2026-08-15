@@ -16,7 +16,7 @@ from typing import Any
 import qdrant_client
 from qdrant_client.models import Distance, PointStruct, VectorParams
 
-from lumen.vector.provider import VectorProvider
+from lumen.vector.provider import ScoredHit, VectorProvider
 
 logger = logging.getLogger(__name__)
 
@@ -147,9 +147,14 @@ class QdrantVectorProvider(VectorProvider):
         dense_vector: list[float],
         sparse_vector: dict[str, float] | None = None,
         limit: int = 10,
-    ) -> list[str]:
+    ) -> list[ScoredHit]:
         """
-        Perform a search and return a list of matching node IDs.
+        Search for the closest stored vectors, best match first.
+
+        Each match carries its similarity score, which is what callers rank
+        on — a node that is nearly identical to the search text and one that
+        is merely in the same territory are different answers, and only the
+        score tells them apart.
 
         Sparse/BM25 search is deferred — when sparse_vector is provided,
         a warning is logged and only dense search is performed.
@@ -167,7 +172,7 @@ class QdrantVectorProvider(VectorProvider):
         ).points
 
         return [
-            hit.payload["node_id"]
+            ScoredHit(node_id=hit.payload["node_id"], score=hit.score)
             for hit in search_result
             if hit.payload and "node_id" in hit.payload
         ]

@@ -360,6 +360,39 @@ class TestConversationHandling:
             "catastrophising" not in episode.cleaned_text for episode in result.episodes
         )
 
+    def test_wording_the_person_adopted_reaches_the_result(
+        self, make_event, scripted_providers
+    ):
+        # Carried at the level of the whole entry, like the reference map,
+        # because topics are not split until several steps later and a
+        # phrase cannot be tied to one of them before they exist.
+        script = full_script()
+        script["conversation"] = json.dumps(
+            {
+                "turns": [],
+                "session_summary": LONG_ENOUGH,
+                "co_created_spans": ["the gym is a forcing function"],
+            }
+        )
+        light, thinking = scripted_providers(script)
+
+        result = preprocess(
+            make_event([("USER", "rough day"), ("AI", "a forcing function?")]),
+            lightweight=light,
+            thinking=thinking,
+        )
+
+        assert result.co_created_spans == ["the gym is a forcing function"]
+
+    def test_a_monologue_has_no_adopted_wording(self, make_event, scripted_providers):
+        light, thinking = scripted_providers(full_script())
+
+        result = preprocess(
+            make_event([("USER", LONG_ENOUGH)]), lightweight=light, thinking=thinking
+        )
+
+        assert result.co_created_spans == []
+
 
 class TestResultShape:
     def test_the_result_reports_the_session_it_came_from(

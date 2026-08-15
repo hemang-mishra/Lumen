@@ -57,12 +57,19 @@ class ConversationResponse(BaseModel):
             that were tried and dropped; recording those as though they were
             settled would fill the history with things the person had
             already talked themselves out of.
+        co_created_spans: The assistant's own phrasings that the person took
+            up as their own, quoted exactly. Knowing which message showed
+            agreement is not enough later on: the summary replaces the
+            conversation, and by then there is no way to tell whose words
+            an idea started as. The wording has to be carried out of here or
+            it is lost.
     """
 
     model_config = ConfigDict(extra="forbid")
 
     turns: list[TurnClassification] = Field(default_factory=list)
     session_summary: str = ""
+    co_created_spans: list[str] = Field(default_factory=list)
 
 
 class NormalizeResponse(BaseModel):
@@ -205,6 +212,11 @@ class ConversationResult(BaseModel):
             message id.
         co_created_message_ids: Messages where the person took up an idea
             from the assistant.
+        co_created_spans: The assistant phrasings behind those moments, in
+            the assistant's own words. Empty when the reading failed, which
+            means everything downstream is credited to the person alone —
+            the cautious direction, since ideas marked as assistant-derived
+            are trusted less when the history is searched later.
         used_fallback: True when the reading failed and the person's
             messages were simply strung together instead.
     """
@@ -214,6 +226,7 @@ class ConversationResult(BaseModel):
     summary: str
     turn_acts: dict[str, DialogueAct] = Field(default_factory=dict)
     co_created_message_ids: tuple[str, ...] = ()
+    co_created_spans: tuple[str, ...] = ()
     used_fallback: bool = False
 
 

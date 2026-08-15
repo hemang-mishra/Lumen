@@ -419,10 +419,23 @@ class CandidateRetrievalSource(StrEnum):
 
 
 class StructuralAnchorType(StrEnum):
-    """See Schema.md DecisionAuditNode.structural_anchor_type."""
+    """
+    What led retrieval to a candidate when it was not similarity.
+
+    NAMED_PERSON          — someone the entry named.
+    HISTORICAL_ERA        — a period of the person's past the entry referred to.
+    HIGH_SENSITIVITY_OPEN — weighty material still waiting to be reconciled,
+                            surfaced whatever today's entry happens to say.
+
+    The third exists because the entry that finally resolves something
+    painful almost never resembles the entry that recorded it. It was
+    missing here while the retrieval spec described three anchors, which
+    would have left those candidates unable to record how they were found.
+    """
 
     NAMED_PERSON = "NAMED_PERSON"
     HISTORICAL_ERA = "HISTORICAL_ERA"
+    HIGH_SENSITIVITY_OPEN = "HIGH_SENSITIVITY_OPEN"
 
 
 class HitlResolutionChoice(StrEnum):

@@ -138,12 +138,42 @@ class PipelineConfig:
       LUMEN_COHERENCE_THRESHOLD   — score at or above this counts as a reflection
       LUMEN_REFLECTION_PROMPT_COUNT — follow-up questions offered on thin entries
       LUMEN_MAX_EPISODES          — ceiling on how many pieces one entry can split into
+      LUMEN_MAX_OBSERVATIONS      — ceiling on findings taken from one episode
+      LUMEN_MAX_CAUSAL_CHAINS     — ceiling on cause-and-effect sequences per episode
+      LUMEN_MAX_CAUSAL_STEPS      — ceiling on steps within one sequence
+      LUMEN_MAX_EXTRACTION_ATTEMPTS — tries at reading one episode before giving up
+      LUMEN_PASS_A_KEEP           — how many search matches survive ranking
+      LUMEN_PASS_A_OVERFETCH      — how many are fetched before ranking
+      LUMEN_PASS_B_KEEP           — how many anchor matches survive per anchor
+      LUMEN_CANDIDATE_CAP         — most candidates handed to reconciliation
+
+    The three ceilings are limits, not targets. They exist so that one runaway
+    reply cannot turn a single paragraph into two hundred nodes; a normal
+    entry never comes close to them.
+
+    The attempt count covers the first reading plus any corrections asked for
+    afterwards, so the default of three means one reading and at most two
+    goes at fixing what it got wrong. Setting it to one turns correction off
+    entirely.
     """
 
     min_reflection_words: int = _env_int("LUMEN_MIN_REFLECTION_WORDS", 30)
     coherence_threshold: float = _env_float("LUMEN_COHERENCE_THRESHOLD", 0.4)
     reflection_prompt_count: int = _env_int("LUMEN_REFLECTION_PROMPT_COUNT", 3)
     max_episodes_per_session: int = _env_int("LUMEN_MAX_EPISODES", 12)
+    max_observations_per_episode: int = _env_int("LUMEN_MAX_OBSERVATIONS", 25)
+    max_causal_chains_per_episode: int = _env_int("LUMEN_MAX_CAUSAL_CHAINS", 5)
+    max_causal_steps_per_chain: int = _env_int("LUMEN_MAX_CAUSAL_STEPS", 12)
+    max_extraction_attempts: int = _env_int("LUMEN_MAX_EXTRACTION_ATTEMPTS", 3)
+
+    # More matches are fetched than are kept, because ranking happens after
+    # the search: a rare and weighty node can sit just below the cut on raw
+    # distance and belong above it once its weight is taken into account.
+    # Fetching only what is kept would throw it away before that.
+    pass_a_keep: int = _env_int("LUMEN_PASS_A_KEEP", 5)
+    pass_a_overfetch: int = _env_int("LUMEN_PASS_A_OVERFETCH", 20)
+    pass_b_keep: int = _env_int("LUMEN_PASS_B_KEEP", 5)
+    merged_candidate_cap: int = _env_int("LUMEN_CANDIDATE_CAP", 8)
 
 
 @dataclass(frozen=True)
