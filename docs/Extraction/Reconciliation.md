@@ -41,6 +41,47 @@ Reconciliation prevents two failure modes simultaneously:
 
 ---
 
+## What BRANCH Creates — The Promotion Rule
+
+`BRANCH` records an observation as its own thing. Whether that also creates a
+standing `PatternNode` or `BeliefNode` depends on the observation's *type*, from a
+fixed table in `lumen/pipeline/reconciliation/catalog.py` (`PROMOTION`):
+
+- **Promotable to `BeliefNode`:** `BELIEF`, `META_BELIEF`, `EPISTEMIC_SHIFT`,
+  `CONCEPTUAL_REFRAME`, `PERSPECTIVE_SHIFT`, `CORE_WOUND`, `CORE_CONFLICT`,
+  `IDENTITY_AFFINITY`, `IDENTITY_FUSION_STATE`, `EXISTENTIAL_REFLECTION`,
+  `ACCEPTANCE_ACKNOWLEDGEMENT`, `METACOGNITIVE_BREAKTHROUGH`, `LESSON`.
+- **Promotable to `PatternNode`:** `PATTERN`, `RUMINATION_LOOP`,
+  `COGNITIVE_DISTORTION`, `COGNITIVE_DISTORTION_STATE`,
+  `COGNITIVE_DEFENSE_MECHANISM`, `SELF_NARRATION_PATTERN`,
+  `SOCIAL_PERFORMANCE_STATE`, `SUBPERSONALITY_ACTION`, `RELATIONAL_DYNAMIC`,
+  `ENVIRONMENTAL_DEPENDENCY`, `INAUTHENTICITY_STATE`, `OTHER_PERSON_MODEL`,
+  `SYSTEM_DESIGN_ITERATION`.
+- **Promotable to `OpenLoopNode`:** `OPEN_LOOP`, and only when retrieval returned at
+  least one candidate for it — a question asked once is a passing thought; the same
+  question surfacing again is a standing investigation, and only history can tell
+  the two apart.
+- **Not promotable:** everything else (~30 types — `CONTEXT`, `EMOTION`,
+  `SOMATIC_STATE`, `ENVIRONMENTAL_CONTEXT`, …).
+
+**A non-promotable observation is still reconciled.** It can `MERGE`, `REINFORCE` or
+`REGULATE` against existing nodes exactly as any other observation can. What it
+cannot do is create a *new* standing node when nothing matches — it is written with
+its episode and linked there, and the `DecisionAuditNode` records that promotion was
+considered and declined. Without this rule the graph accumulates one permanent node
+per sentence, none of which ever gather enough evidence to be worth retrieving.
+
+The table covers every member of the observation-type enum explicitly, with a test
+asserting completeness, so a type added later fails the suite rather than silently
+defaulting to unpromotable.
+
+**`LessonNode` promotion is not implemented.** The node type exists but no edge type
+connects an observation to one (`branches_to` routes only to `PatternNode` and
+`BeliefNode`), so a lesson has nowhere to attach. `LESSON` promotes to a
+`BeliefNode` in the meantime.
+
+---
+
 ## The MERGE Model — Same-As Edges (Not Node Collapse)
 
 A common misconception about MERGE is that it "collapses" the new node into the existing one — deleting the new extraction and redirecting pointers to the canonical node. **This is not how Lumen's MERGE works.**
@@ -143,7 +184,11 @@ This applies regardless of the absolute confidence values. A model that is 0.92/
 
 ### Escalation
 
-AMBIGUOUS items are never auto-executed. The action is immediately written to the HITL queue with `status: PENDING_HITL`. The graph write for this episode is **suspended** until the user resolves the queue item. The episode's `EpisodeNode` is written with `reconciliation_status: SUSPENDED`.
+AMBIGUOUS items are never auto-executed. The action is immediately written to the HITL queue with `status: PENDING_HITL`, and that item's graph write is **suspended** until the user resolves it.
+
+**Only the undecided item waits.** Every other decision from the same episode is written immediately, and the episode's `EpisodeNode` records `reconciliation_status: SUSPENDED` to say something remains outstanding. An earlier version of this line suspended the entire episode's writes; in practice one unanswered question would freeze a whole day's work indefinitely, since queue items have no expiry unless snoozed. The cost of the current behaviour is stated plainly: an item resolved days later is decided against a graph that has moved on slightly.
+
+Because `SUSPENDED` now means *partially reconciled with something outstanding* rather than *nothing written*, `GraphProvider.find_unresolved_high_signal` treats `SUSPENDED` and `PENDING_RERECONCILIATION` alike. Without that, the retrieval anchor built to surface un-reconciled weighty material would stop finding exactly the items Stage 3 set aside.
 
 ### HITL Presentation for AMBIGUOUS Items
 
@@ -228,7 +273,23 @@ Every Reconciliation action — including AMBIGUOUS resolutions, CONTRADICT crea
 - `delta_description` — required and non-null only when `action == EVOLVE`. Contains a plain-language description of what changed between the old and new version.
 - `confidence_runner_up` and `runner_up_action` — always recorded, even when AMBIGUOUS is not triggered. Enables retroactive analysis of close decisions.
 - `rollback_pointer` — specifies exactly what to invalidate and re-queue if this decision is reversed.
-- `status` — `ACTIVE | ROLLED_BACK`. Status changes do not delete the node (append-only).
+- `status` — `ACTIVE | ROLLED_BACK | PENDING_HITL | BELOW_THRESHOLD`. Status changes do not delete the node (append-only).
+
+### How an edge is identified for rollback
+
+**Edges have no id column.** The Kuzu DDL gives every relationship table
+`valid_from`, `invalidated_at`, `decision_id` and `confidence` — and no identifier of
+its own. Rollback as originally specified ("invalidate the edge named in
+`edge_id`") could therefore never have run.
+
+What makes rollback possible is `decision_id`: every reconciliation edge carries the
+id of the `DecisionAuditNode` that produced it, so *the decision is the handle*.
+An invalidation matches on `(table, decision_id)`.
+
+`edge_id` and `rollback_pointer.edge_to_invalidate` hold a reconstructable
+descriptor of the form `"{physical_table}:{from_id}->{to_id}"` — human-readable in
+the audit trail and enough to locate the edge by inspection. Decisions that created
+no edge (AMBIGUOUS, below-threshold, a non-promoting BRANCH) record `"none:{decision_id}"`.
 
 ### Rollback Procedure
 
@@ -258,6 +319,8 @@ DELETE /decisions/{decision_id}
 | `REGULATE` | 0.82 | `LIGHTWEIGHT` |
 | `AMBIGUOUS` | N/A (tie detection) | N/A — always HITL |
 
+**How the roles are actually spent.** Which action applies is not known until after a model has answered, so the roles cannot be selected up front. One `LIGHTWEIGHT` call decides every item in an episode at once. Any item returning `EVOLVE`, `CONTRADICT` or `DIALECTIC` — the three that permanently alter something long-held — is then re-asked in a single `THINKING` call, which may confirm it, lower its confidence, or overrule it to a safer action. It is shown only those items, so it can never make one heavier. A typical episode costs one call; two when something consequential is claimed. The `DecisionAuditNode` records whichever model had the final say, so the table above describes what actually happened rather than an intention.
+
 > **Model roles:** `LIGHTWEIGHT` is used for low-to-medium-risk actions where speed matters more than deep reasoning. `THINKING` is used for high-consequence or nuanced-judgment actions. Which actual provider and model back each role — cloud or local — is a single maintainer-configured deployment choice (`ProviderConfig`, see `docs/hld/LLM_Abstraction_Architecture.md`), not a decision the pipeline makes per observation based on content sensitivity, and not something the end user selects.
 
 ### The "Trial vs. Trait" Rule (Temporal Frequency Multiplier)
@@ -273,8 +336,13 @@ To enforce this, Reconciliation applies a **Confidence Threshold Multiplier** ba
 
 ### Era Baseline Protection (Local Extremum vs Baseline Shift)
 
-When processing observations that reflect intense burnout, psychological shock, or severe performance degradation, the Reconciliation engine must evaluate the temporal scope of the candidate era. High-intensity, short-duration states (like finals week or project crunch time) are tagged as `LOCAL_EXTREMUM`. These states must not overwrite or trigger an `EVOLVE` action on the macro-baseline (`BASELINE_SHIFT`) of a long-running era (e.g., a multi-month internship). 
-- If an observation indicates an extreme deviation from a previously stable baseline within the same era, the action defaults to `BRANCH` (to record the local extremum) rather than `EVOLVE`. 
+When processing observations that reflect intense burnout, psychological shock, or severe performance degradation, the Reconciliation engine must evaluate the temporal scope of the state being described. High-intensity, short-duration states (like finals week or project crunch time) must not overwrite or trigger an `EVOLVE` action on the macro-baseline of a long-running era (e.g., a multi-month internship).
+
+**How this is determined.** The Stage 3 decision call returns `is_local_extremum` per item: *does this describe a short, intense stretch inside a longer period, rather than how the person usually is?* Only a reader of the text can answer that. The consequence is then applied deterministically in code: an `EVOLVE` on an item flagged this way is recorded as a `BRANCH` instead, with the gate's name (`LOCAL_EXTREMUM`) written to the `DecisionAuditNode`, and the existing record retained on the decision so a later occasion can be counted against it.
+
+> An earlier version of this section said such states "are tagged as `LOCAL_EXTREMUM`" and referred to a `BASELINE_SHIFT` macro-baseline. Neither tag exists anywhere in the system — no node type, no enum, and no stage produces either — so the rule as written could not run. The per-item judgement above is the implementable form of the same intent.
+
+- If an observation indicates an extreme deviation from a previously stable baseline within the same era, the action defaults to `BRANCH` (to record the local extremum) rather than `EVOLVE`.
 - This prevents recency bias from corrupting the graph during high-stress transitional periods.
 
 **Below-threshold behavior:** When a model outputs an action but its confidence falls below the threshold for that action, the item is routed to the HITL queue as `status: BELOW_THRESHOLD`. It is **not** auto-promoted to BRANCH. It waits in the queue.
@@ -291,7 +359,13 @@ These rules are enforced in code at the point of the Reconciliation response par
 | **R2** | `observation.type IN [METACOGNITIVE_INTERRUPT, METACOGNITIVE_BREAKTHROUGH]` AND `signal_strength NOT IN [HIGH, CRITICAL]` | Reject extraction response. Re-extract with error context. (`CRITICAL` is a valid `signal_strength` value — the 2.0× retrieval multiplier — distinct from routing tier.) |
 | **R3** | `observation.provenance == CO_CREATED` AND `reconciliation.action == EVOLVE` | **Ownership transfer rule.** Allow EVOLVE normally. Set the new version node's `provenance = USER_GENERATED` and `verification_status = VERIFIED`. The user has taken ownership of the framework they are refining. Record `co_created_origin: true` in the `DecisionAuditNode` for lineage tracing. |
 
-> ⚠️ Rule R5 is the only rule that *overrides* rather than *rejects*. This is intentional: if the model failed to detect a tie but the scores reveal one, the system corrects automatically without burning an additional LLM call. All other rules reject and re-extract.
+> ⚠️ **R3 is the only rule that *overrides* rather than *rejects*.** This is intentional: the user has taken ownership of a framework they are refining, and that is a fact about provenance rather than a malformed response. All other rules reject and re-extract.
+>
+> An earlier version of this note referred to "Rule R5", and the Ownership Transfer section below referred to "Rule R6". Neither existed — the table has always held three rules, and R6's description was word-for-word R3's. Two rules were removed at some point and the surrounding prose was never renumbered.
+
+### Tie detection is not one of these rules
+
+Tie detection is enforced in code at Stage 3, not as a schema-validation rule, and it is not a rejection: the item is re-labelled `AMBIGUOUS` and routed to the review queue without an additional model call. See [Tie-Breaking & The AMBIGUOUS Escalation](#tie-breaking--the-ambiguous-escalation).
 
 **Re-extraction limit:** A single observation gets at most **3 attempts** in total — the first reading plus two corrections. On the third failure it is written as `status: EXTRACTION_FAILED`, linked to the episode with a `failed_extraction` edge, and surfaced in the next HITL queue session. (An earlier version of this paragraph said "re-extracted at most 3 times" alongside "on the third failure", which are four attempts and three. Three total is the rule, matching `ObservationNode.extraction_attempt`, which counts attempts rather than repeats.)
 
@@ -320,7 +394,7 @@ The Preprocessing layer looks for explicit adoption markers in user turns follow
 
 When these markers appear and the user incorporates the AI's framework into their subsequent reflection, the extracted node carries `provenance: CO_CREATED`.
 
-### Ownership Transfer on EVOLVE (Rule R6)
+### Ownership Transfer on EVOLVE (Rule R3)
 
 When a user later refines, extends, or applies a `CO_CREATED` node in a new session, the refinement is extracted as `provenance: USER_GENERATED`. The EVOLVE action links the new node to the CO_CREATED ancestor. The `DecisionAuditNode` records `co_created_origin: true` to preserve the lineage.
 

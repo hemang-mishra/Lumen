@@ -285,12 +285,66 @@ This document outlines the systematic, stage-by-stage implementation plan for th
     `lumen/pipeline/`, `lumen/config.py`, `lumen/schemas/pipeline.py`.
   - *Plan:* [`implementation/Goal_8_Plan.md`](file:///Users/hemangmishra/Projects/Lumen/implementation/Goal_8_Plan.md)
 
-- [ ] **Goal 9: Stage 3 — Reconciliation Logic**
-  - Implement `lumen/pipeline/reconciliation.py`.
-  - 8 actions: MERGE, REINFORCE, EVOLVE, BRANCH, CONTRADICT, DIALECTIC, REGULATE, AMBIGUOUS.
-  - HITL escalation for AMBIGUOUS tie or below-threshold confidence.
-  - Input: `RetrievalResult` → Output: `ReconciliationResult` + `DecisionAuditNode`.
-  - *Test:* Provide identical historical node → verify MERGE. Provide evolved version → verify EVOLVE with delta.
+- [x] **Goal 9: Stage 3 — Reconciliation Logic** ✅
+  - Implemented `lumen/pipeline/reconciliation/` as a package (`stage`, `decide`, `gates`,
+    `plan`, `promote`, `people`, `catalog`, `contracts`, `prompts`) rather than the single
+    `reconciliation.py` named above — same call as Goals 5–8. `reconcile()` is the only
+    public name.
+  - Input: `ExtractionResult` + `list[RetrievalResult]` → Output: **`ReconciliationOutcome`**,
+    a new DTO. An episode produces many decisions, many audit nodes, and the writes they
+    imply; they have to arrive together or Goal 10 cannot execute them atomically.
+  - **Stage 3 decides and builds; it writes nothing.** It returns a `GraphWritePlan` — the
+    exact nodes, edges and bookkeeping the decisions imply, fully built and validated —
+    which Goal 10 executes without interpreting. The plan checks its own consistency on
+    construction, so a dangling reference fails while planning rather than halfway through
+    saving.
+  - **One cheap call per episode, one deep call for anything consequential** (per explicit
+    user decision). `EVOLVE`/`CONTRADICT`/`DIALECTIC` are re-asked with the THINKING model,
+    which may confirm, lower confidence, or overrule downward — it is shown only the risky
+    items, so it can never make one heavier. Typical cost: 1 call; 2 when something is
+    claimed to have changed.
+  - **Seven gates enforced in code after the model answers**, in a fixed order: is the
+    action structurally possible (falls to the runner-up, then to review), is it a tie
+    (<0.05 → AMBIGUOUS), is it a first deviation from a belief older than 180 days
+    (→ recorded separately, with a named-breakthrough bypass), is it a short spike inside a
+    longer stretch, does a change have a cause, does the action carry the sentence it needs,
+    and is it confident enough. Below-threshold is **never** downgraded to BRANCH.
+  - **Only claim-like observation types become standing records** (per explicit user
+    decision). A frozen table covers all ~50 types with a completeness test; the ~30
+    non-promotable ones still reconcile — they can MERGE, REINFORCE or REGULATE — but never
+    create a new belief or pattern.
+  - **Person records and open-loop promotion ship here** (per explicit user decision). This
+    closes the loop Goal 8 left open: its named-person anchor had nothing to find because
+    nothing had ever created a person record. Cross-entry alias matching stays deferred.
+  - **The append-only rule is restated as what it means: no *content* field is ever
+    modified** (per explicit user decision). Three named bookkeeping operations —
+    `mark_superseded`, `record_reinforcement`, `touch_person` — touch fixed counters,
+    timestamps and version status with no caller-supplied field names. Named openly in
+    `Schema.md` rather than left as a hidden exception.
+  - **An undecidable item waits alone** (per explicit user decision). The rest of the
+    episode is written; the episode is marked `SUSPENDED` to say something is outstanding.
+    `find_unresolved_high_signal` was widened to match, or it would stop finding exactly
+    the items this stage sets aside.
+  - **Goal 8's `search_failed` is honoured:** an item whose search failed is never branched
+    and never even asked about — it waits for a person, since novelty cannot be claimed
+    from a search that did not run.
+  - *Amends Goal 1/2:* the `dialectic` and `regulates` edge tables gain the summary columns
+    Goal 2 flagged as blocking this goal (writing either would have failed); `decided_by_sess`
+    added — a session is one of three things this stage decides about and was the only one
+    unable to record its own decision (47 → 48 physical edge tables); `count_prior_decisions`
+    plus the three bookkeeping writes added to `GraphProvider`. `HitlEntryType` moved to
+    `schemas/enums.py` so the pipeline names it without importing SQLAlchemy.
+  - *Docs amended ahead of coding:* `Reconciliation.md` (**"Rule R5"/"Rule R6" never
+    existed** — the table has always had three and R6's text was word-for-word R3's;
+    **`LOCAL_EXTREMUM`/`BASELINE_SHIFT` name tags nothing in the system produces**, restated
+    as a per-item judgement the decision call returns; **rollback pointed at an edge id that
+    does not exist** — edges have no id column, so `decision_id` is the handle; the promotion
+    table; the two-call model policy; partial suspension), `Architecture.md`, `Schema.md`
+    (the bookkeeping exception, the two edge columns, `decided_by_sess`, `evidence_count` as
+    stored rather than derived), `Technical_HLD.md` §5 and §8.
+  - *Result:* 1649 tests passing (1395 from Goals 1–8 + 254 new), **100% coverage** on
+    `lumen/pipeline/reconciliation/`, `lumen/schemas/pipeline.py`, and `lumen/config.py`.
+  - *Plan:* [`implementation/Goal_9_Plan.md`](file:///Users/hemangmishra/Projects/Lumen/implementation/Goal_9_Plan.md)
 
 ## Phase 3: Graph Construction & E2E Testing (Goals 10-12)
 **Objective:** Tie the extraction pipeline to the databases, execute full runs, and manually inspect the graph.

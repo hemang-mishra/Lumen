@@ -10,6 +10,7 @@ any stage can be run on its own with nothing installed.
 
 from lumen.pipeline.extraction import extract
 from lumen.pipeline.preprocessing import preprocess
+from lumen.pipeline.reconciliation import reconcile
 from lumen.pipeline.retrieval import retrieve
 
-__all__ = ["preprocess", "extract", "retrieve"]
+__all__ = ["preprocess", "extract", "retrieve", "reconcile"]

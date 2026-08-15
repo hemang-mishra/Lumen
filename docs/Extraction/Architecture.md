@@ -107,6 +107,27 @@ Stage 4: Graph Write
 
 **Stage 3 summary:** A second LLM call receives both the new extraction and the historical candidates. It outputs one of eight structured decisions per node: `MERGE`, `REINFORCE`, `EVOLVE`, `BRANCH`, `CONTRADICT`, `DIALECTIC`, `REGULATE`, or `AMBIGUOUS`. Each action has a per-action confidence threshold; sub-threshold decisions route to HITL. See [`Reconciliation.md`](Reconciliation.md).
 
+> **One batched call, plus one for anything consequential.** The whole episode is
+> decided in a single `LIGHTWEIGHT` call; any item returning `EVOLVE`, `CONTRADICT`
+> or `DIALECTIC` is re-asked in a single `THINKING` call that may confirm, lower
+> confidence, or overrule to a safer action — never to a heavier one. See
+> `Reconciliation.md` "How the roles are actually spent".
+
+> **Stage 3 reads but does not write.** It takes `GraphProvider` as an injected
+> parameter — to read candidate records in full, to check what already exists, and
+> to count what has been decided about a node before. It returns a `GraphWritePlan`:
+> the exact nodes, edges and bookkeeping operations its decisions imply, fully built
+> and validated, executed later by the orchestrator without interpretation. This
+> keeps every judgement about the user's history in one place and leaves the code
+> that writes to the databases making no judgements at all.
+
+> **What `BRANCH` creates depends on the observation type.** Only claim-like types
+> (beliefs, patterns, core wounds, breakthroughs…) become standing `BeliefNode` /
+> `PatternNode` records; the rest are recorded with their episode and never become
+> permanent claims — while still being free to `MERGE`, `REINFORCE` or `REGULATE`
+> against existing nodes. The full table is in `Reconciliation.md` "What BRANCH
+> Creates".
+
 **Stage 4 summary:** Executes the Reconciliation decisions as graph writes. Content nodes are append-only and immutable. Decision Audit Nodes are first-class, reversible graph nodes. See [`Reconciliation.md`](Reconciliation.md).
 
 ---
@@ -275,7 +296,22 @@ Person Entity nodes are a first-class node type in the knowledge graph. Every na
 
 **Discovery:** Person entities are first discovered during the Preprocessing coreference pass (Stage 0), which produces a within-document alias map. The Microextraction LLM consumes this pre-computed map rather than re-deriving it.
 
-**Cross-entry alias resolution:** Within a single entry, coreference is handled in Stage 0. Across entries, alias resolution (e.g., *"my mentor"* in one entry → *"Alex"* in another) is handled by the Reconciliation layer using the same `MERGE`-style logic as pattern merging — specifically by creating `same-as` edges between the alias node and the canonical Person Entity node. See [`Microextraction.md`](Microextraction.md) for the within-document coreference schema, and [`Reconciliation.md`](Reconciliation.md) for the cross-entry person resolution mechanism.
+**Creation:** Person Entity nodes are created during Reconciliation (Stage 3), which
+is the first stage that can see whether the person is already known. The node id is
+derived from the canonical name (`person_alex`), so checking is a single lookup with
+no matching involved. A person already known is not rewritten — only `mention_count`
+and `last_mentioned_at` move. Every observation, event or session naming them gets a
+`mentions` edge.
+
+> Until Stage 3 shipped, nothing created these nodes, so Stage 2's named-person
+> retrieval anchor had nothing to find. That is what closes the loop.
+
+**Cross-entry alias resolution:** Within a single entry, coreference is handled in Stage 0. Across entries, alias resolution (e.g., *"my mentor"* in one entry → *"Alex"* in another) is handled by the Reconciliation layer using the same `MERGE`-style logic as pattern merging — specifically by creating `same-as` edges between the alias node and the canonical Person Entity node.
+
+> **Not yet implemented.** Alias resolution is the same fuzzy-matching problem as
+> pattern merging and deserves the same care rather than being smuggled into person
+> creation. Today two spellings of one person produce two records. Stated here so
+> the gap is a known limitation rather than a surprise. See [`Microextraction.md`](Microextraction.md) for the within-document coreference schema, and [`Reconciliation.md`](Reconciliation.md) for the cross-entry person resolution mechanism.
 
 ```yaml
 person_entity:

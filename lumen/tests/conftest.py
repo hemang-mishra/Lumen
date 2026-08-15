@@ -44,6 +44,7 @@ from lumen.schemas.enums import (
     SentimentTrend,
     SignalStrength,
     SourceModality,
+    StructuralAnchorType,
 )
 from lumen.schemas.nodes import (
     AdoptedPrincipleNode,
@@ -882,3 +883,269 @@ def recording_sleeper():
     """
     waits: list[float] = []
     return waits, waits.append
+
+
+# ---------------------------------------------------------------------------
+# Reconciliation fixtures
+# ---------------------------------------------------------------------------
+
+# Phrases unique to each reconciliation prompt, used the same way as the
+# preprocessing and extraction keys above.
+RECONCILIATION_PROMPT_KEYS = {
+    "decision": "Below are things someone noticed in one journal entry",
+    "escalation": "A faster model read these items",
+}
+
+MOMENT = datetime(2026, 6, 11, 20, 0, tzinfo=UTC)
+
+
+@pytest.fixture
+def make_candidate():
+    """Build one candidate match, found either by meaning or by an anchor."""
+
+    def _build(
+        node_id: str = "pat_old",
+        *,
+        node_type: str = "PatternNode",
+        preview: str = "an existing pattern",
+        score: float | None = 0.9,
+        anchor: str | None = None,
+    ):
+        from lumen.schemas.pipeline import CandidateNode
+
+        if anchor is not None:
+            return CandidateNode(
+                node_id=node_id,
+                node_type=node_type,
+                content_preview=preview,
+                retrieval_source=CandidateRetrievalSource.STRUCTURAL,
+                structural_anchor_type=StructuralAnchorType(anchor),
+                structural_anchor_value="Alex",
+            )
+        return CandidateNode(
+            node_id=node_id,
+            node_type=node_type,
+            content_preview=preview,
+            similarity_score=score,
+            retrieval_source=CandidateRetrievalSource.SEMANTIC,
+        )
+
+    return _build
+
+
+@pytest.fixture
+def make_item(make_candidate):
+    """
+    Build one thing to be decided about, with whatever the search found.
+
+    Defaults to a finding of a kind that can become a lasting record, since
+    that is the interesting case; the other kinds are asked for by name.
+    """
+
+    def _build(
+        text: str = "I compare myself to people ahead of me",
+        *,
+        node_id: str = "obs_new_1",
+        node_type: str = "ObservationNode",
+        observation_type: ObservationType = ObservationType.PATTERN,
+        signal: SignalStrength = SignalStrength.STANDARD,
+        provenance: Provenance = Provenance.USER_GENERATED,
+        candidates=None,
+        person_refs: tuple[str, ...] = (),
+        search_failed: bool = False,
+        episode_id: str = "ep_new",
+    ):
+        from lumen.pipeline.reconciliation.contracts import DecisionItem
+        from lumen.schemas.nodes import EventNode, ObservationNode, SessionNode
+
+        if node_type == "ObservationNode":
+            source = ObservationNode(
+                node_id=node_id,
+                created_at=MOMENT,
+                valid_from=MOMENT,
+                episode_id=episode_id,
+                occurred_at=MOMENT,
+                type=observation_type,
+                content=text,
+                signal_strength=signal,
+                provenance=provenance,
+                status=ObservationStatus.ACTIVE,
+                extraction_model="fake",
+                person_refs=list(person_refs),
+            )
+        elif node_type == "EventNode":
+            source = EventNode(
+                node_id=node_id,
+                created_at=MOMENT,
+                valid_from=MOMENT,
+                episode_id=episode_id,
+                occurred_at=MOMENT,
+                event_summary=text,
+                signal_strength=signal,
+                person_refs=list(person_refs),
+            )
+        else:
+            source = SessionNode(
+                node_id=node_id,
+                created_at=MOMENT,
+                valid_from=MOMENT,
+                episode_id=episode_id,
+                occurred_at=MOMENT,
+                event_date=TODAY,
+                session_label="A",
+                session_summary=text,
+                signal_strength=signal,
+            )
+
+        return DecisionItem(
+            source=source,
+            node_type=node_type,
+            text=text,
+            observation_type=(
+                observation_type if node_type == "ObservationNode" else None
+            ),
+            signal_strength=signal,
+            provenance=provenance,
+            episode_id=episode_id,
+            person_refs=person_refs,
+            candidates=tuple(candidates or ()),
+            search_failed=search_failed,
+        )
+
+    return _build
+
+
+@pytest.fixture
+def make_settled(make_item):
+    """
+    Build a decision as it looks straight after being read, before checking.
+
+    Tests for the checks use this so each one can start from exactly the
+    reading it cares about, rather than scripting a model to produce it.
+    """
+
+    def _build(
+        action: ReconciliationAction = ReconciliationAction.MERGE,
+        *,
+        item=None,
+        target_node_id: str | None = "pat_old",
+        target_type: str | None = "PatternNode",
+        confidence: float = 0.95,
+        runner_up: ReconciliationAction | None = None,
+        runner_up_confidence: float | None = None,
+        **extra,
+    ):
+        from lumen.pipeline.reconciliation.contracts import SettledDecision
+
+        return SettledDecision(
+            item=item if item is not None else make_item(),
+            action=action,
+            target_node_id=target_node_id,
+            target_type=target_type,
+            confidence=confidence,
+            runner_up_action=runner_up,
+            runner_up_confidence=runner_up_confidence,
+            model_used="fake-light",
+            **extra,
+        )
+
+    return _build
+
+
+@pytest.fixture
+def reconciliation_providers():
+    """
+    Build the pair of stand-in models reconciliation uses.
+
+    Keyed by step — "decision" or "escalation" — so a test writes only the
+    replies for the steps it exercises.
+    """
+    from lumen.providers.fake import FakeLLMProvider
+
+    def _build(replies: dict[str, str]):
+        script = {
+            RECONCILIATION_PROMPT_KEYS[step]: reply for step, reply in replies.items()
+        }
+        return (
+            FakeLLMProvider(dict(script), role=ModelRole.LIGHTWEIGHT, model="fake-light"),
+            FakeLLMProvider(dict(script), role=ModelRole.THINKING, model="fake-thinker"),
+        )
+
+    return _build
+
+
+@pytest.fixture
+def seed_pattern(graph_store):
+    """Put one existing pattern into the graph, with a chosen age."""
+
+    def _seed(
+        node_id: str = "pat_old",
+        *,
+        name: str = "Comparison spiral",
+        description: str = "Comparing himself to peers and feeling behind",
+        valid_from: str = "2026-06-01T00:00:00+00:00",
+        status: str = "ACTIVE",
+        evidence_count: int = 3,
+        era_tag: str | None = None,
+    ) -> str:
+        graph_store.write_node(
+            "PatternNode",
+            {
+                "node_id": node_id,
+                "version": 1,
+                "created_at": valid_from,
+                "valid_from": valid_from,
+                "last_reinforced_at": valid_from,
+                "pattern_name": name,
+                "pattern_description": description,
+                "domain": "EMOTIONAL",
+                "signal_strength": "STANDARD",
+                "provenance": "USER_GENERATED",
+                "verification_status": "IMPLICIT",
+                "evidence_count": evidence_count,
+                "query_frequency": 0,
+                "is_canonical": True,
+                "status": status,
+                **({"era_tag": era_tag} if era_tag else {}),
+            },
+        )
+        return node_id
+
+    return _seed
+
+
+@pytest.fixture
+def seed_belief(graph_store):
+    """Put one existing belief into the graph, with a chosen age."""
+
+    def _seed(
+        node_id: str = "bel_old",
+        *,
+        statement: str = "I need solitude to recharge",
+        valid_from: str = "2026-06-01T00:00:00+00:00",
+        provenance: str = "USER_GENERATED",
+        version: int = 1,
+    ) -> str:
+        graph_store.write_node(
+            "BeliefNode",
+            {
+                "node_id": node_id,
+                "version": version,
+                "created_at": valid_from,
+                "valid_from": valid_from,
+                "last_reinforced_at": valid_from,
+                "belief_statement": statement,
+                "belief_source_summary": "said so in an earlier entry",
+                "domain": "SELF_CONCEPT",
+                "signal_strength": "STANDARD",
+                "provenance": provenance,
+                "verification_status": "IMPLICIT",
+                "evidence_count": 2,
+                "query_frequency": 0,
+                "is_contradicted": False,
+                "status": "ACTIVE",
+            },
+        )
+        return node_id
+
+    return _seed

@@ -15,22 +15,30 @@ from.
 from __future__ import annotations
 
 from datetime import date, datetime
+from typing import Any
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, SerializeAsAny, model_validator
 
 from lumen.observability.trace import get_trace_id
+from lumen.schemas.base import GraphNode
+from lumen.schemas.edges import LogicalEdgeType, LumenEdge
 from lumen.schemas.enums import (
+    BookkeepingOperation,
     CandidateRetrievalSource,
     DialogueAct,
     EntryClass,
+    HitlEntryType,
     QualityGateDecision,
     ReconciliationAction,
+    ReconciliationStatus,
+    SignalStrength,
     SourceModality,
     StructuralAnchorType,
 )
 from lumen.schemas.nodes import (
     CausalChainNode,
     CausalStepNode,
+    DecisionAuditNode,
     EventNode,
     ObservationNode,
     SessionNode,
@@ -465,6 +473,208 @@ class RetrievalResult(PipelineDTO):
         return self
 
 
+class PlannedNode(BaseModel):
+    """
+    A record reconciliation decided to create, built and checked but not yet
+    saved.
+
+    Attributes:
+        node_type: Which kind of record this is.
+        node: The record itself, already valid.
+        searchable_text: The text to index for this record, when it should
+            be findable by meaning later. Left unset for records nobody will
+            ever search for, such as the note of a decision.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    node_type: str = Field(min_length=1)
+    node: SerializeAsAny[GraphNode]
+    searchable_text: str | None = None
+
+
+class PlannedEdge(BaseModel):
+    """
+    A link reconciliation decided to create.
+
+    Attributes:
+        logical_type: What the link means.
+        table: The specific storage table the link goes in, worked out when
+            the plan was built. Resolving it here means an unsupported
+            combination of record types fails while the plan is being made,
+            rather than halfway through saving it.
+        from_node_id: Where the link starts.
+        to_node_id: Where it ends.
+        edge: The link's own fields.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    logical_type: LogicalEdgeType
+    table: str = Field(min_length=1)
+    from_node_id: str = Field(min_length=1)
+    to_node_id: str = Field(min_length=1)
+    edge: SerializeAsAny[LumenEdge]
+
+    def properties(self) -> dict[str, Any]:
+        """
+        The link's own columns, ready to be saved.
+
+        The two ends are left out. A link is stored between two records that
+        are found by their identifiers, so the identifiers are how it is
+        attached rather than something it carries — a stored copy of them
+        would be a second version of the same fact, able to disagree with
+        the first.
+        """
+        return {
+            key: value
+            for key, value in self.edge.to_graph_dict().items()
+            if key not in ("source_node_id", "target_node_id")
+        }
+
+
+class PlannedBookkeeping(BaseModel):
+    """
+    A small change to a record that already exists.
+
+    These are the only writes in the system that touch something already
+    saved, and they never touch anything the person wrote — only counts,
+    dates and whether a version is still the current one.
+
+    Attributes:
+        operation: Which of the three changes to make.
+        node_id: The record to change.
+        at: The moment to record against it.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    operation: BookkeepingOperation
+    node_id: str = Field(min_length=1)
+    at: datetime
+
+
+class GraphWritePlan(BaseModel):
+    """
+    Everything one entry's decisions add up to, ready to be saved by
+    whoever owns the writing.
+
+    Reconciliation builds this and saves none of it. Keeping the two apart
+    means every judgement about a person's history lives in one place, and
+    the code that writes to the databases makes no judgements at all.
+
+    Attributes:
+        nodes: New records, in the order they must be created — anything
+            that refers to another new record comes after it.
+        edges: New links. Saved after all the records, so both ends always
+            exist by the time a link needs them.
+        bookkeeping: The small changes to existing records.
+        existing_node_ids: Records a link may point at even though this plan
+            does not create them. Two kinds go in here: things already in
+            the graph, checked when the plan was built, and things this same
+            run extracted, which are saved just before this plan runs.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    nodes: list[PlannedNode] = Field(default_factory=list)
+    edges: list[PlannedEdge] = Field(default_factory=list)
+    bookkeeping: list[PlannedBookkeeping] = Field(default_factory=list)
+    existing_node_ids: frozenset[str] = frozenset()
+
+    @model_validator(mode="after")
+    def _validate_no_duplicate_nodes(self) -> "GraphWritePlan":
+        """Refuses a plan that would create the same record twice."""
+        seen: set[str] = set()
+        for planned in self.nodes:
+            if planned.node.node_id in seen:
+                raise ValueError(
+                    f"the plan creates {planned.node.node_id} more than once"
+                )
+            seen.add(planned.node.node_id)
+        return self
+
+    @model_validator(mode="after")
+    def _validate_links_have_both_ends(self) -> "GraphWritePlan":
+        """
+        Refuses a link pointing at a record nobody will have created.
+
+        A plan is executed straight through with no interpretation, so a
+        dangling link would stop halfway and leave an entry half-saved.
+        """
+        known = {planned.node.node_id for planned in self.nodes} | self.existing_node_ids
+        for edge in self.edges:
+            for end in (edge.from_node_id, edge.to_node_id):
+                if end not in known:
+                    raise ValueError(
+                        f"link {edge.table} points at unknown record '{end}'"
+                    )
+        return self
+
+    @model_validator(mode="after")
+    def _validate_new_records_come_before_their_references(self) -> "GraphWritePlan":
+        """
+        Refuses a plan whose records are out of order.
+
+        A record that names another new record — a contradiction naming the
+        two beliefs it joins, a new version naming the old one — has to be
+        created after the thing it names.
+        """
+        created_so_far: set[str] = set()
+        planned_ids = {planned.node.node_id for planned in self.nodes}
+        for planned in self.nodes:
+            for field_name in _REFERENCE_FIELDS:
+                referenced = getattr(planned.node, field_name, None)
+                if not isinstance(referenced, str):
+                    continue
+                if referenced in planned_ids and referenced not in created_so_far:
+                    raise ValueError(
+                        f"{planned.node.node_id} names {referenced}, which the "
+                        "plan creates later"
+                    )
+            created_so_far.add(planned.node.node_id)
+        return self
+
+
+# Fields on a record that name another record and must be created after it.
+#
+# A contradiction points at the two beliefs it joins, and the newer of those
+# beliefs points back at the contradiction. That pair refers to each other
+# by design, so only one direction can be checked — the one where reading
+# the graph forwards depends on it. The back-pointer is left out rather than
+# making a legitimate plan impossible to order.
+_REFERENCE_FIELDS: tuple[str, ...] = (
+    "previous_version_id",
+    "belief_a_id",
+    "belief_b_id",
+)
+
+
+class HitlEscalation(BaseModel):
+    """
+    One item reconciliation could not settle on its own, described well
+    enough for someone to be asked about it later.
+
+    Attributes:
+        audit_node_id: The decision note this item belongs to.
+        source_node_id: What the undecided item is about.
+        episode_id: The piece of writing it came from.
+        entry_type: Why it is waiting.
+        signal_strength: How much weight the item carries, which is what
+            decides where it sits in the queue.
+        summary: A short, plain description of what needs deciding.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    audit_node_id: str = Field(min_length=1)
+    source_node_id: str = Field(min_length=1)
+    episode_id: str = Field(min_length=1)
+    entry_type: HitlEntryType
+    signal_strength: SignalStrength = SignalStrength.STANDARD
+    summary: str = Field(min_length=1)
+
+
 class ReconciliationResult(PipelineDTO):
     """
     The final decision made about how a newly extracted observation,
@@ -510,6 +720,51 @@ class ReconciliationResult(PipelineDTO):
         return self
 
 
+class ReconciliationOutcome(PipelineDTO):
+    """
+    Everything one episode's reconciliation produced: the decisions, the
+    notes recording them, what those decisions add up to in writing, and
+    whatever could not be settled without asking the person.
+
+    These arrive together because they only make sense together. Saving the
+    records without the decision notes would leave changes nobody can trace
+    or undo, and saving the notes without the records would claim decisions
+    that never happened.
+
+    Attributes:
+        episode_id: The piece of writing these decisions were made about.
+        results: One decision per thing that was extracted and searched for.
+        audit_nodes: The permanent note of each decision, including the ones
+            that decided to do nothing. Every note carries what it would
+            take to reverse it.
+        write_plan: The records and links the decisions imply. Nothing here
+            has been saved.
+        escalations: Items waiting for the person, with the reason each is
+            waiting.
+        episode_status: Whether the episode is fully settled, or still has
+            something outstanding.
+        decision_model: The model that made the decisions. When some were
+            escalated, this names the one that had the final say.
+        decision_time_ms: How long the whole stage took, in milliseconds.
+        decision_failed: True when the model's reply could not be read at
+            all, as opposed to being read and producing few decisions. On
+            this path nothing is written and everything waits for a person —
+            because an entry nobody could decide about looks exactly like an
+            entry with nothing in it, and treating the first as the second
+            files a lifelong pattern as a brand-new thought.
+    """
+
+    episode_id: str = Field(min_length=1)
+    results: list[ReconciliationResult] = Field(default_factory=list)
+    audit_nodes: list[DecisionAuditNode] = Field(default_factory=list)
+    write_plan: GraphWritePlan = Field(default_factory=GraphWritePlan)
+    escalations: list[HitlEscalation] = Field(default_factory=list)
+    episode_status: ReconciliationStatus = ReconciliationStatus.COMPLETE
+    decision_model: str = Field(min_length=1)
+    decision_time_ms: int = Field(default=0, ge=0)
+    decision_failed: bool = False
+
+
 __all__ = [
     "PipelineDTO",
     "BufferMessage",
@@ -523,5 +778,11 @@ __all__ = [
     "MicroextractionInput",
     "ExtractionResult",
     "RetrievalResult",
+    "PlannedNode",
+    "PlannedEdge",
+    "PlannedBookkeeping",
+    "GraphWritePlan",
+    "HitlEscalation",
     "ReconciliationResult",
+    "ReconciliationOutcome",
 ]

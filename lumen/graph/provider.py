@@ -9,6 +9,7 @@ See: docs/hld/Technical_HLD.md Section 2.2
 
 from __future__ import annotations
 
+from datetime import datetime
 from typing import TYPE_CHECKING, Any, Protocol
 
 if TYPE_CHECKING:
@@ -118,6 +119,52 @@ class GraphProvider(Protocol):
         injury, so the two look unrelated by any measure of distance. This
         lookup does not care what either one says.
         """
+        ...
+
+    def count_prior_decisions(
+        self, target_node_id: str, *, actions: list[str]
+    ) -> int:
+        """
+        Count how many past decisions of the given kinds were made about a
+        node.
+
+        Used to tell a first deviation from a repeated one. Someone breaking
+        a long-held belief once has had a good day; someone breaking it for
+        the fifth time has changed, and only the count can tell the two
+        apart.
+        """
+        ...
+
+    # ------------------------------------------------------------------
+    # Bookkeeping writes
+    #
+    # The three operations below are the only writes in the whole system
+    # that touch a record which already exists. Each one changes a fixed,
+    # hard-coded set of columns that hold counts, timestamps and status —
+    # never a word the person wrote. There is no way to pass a column name
+    # in, so there is no way for a caller to reach content through them.
+    # ------------------------------------------------------------------
+
+    def mark_superseded(self, node_id: str, *, at: datetime) -> None:
+        """
+        Mark a belief or pattern as no longer the current version.
+
+        Its text is untouched and it stays in the graph forever. All this
+        says is that a newer version of the same idea now exists.
+        """
+        ...
+
+    def record_reinforcement(self, node_id: str, *, at: datetime) -> None:
+        """
+        Note that a belief or pattern has been evidenced once more.
+
+        Bumps the evidence count and the date it was last seen, which is
+        what lets a well-supported pattern outrank a passing thought.
+        """
+        ...
+
+    def touch_person(self, node_id: str, *, at: datetime) -> None:
+        """Note that a person was mentioned again, and when."""
         ...
 
     def close(self) -> None:
