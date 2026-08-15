@@ -242,12 +242,48 @@ This document outlines the systematic, stage-by-stage implementation plan for th
     `lumen/pipeline/`, `lumen/config.py`, `lumen/schemas/pipeline.py`.
   - *Plan:* [`implementation/Goal_7_Plan.md`](file:///Users/hemangmishra/Projects/Lumen/implementation/Goal_7_Plan.md)
 
-- [ ] **Goal 8: Stage 2 — Retrieval (HyDE + Hybrid Search)**
-  - Implement `lumen/pipeline/retrieval.py`.
-  - Pass A: Semantic search via Qdrant (HyDE expansion).
-  - Pass B: Structural retrieval via Kuzu (named persons, historical eras).
-  - Input: `ExtractionResult` → Output: `RetrievalResult` (candidate nodes per observation).
-  - *Test:* Seed Qdrant + Kuzu, run observation through Stage 2, verify semantic + structural matches.
+- [x] **Goal 8: Stage 2 — Retrieval (HyDE + Structural)** ✅
+  - Implemented `lumen/pipeline/retrieval/` as a package (`stage`, `hyde`, `semantic`,
+    `structural`, `hydrate`, `merge`, `contracts`, `prompts`). Input: `ExtractionResult` →
+    Output: **a list of** `RetrievalResult`, one per searchable node — the Master Plan's
+    singular signature was never possible.
+  - **Providers are injected, like the language models.** `retrieve()` takes `GraphProvider`,
+    `VectorProvider` and `EmbeddingProvider` as parameters. `Technical_HLD.md` §8 now says
+    the purity rule is about writes and hidden state, not about reading — as written it read
+    as though this stage could not exist.
+  - **Pass A:** one batched HyDE call writes a hypothetical historical record per extracted
+    node, one `embed_batch` turns them into vectors. A rich episode costs 2 calls, not 40.
+    Results are hydrated from the graph, filtered, ranked on closeness × signal weight, and
+    cut — with more fetched than kept, so a weighty node just below the cut on raw distance
+    can climb back above it.
+  - **Pass B:** three anchor lookups that read no text at all — by named person, by era tag,
+    and for weighty material whose episode is still awaiting reconciliation. That third one
+    is why this half exists: someone describing recovery uses none of the words they used
+    describing the injury, so no measure of distance will ever connect the two.
+  - **`search_failed` on the result.** A search that returns nothing and a search that could
+    not run look identical from outside, and Stage 3 answers both by writing a new node —
+    correct for the first, and for the second it records a long-standing pattern as a fresh
+    discovery, permanently and silently.
+  - *Amends Goal 1:* `hybrid_search` returns `ScoredHit` instead of bare ids — it was
+    discarding the similarity that `CandidateNode` requires. `GraphProvider` gains three
+    narrow anchor reads (no general query method: that would leak graph-shaped thinking into
+    the pipeline). **`lumen.graph` and `lumen.vector` now export only their Protocols** —
+    naming a Protocol was executing the package `__init__` and importing the vendor driver,
+    so the pipeline was transitively importing both databases to name two types.
+  - *Amends Goal 2:* `StructuralAnchorType.HIGH_SENSITIVITY_OPEN` — the retrieval spec has
+    described three anchors all along and the enum had two, which would have failed
+    `DecisionAuditNode`'s validator in Goal 9. Adds `RetrievalResult.search_failed` and four
+    `PipelineConfig` limits.
+  - *Docs amended ahead of coding:* `Architecture.md` (**the score formula split by layer** —
+    it listed four factors while `Schema.md` listed three and the Master Plan put two of them
+    in Goal 19; **Pass B's third anchor named a field that does not exist** on the node types
+    it names, now stated as the two-hop lookup through the episode; sparse search called out
+    as not enabled), `Schema.md`, `Technical_HLD.md` §8 and §5.
+  - **Tested against real embedded Kuzu and Qdrant**, seeded per test, since every question
+    this stage asks is a query and a stand-in would agree with whatever it was told.
+  - *Result:* 1395 tests passing (1253 from Goals 1–7 + 142 new), **100% coverage** on
+    `lumen/pipeline/`, `lumen/config.py`, `lumen/schemas/pipeline.py`.
+  - *Plan:* [`implementation/Goal_8_Plan.md`](file:///Users/hemangmishra/Projects/Lumen/implementation/Goal_8_Plan.md)
 
 - [ ] **Goal 9: Stage 3 — Reconciliation Logic**
   - Implement `lumen/pipeline/reconciliation.py`.

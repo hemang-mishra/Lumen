@@ -75,6 +75,17 @@ Stage 4: Graph Write
 
 - **Pass A — Semantic Retrieval:** Uses HyDE (Hypothetical Document Embedding) to generate a synthetic "ideal historical match" for embedding, then runs Hybrid Search (BM25 + cosine similarity) to retrieve the top 3–5 closest historical nodes. This handles most cases where the current and historical descriptions share semantic proximity.
 
+  > **Sparse search is not yet enabled.** The vector collection is created without a sparse
+  > vector configuration, so "hybrid" search is dense-only today and `hybrid_search` logs a
+  > warning if a sparse vector is passed to it. Retrieval quality is correspondingly weaker
+  > for rare proper nouns and exact phrases, which is what BM25 is good at. Stated here
+  > rather than left implicit, because "hybrid" otherwise reads as a capability that ships.
+
+  > **One HyDE call per episode, not per node.** The hypothetical match for every extracted
+  > node in an episode is generated in a single call and embedded in a single batch. A rich
+  > episode can produce twenty-plus nodes, and a call each would make this stage the most
+  > expensive thing in the pipeline by a wide margin.
+
   > **Embedding task type:** the synthetic match is embedded as a **document**
   > (`EmbeddingTaskType.DOCUMENT`), not a query. Turning the query into a document is precisely
   > what HyDE is for; labelling it `QUERY` would apply the query/document asymmetry correction
@@ -83,7 +94,12 @@ Stage 4: Graph Write
 - **Pass B — Structural Retrieval:** A deterministic, graph-keyed lookup that bypasses embedding entirely. It runs whenever any of the following anchors are present in the current episode:
   1. **Named persons** from the coreference map — retrieves all active `BeliefNode`, `PatternNode`, and `ObservationNode` instances linked to that `PersonEntityNode`.
   2. **`historical_era` tags** — retrieves all nodes tagged with that era (e.g., `a major entrance exam_PREP`).
-  3. **High-sensitivity open nodes** — retrieves any `INAUTHENTICITY_STATE`, `IDENTITY_FUSION_STATE`, `EXISTENTIAL_REFLECTION`, or `SUPPRESSED_EMOTION_SURFACING` nodes with `reconciliation_status: PENDING_RERECONCILIATION` linked to referenced entities.
+  3. **High-sensitivity open nodes** — retrieves any `INAUTHENTICITY_STATE`, `IDENTITY_FUSION_STATE`, `EXISTENTIAL_REFLECTION`, or `SUPPRESSED_EMOTION_SURFACING` observations **belonging to an episode whose `reconciliation_status` is `PENDING_RERECONCILIATION`**.
+
+     > These four are observation types, and `ObservationNode` has no `reconciliation_status` —
+     > only `EpisodeNode` does. An earlier version of this line asked for a field that does not
+     > exist on the nodes it names. The implementable reading is the one above: the observation
+     > is reached through the episode that contains it, a two-hop lookup along `contains_obs`.
 
   Pass B guarantees that emotionally significant history (heartbreak, identity-defining relationships, historical trauma) is always surfaced during Reconciliation even when embedding distance is high due to semantic drift — i.e., when the user is describing *resolution* using vocabulary entirely different from the original *wound*.
 
@@ -196,11 +212,24 @@ Not all observations carry equal retrieval weight. The pipeline applies a priori
 
 ### Final Score Formula
 
-At retrieval time (Stage 2 and query layer), the final similarity score for a candidate node is:
-
 ```
 final_score = cosine_similarity × signal_weight_multiplier × recency_weight × trust_weight
 ```
+
+**Not every layer applies every factor, and the split is deliberate.**
+
+| Factor | Applied by | Why there |
+|---|---|---|
+| `cosine_similarity` | Stage 2 and the query layer | Comes straight from the vector store. |
+| `signal_weight_multiplier` | Stage 2 and the query layer | Available on the node itself, and it decides which candidates Reconciliation ever sees. A `CRITICAL` node ranked just below the cut on raw distance has to be able to climb back above it. |
+| `recency_weight` | Query layer (temporal decay, Goal 19) | Needs aged data to be meaningful, and Stage 2's candidate set is small enough that decay would mostly reorder things Reconciliation will judge on content anyway. |
+| `trust_weight` | Query layer | Same. |
+
+**What is stored versus what is ranked on.** `CandidateNode.similarity_score` is bounded
+`0.0–1.0` and holds the **raw cosine**. The weighted score is a ranking step, not a
+recorded value — a `CRITICAL` node's weighted score reaches `2.0` and would not fit the
+field. Any layer that needs the weighted number recomputes it from the node's own signal
+strength.
 
 ### Trust Weight (Verification Status)
 

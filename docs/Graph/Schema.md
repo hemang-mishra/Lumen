@@ -370,7 +370,7 @@ hitl_resolution_user_choice: null        # "ACTION_A" | "ACTION_B" | "CREATE_NEW
 snooze_count: 0                          # number of times the user has snoozed this HITL item
 last_snoozed_at: null
 candidate_retrieval_source: SEMANTIC     # SEMANTIC | STRUCTURAL
-structural_anchor_type: null            # NAMED_PERSON | HISTORICAL_ERA — populated when candidate_retrieval_source == STRUCTURAL
+structural_anchor_type: null            # NAMED_PERSON | HISTORICAL_ERA | HIGH_SENSITIVITY_OPEN — populated when candidate_retrieval_source == STRUCTURAL
 structural_anchor_value: null           # the anchor value (person node ID or era tag string)
 co_created_origin: false                # true when the source node carried provenance: CO_CREATED and action == EVOLVE (Rule R6 ownership transfer)
 rollback_pointer:
@@ -584,7 +584,14 @@ Temporal decay applies to `PatternNode` and `BeliefNode` instances during retrie
 final_score = cosine_similarity(query_vector, node_vector)
             × signal_weight_multiplier
             × recency_weight(last_reinforced_at)
+            × trust_weight(verification_status)
 ```
+
+See [`Extraction/Architecture.md`](../Extraction/Architecture.md) for which layer applies
+which factor: Stage 2 ranks on cosine × signal only, and recency and trust arrive with the
+query layer. `CandidateNode.similarity_score` stores the **raw cosine** — the weighted
+score can reach `2.0` and the field is bounded at `1.0`, so weighting is a ranking step
+rather than something recorded.
 
 **Signal weight multipliers:**
 

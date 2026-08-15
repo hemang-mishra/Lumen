@@ -384,10 +384,12 @@ class ExtractionResult(BaseModel):
     read_failed: bool                 # the episode could not be read at all
 
 class RetrievalResult(BaseModel):
+    """One per searchable node — Stage 2 returns a list of these, not one."""
     source_node_id: str  # ObservationNode | EventNode | SessionNode
     pass_a_candidates: list[CandidateNode]  # semantic
     pass_b_candidates: list[CandidateNode]  # structural
     retrieval_time_ms: int
+    search_failed: bool  # could not search, as distinct from found nothing
 
 class ReconciliationResult(BaseModel):
     source_node_id: str  # ObservationNode | EventNode | SessionNode
@@ -516,6 +518,8 @@ No direct imports of `google.generativeai`, `openai`, `kuzu`, or `qdrant_client`
 
 ### Rule 2: Pipeline stages are pure functions
 Each stage function accepts a Pydantic input model and returns a Pydantic output model. No global state. No direct DB calls from within a stage — the stage returns its result and the orchestrator handles persistence. This means any stage is unit-testable with no infrastructure.
+
+**The rule is about writes and hidden state, not about reading.** Stage 2 (Candidate Retrieval) exists to query the graph and the vector store, and it does so through `GraphProvider`, `VectorProvider` and `EmbeddingProvider` handed in as parameters — exactly as Stages 0 and 1 take their language models. What the rule forbids is a stage reaching for a connection of its own, holding state between calls, or writing anything: persistence stays the orchestrator's, so replaying a stage can never change what is stored. A stage that reads through an injected Protocol is still swappable, still testable against a seeded store or a stand-in, and still has no idea which vendor is on the other side.
 
 ### Rule 3: Graph is append-only; queue is the write path
 No component writes directly to the graph from outside the Graph Service. All graph writes go through the Graph Service API (or its module equivalent in the personal version). This creates one place to audit all writes.

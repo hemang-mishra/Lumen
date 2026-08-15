@@ -436,12 +436,20 @@ class RetrievalResult(PipelineDTO):
         pass_b_candidates: Candidates found via structural (direct-link)
             search, e.g. by shared named person or historical era.
         retrieval_time_ms: How long retrieval took, in milliseconds.
+        search_failed: True when the search could not be carried out, as
+            opposed to being carried out and finding nothing. The two look
+            identical from outside — both leave an empty list — but they
+            mean opposite things. Finding nothing means the thought is
+            genuinely new and should become a new node. Failing to look
+            means nobody knows, and treating that as novelty would record
+            a long-standing pattern as a fresh discovery.
     """
 
     source_node_id: str = Field(min_length=1)
     pass_a_candidates: list[CandidateNode] = Field(default_factory=list)
     pass_b_candidates: list[CandidateNode] = Field(default_factory=list)
     retrieval_time_ms: int = Field(ge=0)
+    search_failed: bool = False
 
     @model_validator(mode="after")
     def _validate_candidate_cap(self) -> "RetrievalResult":

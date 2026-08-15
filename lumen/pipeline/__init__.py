@@ -10,5 +10,6 @@ any stage can be run on its own with nothing installed.
 
 from lumen.pipeline.extraction import extract
 from lumen.pipeline.preprocessing import preprocess
+from lumen.pipeline.retrieval import retrieve
 
-__all__ = ["preprocess", "extract"]
+__all__ = ["preprocess", "extract", "retrieve"]

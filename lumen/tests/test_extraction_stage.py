@@ -446,11 +446,61 @@ class TestWhatCouldNotBeRead:
 
 
 class TestNoInfrastructure:
-    def test_the_stage_reaches_for_no_database_or_store(self):
-        # A stage that could read the graph would be a way to smuggle
-        # history into a step whose whole value is not having any.
+    def test_no_stage_names_a_vendor(self):
+        # The rule is that business logic never knows which database is on
+        # the other side. Naming a Protocol is fine and is how the later
+        # stages read; naming an implementation is not.
         package = Path(__file__).resolve().parents[1] / "pipeline"
-        forbidden = ("lumen.operational", "lumen.graph", "lumen.vector")
+        vendors = ("kuzu_impl", "qdrant_impl", "import kuzu", "import qdrant")
+        offenders = [
+            (path.name, name)
+            for path in package.rglob("*.py")
+            for name in vendors
+            if name in path.read_text()
+        ]
+
+        assert offenders == []
+
+    def test_no_stage_reaches_for_the_operational_store(self):
+        # Settings read at runtime would be a way to change a stage's
+        # behaviour without changing its inputs, which is exactly what the
+        # pure-function rule exists to prevent.
+        package = Path(__file__).resolve().parents[1] / "pipeline"
+        offenders = [
+            path.name
+            for path in package.rglob("*.py")
+            if "lumen.operational" in path.read_text()
+        ]
+
+        assert offenders == []
+
+    def test_naming_a_protocol_does_not_drag_in_a_database(self):
+        # Retrieval names GraphProvider and VectorProvider. If those
+        # packages exported their implementations, naming the type would
+        # import the vendor's driver — and the pipeline would silently
+        # depend on both databases being installed to do anything at all.
+        import subprocess
+        import sys
+
+        probe = subprocess.run(
+            [
+                sys.executable,
+                "-c",
+                "import sys; import lumen.pipeline; "
+                "assert 'kuzu' not in sys.modules, 'kuzu was imported'; "
+                "assert 'qdrant_client' not in sys.modules, 'qdrant was imported'",
+            ],
+            capture_output=True,
+            text=True,
+        )
+
+        assert probe.returncode == 0, probe.stderr
+
+    def test_extraction_itself_still_touches_no_store_at_all(self):
+        # Retrieval reads the graph by design. Extraction must not: its
+        # entire value is being blind to what the person has said before.
+        package = Path(__file__).resolve().parents[1] / "pipeline" / "extraction"
+        forbidden = ("lumen.graph", "lumen.vector", "lumen.operational")
         offenders = [
             (path.name, name)
             for path in package.rglob("*.py")

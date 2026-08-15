@@ -142,6 +142,10 @@ class PipelineConfig:
       LUMEN_MAX_CAUSAL_CHAINS     — ceiling on cause-and-effect sequences per episode
       LUMEN_MAX_CAUSAL_STEPS      — ceiling on steps within one sequence
       LUMEN_MAX_EXTRACTION_ATTEMPTS — tries at reading one episode before giving up
+      LUMEN_PASS_A_KEEP           — how many search matches survive ranking
+      LUMEN_PASS_A_OVERFETCH      — how many are fetched before ranking
+      LUMEN_PASS_B_KEEP           — how many anchor matches survive per anchor
+      LUMEN_CANDIDATE_CAP         — most candidates handed to reconciliation
 
     The three ceilings are limits, not targets. They exist so that one runaway
     reply cannot turn a single paragraph into two hundred nodes; a normal
@@ -161,6 +165,15 @@ class PipelineConfig:
     max_causal_chains_per_episode: int = _env_int("LUMEN_MAX_CAUSAL_CHAINS", 5)
     max_causal_steps_per_chain: int = _env_int("LUMEN_MAX_CAUSAL_STEPS", 12)
     max_extraction_attempts: int = _env_int("LUMEN_MAX_EXTRACTION_ATTEMPTS", 3)
+
+    # More matches are fetched than are kept, because ranking happens after
+    # the search: a rare and weighty node can sit just below the cut on raw
+    # distance and belong above it once its weight is taken into account.
+    # Fetching only what is kept would throw it away before that.
+    pass_a_keep: int = _env_int("LUMEN_PASS_A_KEEP", 5)
+    pass_a_overfetch: int = _env_int("LUMEN_PASS_A_OVERFETCH", 20)
+    pass_b_keep: int = _env_int("LUMEN_PASS_B_KEEP", 5)
+    merged_candidate_cap: int = _env_int("LUMEN_CANDIDATE_CAP", 8)
 
 
 @dataclass(frozen=True)

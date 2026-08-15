@@ -605,6 +605,207 @@ def extraction_providers():
     return _build
 
 
+# ---------------------------------------------------------------------------
+# Retrieval fixtures
+# ---------------------------------------------------------------------------
+
+# Retrieval is tested against real embedded stores rather than stand-ins.
+# Every question it asks is a query against typed edge tables or a vector
+# index, and a stand-in answering from a dict would pass whether or not the
+# query was right — which is the only thing worth testing here. Both run
+# in-process, so nothing has to be installed or running.
+
+RETRIEVAL_PROMPT_KEYS = {"hyde": "ITEMS:"}
+
+
+@pytest.fixture
+def graph_store(tmp_path):
+    """A real, empty Kuzu database."""
+    from lumen.graph.kuzu_impl import KuzuGraphProvider
+
+    provider = KuzuGraphProvider(str(tmp_path / "retrieval_db"))
+    provider.init_schema()
+    yield provider
+    provider.close()
+
+
+@pytest.fixture
+def vector_store():
+    """A real, empty Qdrant collection held in memory."""
+    from lumen.vector.qdrant_impl import QdrantVectorProvider
+
+    provider = QdrantVectorProvider(location=":memory:", vector_size=768)
+    provider.init_collection()
+    yield provider
+    provider.close()
+
+
+@pytest.fixture
+def embedder():
+    """A stand-in embedder that gives the same text the same vector."""
+    from lumen.providers.fake import FakeEmbeddingProvider
+
+    return FakeEmbeddingProvider(dimensions=768)
+
+
+@pytest.fixture
+def seed_observation(graph_store, vector_store, embedder):
+    """
+    Put one historical observation into both stores.
+
+    Written to the graph and the vector index together, since that is how
+    the orchestrator will write it and retrieval needs both halves: the
+    index to find it, the graph to say what it is.
+    """
+
+    def _seed(
+        node_id: str,
+        content: str,
+        *,
+        observation_type: str = "PATTERN",
+        signal: str = "STANDARD",
+        status: str = "ACTIVE",
+        episode_id: str = "ep_old",
+        indexed: bool = True,
+        vector: list[float] | None = None,
+    ) -> str:
+        graph_store.write_node(
+            "ObservationNode",
+            {
+                "node_id": node_id,
+                "episode_id": episode_id,
+                "occurred_at": "2026-01-01T00:00:00Z",
+                "created_at": "2026-01-01T00:00:00Z",
+                "valid_from": "2026-01-01T00:00:00Z",
+                "type": observation_type,
+                "content": content,
+                "signal_strength": signal,
+                "provenance": "USER_GENERATED",
+                "verification_status": "IMPLICIT",
+                "extraction_confidence": "STANDARD",
+                "status": status,
+                "extraction_model": "fake",
+                "extraction_attempt": 1,
+            },
+        )
+        if indexed:
+            vector_store.upsert(
+                node_id,
+                vector if vector is not None else embedder.embed_text(content),
+                {"node_type": "ObservationNode", "status": status},
+            )
+        return node_id
+
+    return _seed
+
+
+@pytest.fixture
+def vector_at_angle():
+    """
+    Build a vector a chosen distance from the reference one.
+
+    The stand-in embedder turns text into a hash, so two sentences that
+    mean nearly the same thing land nowhere near each other. Tests about
+    ranking need distances they can choose, so they place vectors by angle
+    instead: the cosine similarity to `vector_at_angle(0)` is exactly the
+    cosine of the angle given.
+    """
+    import math
+
+    def _build(radians: float, dimensions: int = 768) -> list[float]:
+        return [math.cos(radians), math.sin(radians)] + [0.0] * (dimensions - 2)
+
+    return _build
+
+
+@pytest.fixture
+def make_extraction():
+    """Build an ExtractionResult out of plain text, for retrieval to work on."""
+
+    def _build(
+        *contents: str,
+        episode_id: str = "ep_new",
+        status: ObservationStatus = ObservationStatus.ACTIVE,
+        events: list[str] | None = None,
+        sessions: list[str] | None = None,
+        person_refs: list[str] | None = None,
+    ):
+        from lumen.schemas.nodes import EventNode, ObservationNode, SessionNode
+        from lumen.schemas.pipeline import ExtractionResult
+
+        moment = datetime(2026, 6, 11, 20, 0, tzinfo=UTC)
+        return ExtractionResult(
+            episode_id=episode_id,
+            observations=[
+                ObservationNode(
+                    node_id=f"obs_new_{index}",
+                    created_at=moment,
+                    valid_from=moment,
+                    episode_id=episode_id,
+                    occurred_at=moment,
+                    type=ObservationType.PATTERN,
+                    content=text,
+                    signal_strength=SignalStrength.STANDARD,
+                    provenance=Provenance.USER_GENERATED,
+                    status=status,
+                    extraction_model="fake",
+                    person_refs=person_refs or [],
+                )
+                for index, text in enumerate(contents, start=1)
+            ],
+            events=[
+                EventNode(
+                    node_id=f"evt_new_{index}",
+                    created_at=moment,
+                    valid_from=moment,
+                    episode_id=episode_id,
+                    occurred_at=moment,
+                    event_summary=text,
+                    signal_strength=SignalStrength.STANDARD,
+                )
+                for index, text in enumerate(events or [], start=1)
+            ],
+            sessions=[
+                SessionNode(
+                    node_id=f"sess_new_{index}",
+                    created_at=moment,
+                    valid_from=moment,
+                    episode_id=episode_id,
+                    occurred_at=moment,
+                    event_date=TODAY,
+                    session_label="A",
+                    session_summary=text,
+                    signal_strength=SignalStrength.STANDARD,
+                )
+                for index, text in enumerate(sessions or [], start=1)
+            ],
+            extraction_model="fake-thinker",
+            validation_passed=True,
+        )
+
+    return _build
+
+
+@pytest.fixture
+def hyde_provider():
+    """A stand-in model that echoes each finding back as its search text."""
+    from lumen.providers.fake import FakeLLMProvider
+
+    def _build(texts: list[str] | None = None, *, reply: str | None = None):
+        if reply is None:
+            reply = json.dumps(
+                {
+                    "hypotheticals": [
+                        {"index": index, "text": text}
+                        for index, text in enumerate(texts or [], start=1)
+                    ]
+                }
+            )
+        return FakeLLMProvider([reply], role=ModelRole.LIGHTWEIGHT, model="fake-light")
+
+    return _build
+
+
 @pytest.fixture
 def buffer_with_messages(ops_store):
     """A buffer holding three messages, ready for tests that need real data."""

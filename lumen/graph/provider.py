@@ -67,6 +67,59 @@ class GraphProvider(Protocol):
         """
         ...
 
+    # ------------------------------------------------------------------
+    # Anchor lookups
+    #
+    # Three narrow, named reads rather than one general query method. A
+    # general one would push query building out to callers and start
+    # letting graph-shaped thinking leak into business logic, which is the
+    # thing this Protocol exists to prevent. Each of these answers one
+    # question that candidate retrieval actually asks.
+    # ------------------------------------------------------------------
+
+    def find_linked_to_person(
+        self, canonical_name: str, *, node_types: list[str], limit: int = 10
+    ) -> list[dict[str, Any]]:
+        """
+        Find active nodes that mention a particular person.
+
+        Someone described across a year is described differently every
+        time, so their name is a far more reliable way back to what was
+        said about them than any measure of similarity.
+
+        Returns an empty list when nobody by that name is known.
+        """
+        ...
+
+    def find_by_era(
+        self, era_tag: str, *, node_types: list[str], limit: int = 10
+    ) -> list[dict[str, Any]]:
+        """
+        Find active nodes anchored to a named period of the person's past.
+
+        When someone says "back during exam prep", everything already filed
+        under that period is relevant regardless of what words they used
+        this time.
+        """
+        ...
+
+    def find_unresolved_high_signal(
+        self, observation_types: list[str], *, limit: int = 10
+    ) -> list[dict[str, Any]]:
+        """
+        Find weighty observations whose episode is still awaiting
+        reconciliation.
+
+        Reached through the episode rather than the observation, because it
+        is the episode that records whether reconciliation is outstanding.
+
+        This exists for the case similarity search handles worst: someone
+        describing recovery uses none of the words they used describing the
+        injury, so the two look unrelated by any measure of distance. This
+        lookup does not care what either one says.
+        """
+        ...
+
     def close(self) -> None:
         """Release database resources (file locks, connections)."""
         ...

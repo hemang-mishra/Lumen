@@ -10,9 +10,27 @@ See: docs/hld/Technical_HLD.md Section 2.3
 from __future__ import annotations
 
 import logging
-from typing import Any, Protocol
+from typing import Any, NamedTuple, Protocol
 
 logger = logging.getLogger(__name__)
+
+
+class ScoredHit(NamedTuple):
+    """
+    One search result: which node matched, and how closely.
+
+    The score travels with the id because it is most of what a caller
+    needs. Deciding whether a new observation is the same thing as an old
+    one, or merely adjacent to it, is a question about distance — an
+    ordered list of ids alone cannot answer it.
+
+    Attributes:
+        node_id: The matching node.
+        score: Cosine similarity, from 0.0 to 1.0. Higher is closer.
+    """
+
+    node_id: str
+    score: float
 
 
 class VectorProvider(Protocol):
@@ -40,10 +58,13 @@ class VectorProvider(Protocol):
         dense_vector: list[float],
         sparse_vector: dict[str, float] | None = None,
         limit: int = 10,
-    ) -> list[str]:
+    ) -> list[ScoredHit]:
         """
-        Perform a hybrid search (dense + sparse BM25) and return node IDs.
-        
+        Search for the closest stored vectors, best match first.
+
+        Returns each match with its similarity score. Callers rank and
+        filter on those scores, so an implementation must not discard them.
+
         If sparse_vector is None or not supported by the implementation,
         falls back to dense-only search with a logged warning.
         """
