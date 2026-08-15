@@ -42,7 +42,7 @@ from lumen.schemas.enums import (
     DecisionStatus,
     ReconciliationAction,
 )
-from lumen.schemas.ids import make_node_id
+from lumen.schemas.ids import make_scoped_node_id
 from lumen.schemas.nodes import ContradictionNode, DecisionAuditNode, RollbackPointer
 from lumen.schemas.pipeline import PlannedBookkeeping, PlannedEdge, PlannedNode
 
@@ -90,6 +90,10 @@ class PlanContext:
         anchor_node_id: What a change can be attributed to — something that
             happened, or the session the thinking happened in.
         anchor_node_type: Which of the two that is.
+        episode_index: Where this episode sits within its entry. Decisions
+            are numbered from one within an episode, and one day's writing
+            often holds several episodes, so without this the second
+            episode would mint note identifiers the first one already used.
     """
 
     at: datetime
@@ -98,6 +102,7 @@ class PlanContext:
     exists: Callable[[str], bool] = lambda _node_id: False
     anchor_node_id: str | None = None
     anchor_node_type: str | None = None
+    episode_index: int = 1
 
 
 # What one action's own records and links come to, before the decision note
@@ -120,7 +125,9 @@ def plan_for(
     was deliberately not done look identical in a graph, and only one of
     them is waiting on somebody.
     """
-    audit_id = make_node_id("d", context.event_date, sequence)
+    audit_id = make_scoped_node_id(
+        "d", context.event_date, context.episode_index, sequence
+    )
 
     writes = (
         _ActionWrites()

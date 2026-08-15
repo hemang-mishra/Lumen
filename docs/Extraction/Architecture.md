@@ -130,6 +130,34 @@ Stage 4: Graph Write
 
 **Stage 4 summary:** Executes the Reconciliation decisions as graph writes. Content nodes are append-only and immutable. Decision Audit Nodes are first-class, reversible graph nodes. See [`Reconciliation.md`](Reconciliation.md).
 
+Stage 4 also writes the half of the graph that Reconciliation never sees. Reconciliation
+is shown what was extracted, not the episode it came from, so the orchestrator creates the
+`EpisodeNode` and the structural skeleton around it — `contains_*` to every extracted
+child, `chain_contains` from a causal chain to its steps, `failed_extraction` to anything
+that could not be read, and `follows_from` to the previous episode of the same entry. That
+half is merged with the Reconciliation write plan into a single plan before anything is
+saved, so the plan's own consistency checks cover the whole episode rather than half of it.
+
+> **One episode is one unit of saving.** Every record, link and bookkeeping update an
+> episode produces commits in a single graph transaction; a failure partway through leaves
+> the graph exactly as it was. Episodes of the same entry are saved separately and fail
+> independently — one bad episode does not cost the others, and the entry's `follows_from`
+> chain is built against the last episode that actually committed, never one whose
+> transaction was rolled back.
+
+> **The search index is written after the graph commits, and cannot join it.** Every
+> record's vector is computed *before* the transaction opens, so an embedding failure costs
+> nothing and the episode is simply retried. Only the index write itself happens after the
+> commit; if it fails, the records are real and correct but unfindable, the job is marked
+> failed, and the write log names them so `repair_index()` can recover them without redoing
+> the entry. Which node types are indexed is the set the semantic retrieval pass reads —
+> asserted equal in code, because indexing a type nothing searches for is waste and failing
+> to index one it does search for is a hole that never announces itself.
+
+> **Re-running an entry skips episodes already in the graph — whole, not just their
+> writing.** Skipping only the save would run Reconciliation against a graph that already
+> contains its own previous output, which reads the entry as a repeat of itself.
+
 ---
 
 ## Async Batching & Write Safety

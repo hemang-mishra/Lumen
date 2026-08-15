@@ -71,6 +71,17 @@ raw_text_hash: "sha256:a3f..."           # hash of cleaned episode text for dedu
 
 **Composite key:** `(event_date, session_label)` uniquely identifies the originating session. A single calendar day can have sessions `"A"`, `"B"`, etc. Episodes from the same session share the same `(event_date, session_label)` and are linked via `follows_from` edges to preserve intra-session narrative flow.
 
+**Who creates it:** the orchestrator, at write time. No stage does — Stage 0 produces the
+cleaned episode, and Stage 1 through Stage 3 are shown what was extracted from it rather
+than the episode itself. The orchestrator is the only component holding the episode, the
+entry it belongs to, and the outcome of reconciling it at the same moment.
+
+**`coreference_map_id` resolves to the operational store**, not to a node in this graph.
+There is no coreference-map table here and there should not be: who the pronouns referred
+to is a working note about how the text was read, not something the person believes or
+experienced. The id is derived from the entry (`coref_<entry_id>`) rather than generated,
+so re-processing an entry points at the map it already has instead of orphaning it.
+
 ---
 
 ### 2. ObservationNode

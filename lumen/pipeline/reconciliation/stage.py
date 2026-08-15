@@ -116,6 +116,7 @@ def reconcile(
         history=history,
         graph=graph,
         at=at,
+        episode_index=episode.episode.episode_index if episode else 1,
         model_used=model_used,
         decision_failed=response is None,
     )
@@ -382,6 +383,7 @@ def _assemble(
     history: dict[str, HistoricalNode],
     graph: GraphProvider,
     at: datetime,
+    episode_index: int,
     model_used: str,
     decision_failed: bool,
 ) -> ReconciliationOutcome:
@@ -400,6 +402,7 @@ def _assemble(
         exists=_existence_check(graph),
         anchor_node_id=_anchor_id(extraction),
         anchor_node_type=_anchor_type(extraction),
+        episode_index=episode_index,
     )
 
     results: list[ReconciliationResult] = []

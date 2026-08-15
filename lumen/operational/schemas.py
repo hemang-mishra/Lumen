@@ -92,6 +92,9 @@ class StageRunRecord(OperationalRecord):
     id: int | None = None
     job_id: str = Field(min_length=1)
     trace_id: str = Field(min_length=1)
+    # Empty for the stages that run once for a whole entry rather than once
+    # per episode.
+    episode_id: str = ""
     stage: PipelineStage
     attempt: int = Field(default=1, ge=1)
     status: StageStatus = StageStatus.PENDING
@@ -136,6 +139,7 @@ class WriteLogEntry(OperationalRecord):
     id: int | None = None
     job_id: str = Field(min_length=1)
     trace_id: str = Field(min_length=1)
+    episode_id: str = ""
     stage: PipelineStage
     target: WriteTarget
     node_id: str | None = None
@@ -236,6 +240,25 @@ class StoredErasureAudit(OperationalRecord):
     status: ErasureStatus
 
 
+class CoreferenceRecord(OperationalRecord):
+    """
+    Who the pronouns in one entry referred to, as stored.
+
+    Every episode in the graph points here by id. Keeping the resolutions
+    means a later question like "why was this filed under Alex?" has an
+    answer instead of a guess.
+    """
+
+    id: str = Field(min_length=1)
+    session_id: str = Field(min_length=1)
+    entry_id: str = Field(min_length=1)
+    job_id: str | None = None
+    trace_id: str | None = None
+    resolved_entities: list[dict] = Field(default_factory=list)
+    ambiguous_refs: list[dict] = Field(default_factory=list)
+    created_at: datetime | None = None
+
+
 class PipelineTrace(OperationalRecord):
     """
     Everything that happened during one run, assembled in one place.
@@ -261,5 +284,6 @@ __all__ = [
     "UserSettingRecord",
     "ErasureAuditRecord",
     "StoredErasureAudit",
+    "CoreferenceRecord",
     "PipelineTrace",
 ]

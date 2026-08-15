@@ -9,6 +9,7 @@ See: docs/hld/Technical_HLD.md Section 2.2
 
 from __future__ import annotations
 
+from contextlib import AbstractContextManager
 from datetime import datetime
 from typing import TYPE_CHECKING, Any, Protocol
 
@@ -27,6 +28,21 @@ class GraphProvider(Protocol):
 
         Must be idempotent — calling twice on an already-initialized
         database must not raise.
+        """
+        ...
+
+    def transaction(self) -> AbstractContextManager[None]:
+        """
+        Group several writes so that they all land or none of them do.
+
+        Saving one journal entry means writing many nodes and links that
+        only make sense together. Without this, a failure partway through
+        leaves an entry that looks complete to anything reading the graph
+        but is missing half of what it said.
+
+        Not reusable inside itself. Nesting one of these inside another
+        would quietly widen the group of writes being protected to
+        something the caller never chose, so a nested call raises instead.
         """
         ...
 

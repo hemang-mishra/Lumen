@@ -13,6 +13,8 @@ from __future__ import annotations
 
 import json
 import logging
+from collections.abc import Iterator
+from contextlib import contextmanager
 from datetime import datetime
 from typing import Any
 
@@ -385,6 +387,7 @@ class KuzuGraphProvider(GraphProvider):
         self.db_path = db_path
         self.db = kuzu.Database(db_path)
         self.conn = kuzu.Connection(self.db)
+        self._in_transaction = False
         logger.info("KuzuGraphProvider initialized at %s", db_path)
 
     def __enter__(self) -> KuzuGraphProvider:
@@ -453,6 +456,59 @@ class KuzuGraphProvider(GraphProvider):
     # ------------------------------------------------------------------
     # Write Operations
     # ------------------------------------------------------------------
+
+    @contextmanager
+    def transaction(self) -> Iterator[None]:
+        """
+        Run a group of writes so that they all land or none of them do.
+
+        Anything raised inside the block undoes every write made in it and
+        is then passed on to the caller, so a failure never leaves a
+        half-written entry behind.
+
+        Nesting is rejected rather than quietly flattened. A caller who
+        opens a second one of these is asking for a smaller group of writes
+        to be protected on its own, and the database cannot give them that
+        — silently handing back a wider group would be the wrong answer to
+        a question they were entitled to ask.
+        """
+        if self._in_transaction:
+            raise RuntimeError(
+                "a graph transaction is already open; nested transactions "
+                "are not supported"
+            )
+
+        self.conn.execute("BEGIN TRANSACTION")
+        self._in_transaction = True
+        try:
+            yield
+        except BaseException:
+            self._rollback()
+            logger.warning("graph transaction rolled back")
+            raise
+        self.conn.execute("COMMIT")
+        self._in_transaction = False
+        logger.debug("graph transaction committed")
+
+    def _rollback(self) -> None:
+        """
+        Undo everything in the open transaction, however it ended.
+
+        A statement that fails is enough for Kuzu to abandon the transaction
+        on its own, and asking it to roll back after that is an error. The
+        writes are already gone at that point, which is the outcome wanted,
+        so it is treated as done rather than as a new problem — raising here
+        would replace whatever actually went wrong with a complaint about
+        the cleanup.
+        """
+        try:
+            self.conn.execute("ROLLBACK")
+        except RuntimeError as exc:
+            if "no active transaction" not in str(exc).lower():
+                raise
+            logger.debug("transaction had already been abandoned by the database")
+        finally:
+            self._in_transaction = False
 
     def write_node(self, node_type: str, properties: GraphNode | dict[str, Any]) -> str:
         """

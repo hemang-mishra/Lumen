@@ -426,6 +426,25 @@ nodes this same run extracted, which the orchestrator writes immediately before 
 plan runs). A dangling reference fails while planning rather than halfway through
 saving.
 
+**The orchestrator adds the structural half.** Stage 3 is shown what was extracted, not
+the episode it came from, so it cannot create the `EpisodeNode` or link anything to it.
+The orchestrator builds that half — the episode record, `contains_*`, `chain_contains`,
+`failed_extraction`, `follows_from` — and merges it with Stage 3's plan into one
+`GraphWritePlan`, so the plan's own checks cover the whole episode. It returns a
+`RunReport` carrying one `EpisodeOutcome` per episode.
+
+```python
+def run_pipeline(
+    event: SessionDecayEvent, *, graph: GraphProvider, vectors: VectorProvider,
+    embedder: EmbeddingProvider, lightweight: LLMProvider, thinking: LLMProvider,
+    ops: OperationalStore, config: AppConfig | None = None,
+) -> RunReport: ...
+```
+
+It is a plain synchronous function today, not a queued task. The RQ/Redis topology below
+is Goal 20's, along with the watcher that starts a run when a session goes idle — the
+personal build has no long-running process to host either yet.
+
 Each worker accepts an input model and emits an output model. The orchestrator is the only component that chains them. This means any stage can be tested in complete isolation by constructing its input model and asserting its output model — no real DB, no real LLM required.
 
 ---
@@ -644,6 +663,20 @@ Any failed or incorrect pipeline stage can be re-queued with the original input.
 - `rerun_from_stage(session_id, stage)` — re-process from a given stage forward
 - `rerun_session(session_id)` — full re-processing with the current model configuration
 - Invalidate + re-run reconciliation for specific nodes (without touching extraction)
+
+**What is implemented today is the second one, and it is safe to repeat.** Calling
+`run_pipeline` again on a session skips any episode whose record is already in the graph —
+the whole episode, including reading and deciding it, not merely its saving. Skipping only
+the saving would run Reconciliation against a graph that already holds its own previous
+output and record the entry as a repeat of itself.
+
+`rerun_from_stage` is not built yet. Every stage's input and output payload is already
+recorded on `pipeline_stage_runs`, so it is a small addition when a caller needs it.
+
+**Repairing an index gap.** The graph and the vector store cannot share a transaction, so
+a record can commit to the graph and fail to reach the index. `repair_index(trace_id, …)`
+recovers exactly those: `pipeline_write_log` records node writes and vector writes
+separately, and the difference between the two lists is the repair set.
 
 ---
 

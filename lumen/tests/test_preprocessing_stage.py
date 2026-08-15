@@ -474,16 +474,23 @@ class TestDegradedRuns:
 
 
 class TestNoDatabaseDependency:
-    def test_the_pipeline_package_never_reaches_for_the_operational_store(self):
+    def test_no_stage_reaches_for_the_operational_store(self):
         # A stage that could read settings from the database would be a way
         # to change its behaviour at runtime, which is exactly what the pure
         # function rule exists to prevent.
+        #
+        # The orchestrator is left out on purpose, and it is the only thing
+        # left out: recording what a run did is its entire job. Checking the
+        # stages one by one rather than the whole package keeps the rule
+        # exactly as strict where it applies.
         from pathlib import Path
 
-        package = Path(__file__).resolve().parents[1] / "pipeline"
+        pipeline = Path(__file__).resolve().parents[1] / "pipeline"
+        stages = ("preprocessing", "extraction", "retrieval", "reconciliation")
         offenders = [
-            path.name
-            for path in package.rglob("*.py")
+            f"{stage}/{path.name}"
+            for stage in stages
+            for path in (pipeline / stage).rglob("*.py")
             if "lumen.operational" in path.read_text()
         ]
         assert offenders == []

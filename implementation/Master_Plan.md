@@ -349,10 +349,64 @@ This document outlines the systematic, stage-by-stage implementation plan for th
 ## Phase 3: Graph Construction & E2E Testing (Goals 10-12)
 **Objective:** Tie the extraction pipeline to the databases, execute full runs, and manually inspect the graph.
 
-- [ ] **Goal 10: End-to-End Extraction Pipeline Harness**
-  - Implement `lumen/pipeline/orchestrator.py` — chains Stage 0 → 1 → 2 → 3 → Graph Write → Vector Write.
-  - Graph writes go through `GraphProvider` (HLD Rule 3: one write path).
-  - *Test:* Run full pipeline on a single text file, verify Kuzu nodes + Qdrant vectors written.
+- [x] **Goal 10: End-to-End Extraction Pipeline Harness** ✅
+  - Implemented `lumen/pipeline/orchestration/` as a package (`runner`, `episode`,
+    `compose`, `embed`, `commit`, `contracts`, `bookkeeping`) rather than the single
+    `orchestrator.py` named above — same call as Goals 5–9. `run_pipeline()` and
+    `repair_index()` are the only public names.
+  - Input: `SessionDecayEvent` → Output: **`RunReport`**, carrying one `EpisodeOutcome`
+    per episode. Every store and model is injected, so the signature is a complete
+    statement of what a run can touch.
+  - **A plain synchronous function, not a queued task** (per explicit user decision).
+    Redis/RQ and the idle-conversation watcher move to Goal 20, where a long-running
+    process exists to host them; Goals 11–12 want ordered runs anyway.
+  - **An episode saves whole or not at all** (per explicit user decision). Added
+    `GraphProvider.transaction()` — the database always supported it and we had never
+    exposed it. Nesting is refused rather than silently flattened.
+  - **Episodes fail independently** (per explicit user decision). One bad topic does not
+    cost the other three; the `follows_from` chain is built against the last episode that
+    actually committed, never one whose transaction was rolled back.
+  - **The orchestrator writes the half Stage 3 never sees:** the `EpisodeNode` — which
+    nothing had ever created despite every stage naming it — plus `contains_*`,
+    `chain_contains`, `failed_extraction` and `follows_from`. Merged with Stage 3's plan
+    into one `GraphWritePlan`, so its three validators cover the whole episode.
+  - **Vectors are computed before the transaction opens** (per explicit user decision), so
+    an embedding failure costs nothing. Only the index write happens after the commit; if
+    it fails the records are kept, the run reports failure, and `repair_index()` recovers
+    them from the write log — node writes and vector writes are logged separately, so the
+    difference between the two lists *is* the repair set. `INDEXED_NODE_TYPES` **is**
+    retrieval's `CONTENT_TABLES`, asserted identical, so the two cannot drift.
+  - **Re-running skips whole episodes, not just their saving** (per explicit user
+    decision). Skipping only the write would re-decide an entry against a graph holding
+    its own previous conclusions and record it as a repeat of itself.
+  - **Undecided items reach the review queue now** (per explicit user decision), keyed on
+    the audit node so a re-run never asks twice. Cap/snooze/auto-resolve stay Goal 18's;
+    extraction failures still cannot be queued (`hitl_queue.audit_node_id` is `NOT NULL`
+    and they have no audit node).
+  - **The coreference map finally has a home** (per explicit user decision): a
+    `coreference_maps` table in the operational DB, id derived as `coref_<entry_id>`.
+    `EpisodeNode.coreference_map_id` had always pointed at something nothing stored.
+  - *Amends Goal 9:* audit ids are now episode-scoped (`d_2026_06_11_01_001`) — two
+    episodes of one day both numbered their notes from one and collided on a duplicate
+    key, a bug only reachable once something ran two episodes in a row. *Amends Goal 5:*
+    `PreprocessingResult.detected_languages` — `EpisodeNode.language_tags` had no producer,
+    so a Hindi entry would be stored as English with nothing saying it was translated.
+    *Amends Goal 1:* Kuzu rollback tolerates the database having already abandoned the
+    transaction, which was replacing every real failure with a complaint about cleanup.
+    *Amends Goal 3:* `episode_id` on `pipeline_stage_runs` and `pipeline_write_log`,
+    uniqueness moved to `(job, stage, episode, attempt)`, migration `0002_orchestration`.
+    `PipelineStage` moved to `schemas/enums.py` — the same move Goal 9 made for
+    `HitlEntryType`.
+  - *Narrowed, not deleted:* Goals 5 and 6 asserted that nothing in `lumen/pipeline/`
+    imports `lumen.operational`. That rule protects stage purity, and persistence is the
+    orchestrator's entire job; both guards now name the four stage packages individually.
+  - *Test:* A real journal entry read from a file produces episode/observation/event/
+    session/pattern/person/audit records in a real Kuzu database and matching vectors in a
+    real Qdrant collection — verified by reading both stores back, not by trusting the
+    report.
+  - *Result:* 1799 tests passing (1649 from Goals 1–9 + 150 new), **100% coverage** on
+    `lumen/pipeline/orchestration/` and `lumen/operational/`, 98% on `lumen/graph/`.
+  - *Plan:* [`implementation/Goal_10_Plan.md`](file:///Users/hemangmishra/Projects/Lumen/implementation/Goal_10_Plan.md)
 
 - [ ] **Goal 11: Graph Read/Debug APIs**
   - Implement graph traversal queries in `lumen/graph/kuzu_impl.py` (multi-hop, time-range, domain filter).
