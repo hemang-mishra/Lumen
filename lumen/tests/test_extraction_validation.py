@@ -28,10 +28,12 @@ from lumen.pipeline.extraction.contracts import (
     ExtractedObservation,
     RawCaptureResponse,
     ReflectionExtractionResponse,
+    RejectedItem,
 )
 from lumen.pipeline.extraction.validation import (
     build_context,
     flatten,
+    validate_corrections,
     validate_raw_capture,
     validate_reflection,
 )
@@ -666,6 +668,210 @@ class TestTheThinPath:
 
         assert [item.type for item in report.observations] == [ObservationType.CONTEXT]
         assert rules_fired(report) == [DropRule.TYPE_NOT_ALLOWED_HERE]
+
+
+class TestWhatIsKeptForAskingAgain:
+    def test_a_lost_item_is_kept_whole(self):
+        # Something has to be able to show the model what it got wrong.
+        report = validate_reflection(
+            reply(observation(type="VIBES", content="the comparing hurts")),
+            context_for(),
+        )
+
+        assert len(report.rejected) == 1
+        assert report.rejected[0].payload.content == "the comparing hurts"
+        assert report.rejected[0].attempts == 1
+
+    def test_the_note_beside_it_holds_none_of_the_words(self):
+        # The two records describe the same event and only one of them is
+        # ever written to a log.
+        report = validate_reflection(
+            reply(observation(type="VIBES", content="a very private sentence")),
+            context_for(),
+        )
+
+        assert "private" not in report.drops[0].detail
+        assert "private" not in report.drops[0].item_kind
+
+    def test_an_item_that_only_lost_a_name_is_not_rejected(self):
+        report = validate_reflection(
+            reply(observation(person_ref="Priya")), context_for()
+        )
+
+        assert len(report.observations) == 1
+        assert report.rejected == ()
+        assert len(report.drops) == 1
+
+    def test_trimming_a_list_rejects_nothing(self):
+        limits = PipelineConfig(max_observations_per_episode=1)
+
+        report = validate_reflection(
+            reply(observation(), observation()), context_for(limits=limits)
+        )
+
+        assert report.rejected == ()
+
+    def test_the_kind_of_each_lost_item_is_recorded(self):
+        report = validate_reflection(
+            reply(
+                observation(type="VIBES"),
+                events=[ExtractedEvent(event_summary="went out", signal_strength="HUGE")],
+                chains=[chain(("TRIGGER", "a"))],
+            ),
+            context_for(),
+        )
+
+        assert {item.item_kind for item in report.rejected} == {
+            "observation",
+            "event",
+            "chain",
+        }
+
+    def test_nothing_is_kept_from_a_thin_entry(self):
+        # Nothing here is ever asked about again, so nothing needs keeping.
+        report = validate_raw_capture(
+            RawCaptureResponse(context="a cafe", emotion="tired", emotion_quote="nope"),
+            context_for(raw_capture=True),
+        )
+
+        assert report.rejected == ()
+        assert len(report.drops) == 1
+
+
+class TestJudgingCorrections:
+    def outstanding(self, *rules_and_items):
+        return tuple(
+            RejectedItem(item_kind=kind, index=index, rule=rule, payload=payload)
+            for index, (kind, rule, payload) in enumerate(rules_and_items)
+        )
+
+    def test_a_corrected_item_is_accepted(self):
+        outstanding = self.outstanding(
+            ("observation", DropRule.UNKNOWN_TYPE, ExtractedObservation(type="VIBES", content="x"))
+        )
+
+        report = validate_corrections(
+            reply(observation(type="PATTERN", content="a real pattern")),
+            context_for(),
+            outstanding=outstanding,
+        )
+
+        assert len(report.observations) == 1
+        assert report.rejected == ()
+
+    def test_it_is_held_to_exactly_the_same_rules(self):
+        # There is no gentler second pass. A rule that can be worn down by
+        # being asked twice is not a rule.
+        outstanding = self.outstanding(
+            ("observation", DropRule.UNKNOWN_TYPE, ExtractedObservation(type="VIBES", content="x"))
+        )
+
+        report = validate_corrections(
+            reply(observation(type="METACOGNITIVE_INTERRUPT", extraction_signal_strength="STANDARD")),
+            context_for(),
+            outstanding=outstanding,
+        )
+
+        assert report.observations == ()
+        assert report.rejected[0].last_rule is DropRule.SIGNAL_FLOOR
+
+    def test_the_original_problem_is_never_overwritten(self):
+        outstanding = self.outstanding(
+            ("observation", DropRule.UNKNOWN_TYPE, ExtractedObservation(type="VIBES", content="x"))
+        )
+
+        report = validate_corrections(
+            reply(observation(type="METACOGNITIVE_INTERRUPT", extraction_signal_strength="STANDARD")),
+            context_for(),
+            outstanding=outstanding,
+        )
+
+        assert report.rejected[0].rule is DropRule.UNKNOWN_TYPE
+        assert report.rejected[0].attempts == 2
+
+    def test_an_item_left_out_of_the_answer_stays_outstanding(self):
+        # Leaving it out is an answer the correction explicitly permits.
+        outstanding = self.outstanding(
+            ("observation", DropRule.UNKNOWN_TYPE, ExtractedObservation(type="VIBES", content="x"))
+        )
+
+        report = validate_corrections(reply(), context_for(), outstanding=outstanding)
+
+        assert report.observations == ()
+        assert report.rejected[0].last_rule is DropRule.NOT_CORRECTED
+
+    def test_corrections_are_matched_by_their_order(self):
+        outstanding = self.outstanding(
+            ("observation", DropRule.UNKNOWN_TYPE, ExtractedObservation(type="A", content="first")),
+            ("observation", DropRule.UNKNOWN_TYPE, ExtractedObservation(type="B", content="second")),
+        )
+
+        report = validate_corrections(
+            reply(
+                observation(type="PATTERN", content="fixed first"),
+                observation(type="VIBES", content="still broken"),
+            ),
+            context_for(),
+            outstanding=outstanding,
+        )
+
+        assert [item.content for item in report.observations] == ["fixed first"]
+        assert report.rejected[0].payload.content == "second"
+
+    def test_extra_items_in_an_answer_are_ignored(self):
+        # The correction asked for one thing. Anything beyond that was not
+        # asked for and has nothing to be matched against.
+        outstanding = self.outstanding(
+            ("observation", DropRule.UNKNOWN_TYPE, ExtractedObservation(type="VIBES", content="x"))
+        )
+
+        report = validate_corrections(
+            reply(
+                observation(type="PATTERN", content="the one asked for"),
+                observation(type="BELIEF", content="an extra one"),
+            ),
+            context_for(),
+            outstanding=outstanding,
+        )
+
+        assert len(report.observations) == 1
+
+    def test_each_kind_is_matched_within_its_own_group(self):
+        outstanding = self.outstanding(
+            ("observation", DropRule.UNKNOWN_TYPE, ExtractedObservation(type="VIBES", content="x")),
+            ("event", DropRule.EMPTY_CONTENT, ExtractedEvent(event_summary="")),
+        )
+
+        report = validate_corrections(
+            ReflectionExtractionResponse(
+                observations=[observation(type="PATTERN", content="fixed")],
+                events=[ExtractedEvent(event_summary="Ate at the cafe")],
+            ),
+            context_for(),
+            outstanding=outstanding,
+        )
+
+        assert len(report.observations) == 1
+        assert len(report.events) == 1
+        assert report.rejected == ()
+
+    def test_a_corrected_sequence_is_rebuilt(self):
+        outstanding = self.outstanding(
+            (
+                "chain",
+                DropRule.UNKNOWN_STEP_TYPE,
+                ExtractedCausalChain(chain_summary="a to b"),
+            )
+        )
+
+        report = validate_corrections(
+            reply(chains=[chain(("TRIGGER", "saw the post"), ("OUTCOME", "let it go"))]),
+            context_for(),
+            outstanding=outstanding,
+        )
+
+        assert len(report.chains) == 1
+        assert len(report.chains[0].steps) == 2
 
 
 class TestTextFlattening:

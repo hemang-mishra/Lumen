@@ -40,6 +40,7 @@ from lumen.pipeline.extraction.contracts import (
     ExtractedObservation,
     RawCaptureResponse,
     ReflectionExtractionResponse,
+    RejectedItem,
 )
 from lumen.schemas.enums import (
     HIGH_SIGNAL_REQUIRED_TYPES,
@@ -122,6 +123,10 @@ class ValidationReport:
         chains: Sequences whose steps all passed.
         drops: One note per item thrown away, or per part removed from an
             item that was otherwise kept.
+        rejected: The items behind those notes, kept whole so they can be
+            asked about again. Only items that were lost entirely appear
+            here — an item that merely had a bad name stripped off it was
+            not rejected.
         ungrounded: How many kept items quoted evidence that could not be
             found in the entry.
     """
@@ -130,6 +135,7 @@ class ValidationReport:
     events: tuple[CleanEvent, ...] = ()
     chains: tuple[CleanChain, ...] = ()
     drops: tuple[DropRecord, ...] = ()
+    rejected: tuple[RejectedItem, ...] = ()
     ungrounded: int = 0
 
 
@@ -160,20 +166,50 @@ class ValidationContext:
 @dataclass
 class _Collector:
     """
-    Gathers drop notes while a reply is worked through.
+    Gathers what did not survive while a reply is worked through.
 
     Exists so the rules can stay simple functions that return an item or
     nothing: the bookkeeping of what was lost lives here instead of being
     threaded through every return value.
+
+    Two records come out of it, and the difference between them is the
+    point. A note says which rule was broken and where, carries none of
+    the person's words, and is what gets logged. A rejection carries the
+    whole item and never leaves memory, because something has to be able
+    to ask the model about it again. Serving both purposes with one
+    structure would work right up until somebody logged it.
     """
 
     drops: list[DropRecord] = field(default_factory=list)
+    rejected: list[RejectedItem] = field(default_factory=list)
     ungrounded: int = 0
 
     def drop(self, kind: str, index: int, rule: DropRule, detail: str = "") -> None:
-        """Record that an item, or part of one, did not survive."""
+        """
+        Note that something did not survive.
+
+        Used on its own where nothing whole was lost — a made-up name
+        stripped from an otherwise good finding, or a list trimmed to its
+        ceiling. There is no item to ask about again in either case.
+        """
         self.drops.append(
             DropRecord(item_kind=kind, index=index, rule=rule, detail=detail)
+        )
+
+    def reject(
+        self,
+        kind: str,
+        index: int,
+        rule: DropRule,
+        item: ExtractedObservation | ExtractedEvent | ExtractedCausalChain,
+        detail: str = "",
+    ) -> None:
+        """Note that a whole item was lost, and keep it so it can be re-asked."""
+        self.drop(kind, index, rule, detail)
+        self.rejected.append(
+            RejectedItem(
+                item_kind=kind, index=index, rule=rule, detail=detail, payload=item
+            )
         )
 
 
@@ -266,6 +302,7 @@ def validate_reflection(
         events=events,
         chains=chains,
         drops=tuple(collector.drops),
+        rejected=tuple(collector.rejected),
         ungrounded=collector.ungrounded,
     )
 
@@ -281,6 +318,12 @@ def validate_raw_capture(
     be found in the entry. A feeling nobody put into words is one the model
     worked out for itself, which is the single thing this path exists to
     prevent.
+
+    Nothing rejected here is ever asked about again, so nothing is kept for
+    a second attempt. Asking again is a request for output, and on this
+    path the only thing missing is words the person did not say — the
+    correction would be an instruction to invent them, and the invented
+    version would pass.
     """
     collector = _Collector()
     kept: list[CleanObservation] = []
@@ -352,6 +395,84 @@ def _plain_finding(
     )
 
 
+def validate_corrections(
+    response: ReflectionExtractionResponse,
+    context: ValidationContext,
+    *,
+    outstanding: tuple[RejectedItem, ...],
+) -> ValidationReport:
+    """
+    Judge a set of corrected items against the same rules as the first
+    reading.
+
+    There is no gentler second pass. A rule that can be worn down by being
+    asked twice is not a rule, and the whole point of correcting an item is
+    to get one that would have been accepted the first time.
+
+    Corrections are matched to the items they answer by their order within
+    each kind, since that is the order they were listed in when they were
+    asked about. A model that returns fewer items than it was asked about
+    has declined some of them — an answer it was explicitly offered, and a
+    more honest one than a guess.
+    """
+    collector = _Collector()
+    kept: dict[str, list] = {"observation": [], "event": [], "chain": []}
+    returned = {
+        "observation": list(response.observations),
+        "event": list(response.events),
+        "chain": list(response.causal_mechanisms),
+    }
+    still_rejected: list[RejectedItem] = []
+
+    for kind in kept:
+        answers = returned[kind]
+        for position, rejection in enumerate(
+            [item for item in outstanding if item.item_kind == kind]
+        ):
+            if position >= len(answers):
+                still_rejected.append(rejection.again(rule=DropRule.NOT_CORRECTED))
+                continue
+            clean, refusal = _recheck(answers[position], rejection, context, collector)
+            if clean is not None:
+                kept[kind].append(clean)
+            else:
+                still_rejected.append(rejection.again(rule=refusal.rule))
+
+    return ValidationReport(
+        observations=tuple(kept["observation"]),
+        events=tuple(kept["event"]),
+        chains=tuple(kept["chain"]),
+        drops=tuple(collector.drops),
+        rejected=tuple(still_rejected),
+        ungrounded=collector.ungrounded,
+    )
+
+
+def _recheck(
+    item: ExtractedObservation | ExtractedEvent | ExtractedCausalChain,
+    rejection: RejectedItem,
+    context: ValidationContext,
+    collector: _Collector,
+) -> tuple[CleanObservation | CleanEvent | CleanChain | None, DropRecord | None]:
+    """
+    Run one corrected item through its ordinary checker.
+
+    Hands back which rule refused it, if any, so the next correction can
+    name what is wrong with the item as it now stands rather than repeating
+    a complaint about the version that has since been replaced.
+    """
+    checkers = {
+        "observation": _check_observation,
+        "event": _check_event,
+        "chain": _check_chain,
+    }
+    before = len(collector.drops)
+    clean = checkers[rejection.item_kind](item, rejection.index, context, collector)
+    if clean is not None:
+        return clean, None
+    return None, collector.drops[before]
+
+
 # ---------------------------------------------------------------------------
 # One rule at a time
 # ---------------------------------------------------------------------------
@@ -366,15 +487,15 @@ def _check_observation(
     """Judge one finding, returning it cleaned up or nothing at all."""
     content = raw.content.strip()
     if not content:
-        collector.drop("observation", index, DropRule.EMPTY_CONTENT)
+        collector.reject("observation", index, DropRule.EMPTY_CONTENT, raw)
         return None
 
     kind = _as_member(ObservationType, raw.type)
     if kind is None:
-        collector.drop("observation", index, DropRule.UNKNOWN_TYPE, raw.type[:40])
+        collector.reject("observation", index, DropRule.UNKNOWN_TYPE, raw, raw.type[:40])
         return None
     if kind in EXCLUDED_TYPES:
-        collector.drop("observation", index, DropRule.EXCLUDED_TYPE, kind.value)
+        collector.reject("observation", index, DropRule.EXCLUDED_TYPE, raw, kind.value)
         return None
     # A second line of defence rather than an expected outcome. A thin entry
     # is normally read by a prompt that cannot return a deeper category at
@@ -382,17 +503,18 @@ def _check_observation(
     # over a thin entry — the one mistake that would let a shrug become a
     # diagnosis in someone's permanent history.
     if kind not in context.permitted:
-        collector.drop("observation", index, DropRule.TYPE_NOT_ALLOWED_HERE, kind.value)
+        collector.reject("observation", index, DropRule.TYPE_NOT_ALLOWED_HERE, raw, kind.value)
         return None
 
     provenance = _as_member(Provenance, raw.provenance)
     signal = _as_member(SignalStrength, raw.extraction_signal_strength)
     confidence = _as_member(ExtractionConfidence, raw.extraction_confidence)
     if provenance is None or signal is None or confidence is None:
-        collector.drop(
+        collector.reject(
             "observation",
             index,
             DropRule.UNKNOWN_ENUM_VALUE,
+            raw,
             # Named as the model saw them, since this note exists to explain
             # a reply, not the code that read it.
             _name_unknown(
@@ -408,7 +530,7 @@ def _check_observation(
     # as ordinary has contradicted itself; the finding is re-asked for
     # rather than quietly filed at the wrong weight.
     if kind in HIGH_SIGNAL_REQUIRED_TYPES and signal is SignalStrength.STANDARD:
-        collector.drop("observation", index, DropRule.SIGNAL_FLOOR, kind.value)
+        collector.reject("observation", index, DropRule.SIGNAL_FLOOR, raw, kind.value)
         return None
 
     people = _check_people(
@@ -442,13 +564,13 @@ def _check_event(
     """Judge one event, returning it cleaned up or nothing at all."""
     summary = raw.event_summary.strip()
     if not summary:
-        collector.drop("event", index, DropRule.EMPTY_CONTENT)
+        collector.reject("event", index, DropRule.EMPTY_CONTENT, raw)
         return None
 
     signal = _as_member(SignalStrength, raw.signal_strength)
     if signal is None:
-        collector.drop(
-            "event", index, DropRule.UNKNOWN_ENUM_VALUE, raw.signal_strength[:40]
+        collector.reject(
+            "event", index, DropRule.UNKNOWN_ENUM_VALUE, raw, raw.signal_strength[:40]
         )
         return None
 
@@ -483,7 +605,7 @@ def _check_chain(
     """
     summary = raw.chain_summary.strip()
     if not summary:
-        collector.drop("chain", index, DropRule.EMPTY_CONTENT)
+        collector.reject("chain", index, DropRule.EMPTY_CONTENT, raw)
         return None
 
     ordered = sorted(raw.causal_chain, key=lambda step: step.step)
@@ -498,11 +620,11 @@ def _check_chain(
     for step in ordered:
         step_type = _as_member(CausalStepType, step.type)
         if step_type is None:
-            collector.drop("chain", index, DropRule.UNKNOWN_STEP_TYPE, step.type[:40])
+            collector.reject("chain", index, DropRule.UNKNOWN_STEP_TYPE, raw, step.type[:40])
             return None
         content = step.content.strip()
         if not content:
-            collector.drop("chain", index, DropRule.EMPTY_CONTENT, "step")
+            collector.reject("chain", index, DropRule.EMPTY_CONTENT, raw, "step")
             return None
         steps.append(
             CleanStep(step_type=step_type, content=content, branch_id=step.branch_id)
@@ -511,7 +633,7 @@ def _check_chain(
     # One step is a single point about the person, not a sequence of one
     # thing causing another. It has no chain to describe.
     if len(steps) < 2:
-        collector.drop("chain", index, DropRule.CHAIN_TOO_SHORT, f"{len(steps)} steps")
+        collector.reject("chain", index, DropRule.CHAIN_TOO_SHORT, raw, f"{len(steps)} steps")
         return None
 
     if [step.step for step in ordered] != list(range(1, len(ordered) + 1)):
@@ -655,5 +777,6 @@ __all__ = [
     "build_context",
     "validate_reflection",
     "validate_raw_capture",
+    "validate_corrections",
     "flatten",
 ]

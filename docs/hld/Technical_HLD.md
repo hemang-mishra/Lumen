@@ -377,9 +377,11 @@ class ExtractionResult(BaseModel):
     sessions: list[SessionNode]       # the minted causal anchor
     causal_chains: list[CausalChainNode]
     causal_steps: list[CausalStepNode]
+    failed_observations: list[ObservationNode]   # spent all 3 attempts; for HITL
     extraction_model: str
     validation_passed: bool           # false if anything was dropped or nothing survived
-    retry_count: int
+    retry_count: int                  # corrections spent, 0 when the first reading was clean
+    read_failed: bool                 # the episode could not be read at all
 
 class RetrievalResult(BaseModel):
     source_node_id: str  # ObservationNode | EventNode | SessionNode

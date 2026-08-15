@@ -388,7 +388,17 @@ status: ACTIVE                           # ACTIVE | ROLLED_BACK | PENDING_HITL |
 - `PENDING_HITL` — awaiting user resolution (AMBIGUOUS tie detected)
 - `BELOW_THRESHOLD` — model confidence fell below action threshold; in HITL queue
 - `SUSPENDED_QUEUE_FULL` — HITL queue at its item cap; item waiting to enter
-- `EXTRACTION_FAILED` — observation failed validation 3 times; graph write skipped
+- `EXTRACTION_FAILED` — observation failed validation on all 3 attempts; graph write skipped
+
+> ⚠️ **Open conflict, owned by the HITL queue goal.** `hitl_queue.audit_node_id` is `NOT NULL`
+> and unique, so every queue item needs a `DecisionAuditNode` behind it — but an extraction
+> failure never reaches Reconciliation, and this node type cannot be built honestly for one:
+> it requires an `action`, a `confidence` and a `rollback_pointer`, none of which exist for a
+> reading that never happened. Writing a placeholder decision would put a fabricated record in
+> the one table whose entire purpose is being trustworthy. Either `audit_node_id` becomes
+> optional for `EXTRACTION_FAILED` entries, or that entry type is queued by a different route.
+> The extraction stage produces the failed `ObservationNode`s regardless; only the queue row is
+> blocked on this.
 
 ---
 
@@ -483,7 +493,7 @@ last_referenced_at: "2026-06-01T06:00:00Z"
 | `follows_from` | `EpisodeNode` | `EpisodeNode` | No | Links micro-segmented episodes from the same `(event_date, session_label)` to preserve intra-session narrative flow. |
 | `adopted_as` | `ObservationNode` / `SessionNode` | `AdoptedPrincipleNode` | Yes (via audit) | Written when a session or observation applies, references, or reinforces an adopted principle. |
 | `superseded_by` | `AdoptedPrincipleNode` (old) | `AdoptedPrincipleNode` (new) | No (append-only) | Written when the user adopts a refined or replacement version of a prior principle. |
-| `failed_extraction` | `EpisodeNode` | `ObservationNode` | No | Written when an observation fails validation 3 times. The `ObservationNode` carries `status: EXTRACTION_FAILED` and is linked to its episode for HITL surfacing. |
+| `failed_extraction` | `EpisodeNode` | `ObservationNode` | No | Written when an observation fails validation on all 3 attempts. The `ObservationNode` carries `status: EXTRACTION_FAILED` and is linked to its episode for HITL surfacing. Its `type` is `CONTEXT` — the failure is usually the type itself, so the one field that cannot be trusted is set to the neutral value and the type the model attempted, plus the rule that refused it, are preserved in `raw_evidence` for the review card. The observation's content is kept exactly as produced, since that is what a person reads when deciding what to do about it. |
 
 **Reversibility note:** "Yes (via audit)" means the edge's `invalidated_at` timestamp is set (not deleted), and a new `DecisionAuditNode` with `action: ROLLBACK` is written.
 

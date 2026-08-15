@@ -24,6 +24,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 
+from lumen.pipeline.extraction.contracts import RejectedItem
 from lumen.pipeline.extraction.validation import (
     CleanChain,
     CleanEvent,
@@ -32,8 +33,10 @@ from lumen.pipeline.extraction.validation import (
 )
 from lumen.schemas.enums import (
     EntryClass,
+    ExtractionConfidence,
     NodeStatus,
     ObservationStatus,
+    ObservationType,
     Provenance,
     SignalStrength,
 )
@@ -117,11 +120,20 @@ class NodeFactory:
 
     # -- findings ---------------------------------------------------------
 
-    def observations(self, items: tuple[CleanObservation, ...]) -> list[ObservationNode]:
-        """Build a node for every finding taken from the episode."""
-        return [self._observation(item) for item in items]
+    def observations(
+        self, items: tuple[CleanObservation, ...], *, attempt: int = 1
+    ) -> list[ObservationNode]:
+        """
+        Build a node for every finding taken from the episode.
 
-    def _observation(self, item: CleanObservation) -> ObservationNode:
+        Which attempt produced a finding is recorded on it, so that if
+        corrected findings ever turn out to be systematically worse than
+        first-attempt ones, the evidence is already in the graph rather
+        than being a suspicion nobody can check.
+        """
+        return [self._observation(item, attempt) for item in items]
+
+    def _observation(self, item: CleanObservation, attempt: int) -> ObservationNode:
         return ObservationNode(
             node_id=self._ids.next("obs"),
             created_at=self._recorded_at,
@@ -137,7 +149,7 @@ class NodeFactory:
             person_refs=list(item.person_refs),
             status=self._observation_status(),
             extraction_model=self._model,
-            extraction_attempt=1,
+            extraction_attempt=attempt,
         )
 
     def _credit(self, item: CleanObservation) -> Provenance:
@@ -179,6 +191,45 @@ class NodeFactory:
         if self._episode.entry_class is EntryClass.RAW_CAPTURE:
             return ObservationStatus.RAW_CAPTURE
         return ObservationStatus.ACTIVE
+
+    def failed_observation(self, rejected: RejectedItem) -> ObservationNode:
+        """
+        Build a node for a finding that could not be salvaged.
+
+        It is kept rather than dropped so a person can be shown what the
+        reading could not make sense of. That only works if their content
+        survives untouched, so it does.
+
+        The type is set to CONTEXT — the plainest "something happened"
+        label — because the type is usually the very thing that was wrong,
+        and it is the one field here that cannot be trusted. What the model
+        actually tried, and the rule that refused it, are written into the
+        evidence instead, so the review screen can show both without
+        needing a second record to join against.
+        """
+        attempted = getattr(rejected.payload, "type", "") or "none given"
+        notes = [
+            f"extraction failed: {rejected.rule.value}",
+            f"attempted type: {attempted}",
+        ]
+        if rejected.last_rule is not None and rejected.last_rule is not rejected.rule:
+            notes.append(f"still wrong after correcting: {rejected.last_rule.value}")
+        return ObservationNode(
+            node_id=self._ids.next("obs"),
+            created_at=self._recorded_at,
+            valid_from=self._recorded_at,
+            episode_id=self._episode.episode_id,
+            occurred_at=self._payload.occurred_at,
+            type=ObservationType.CONTEXT,
+            content=_content_of(rejected),
+            raw_evidence=notes,
+            signal_strength=SignalStrength.STANDARD,
+            provenance=Provenance.USER_GENERATED,
+            extraction_confidence=ExtractionConfidence.STANDARD,
+            status=ObservationStatus.EXTRACTION_FAILED,
+            extraction_model=self._model,
+            extraction_attempt=rejected.attempts,
+        )
 
     # -- events -----------------------------------------------------------
 
@@ -280,6 +331,23 @@ class NodeFactory:
         if self._payload.co_created_spans:
             return [_SELF, _ASSISTANT]
         return [_SELF]
+
+
+def _content_of(rejected: RejectedItem) -> str:
+    """
+    Find something readable to keep from a refused item.
+
+    A finding carries its content, an event its summary, a sequence its
+    one-line description. If the item arrived with none of those — which is
+    itself one of the ways an item gets refused — a short note stands in,
+    because a node has to say something and pretending otherwise would fail
+    where it matters least.
+    """
+    for field_name in ("content", "event_summary", "chain_summary"):
+        text = getattr(rejected.payload, field_name, "").strip()
+        if text:
+            return text
+    return "The model returned an item with nothing readable in it."
 
 
 def strongest_signal(observations: list[ObservationNode]) -> SignalStrength:

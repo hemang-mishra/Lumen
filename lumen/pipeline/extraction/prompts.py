@@ -15,6 +15,7 @@ there, quote it, and leave gaps as gaps.
 from __future__ import annotations
 
 from lumen.pipeline.extraction.catalog import EXCLUDED_TYPES
+from lumen.pipeline.extraction.contracts import DropRule, RejectedItem
 from lumen.schemas.enums import HIGH_SIGNAL_REQUIRED_TYPES
 from lumen.schemas.pipeline import CoreferenceMap
 
@@ -137,6 +138,103 @@ ENTRY:
 """
 
 
+CORRECTION_PROMPT = """\
+Some of what you returned could not be used. Each item below is shown with \
+what was wrong with it.
+
+Return corrected versions of these items only. Do not add anything new, do \
+not touch anything that is not listed here, and change only the part that was \
+wrong — the substance of each item was accepted, only the way it was labelled \
+was not.
+
+If an item cannot be corrected honestly — the entry does not support it, or \
+no available option fits — leave it out of your answer. Leaving it out is a \
+correct answer and is better than forcing one.
+
+Return them in the same order and under the same headings you used before.
+
+{items}
+{type_dictionary}
+EPISODE:
+{text}
+"""
+
+
+# What to tell the model about each way an item can be refused. Each line
+# names the field at fault and what a usable answer looks like, and none of
+# them restate the item's meaning — the model is fixing a label, not being
+# asked to argue for the finding again.
+_RULE_GUIDANCE: dict[DropRule, str] = {
+    DropRule.UNKNOWN_TYPE: (
+        'the type "{detail}" is not one of the available types. Use the '
+        "closest type from the list below."
+    ),
+    DropRule.UNKNOWN_ENUM_VALUE: (
+        "one of its settings is not a value that exists ({detail}). "
+        "Use one of the values named in the original instructions."
+    ),
+    DropRule.SIGNAL_FLOOR: (
+        "the type {detail} always carries unusual weight, so its "
+        "extraction_signal_strength must be HIGH or CRITICAL, never STANDARD. "
+        "Either raise the weight or choose a type that fits an ordinary moment."
+    ),
+    DropRule.UNKNOWN_STEP_TYPE: (
+        'one of its steps has the type "{detail}", which does not exist. Every '
+        "step must be TRIGGER, INTERNAL_STATE, ACTION, OUTCOME or LESSON."
+    ),
+    DropRule.EMPTY_CONTENT: "it arrived with nothing written in it.",
+}
+
+
+def render_correction_items(rejections: tuple[RejectedItem, ...]) -> str:
+    """
+    Write out each refused item with the reason it was refused.
+
+    Grouped under the same headings the model answered with, so the
+    corrected items come back in a shape that can be matched to what they
+    are correcting without asking the model to track ids.
+    """
+    headings = {
+        "observation": "FINDINGS THAT NEED CORRECTING",
+        "event": "EVENTS THAT NEED CORRECTING",
+        "chain": "SEQUENCES THAT NEED CORRECTING",
+    }
+    sections = []
+    for kind, heading in headings.items():
+        of_kind = [item for item in rejections if item.item_kind == kind]
+        if not of_kind:
+            continue
+        lines = [
+            f"{position}. Problem: {_explain(item)}\n   You returned: "
+            f"{item.payload.model_dump_json()}"
+            for position, item in enumerate(of_kind, start=1)
+        ]
+        sections.append(f"{heading}\n" + "\n".join(lines))
+    return "\n\n".join(sections)
+
+
+def _explain(rejection: RejectedItem) -> str:
+    """Say what was wrong with one item, in terms of the field at fault."""
+    template = _RULE_GUIDANCE.get(
+        rejection.rule, "it did not pass the rules for this kind of item."
+    )
+    return template.format(detail=rejection.detail)
+
+
+def needs_type_dictionary(rejections: tuple[RejectedItem, ...]) -> bool:
+    """
+    Whether the list of types should be repeated for this correction.
+
+    Only when a type was the problem — which is usually because the model
+    did not use the list the first time. Repeating it for an unrelated
+    mistake would spend a large part of the prompt saying nothing new.
+    """
+    return any(
+        item.rule in {DropRule.UNKNOWN_TYPE, DropRule.SIGNAL_FLOOR}
+        for item in rejections
+    )
+
+
 def render_people(coreference_map: CoreferenceMap) -> str:
     """
     List the people already identified in the entry, for the prompt.
@@ -190,4 +288,7 @@ __all__ = [
     "RAW_CAPTURE_PROMPT",
     "render_people",
     "render_high_signal_types",
+    "CORRECTION_PROMPT",
+    "render_correction_items",
+    "needs_type_dictionary",
 ]

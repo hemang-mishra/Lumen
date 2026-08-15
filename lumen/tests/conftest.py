@@ -479,6 +479,7 @@ def scripted_providers():
 EXTRACTION_PROMPT_KEYS = {
     "reflection": "FINDINGS (observations)",
     "raw_capture": "Below is a short or unclear journal entry",
+    "correction": "Some of what you returned could not be used",
 }
 
 # A worked example with enough in it to produce several kinds of finding: an

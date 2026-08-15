@@ -201,11 +201,46 @@ This document outlines the systematic, stage-by-stage implementation plan for th
     `lumen/pipeline/`, `lumen/config.py`, `lumen/schemas/pipeline.py`, `lumen/schemas/ids.py`.
   - *Plan:* [`implementation/Goal_6_Plan.md`](file:///Users/hemangmishra/Projects/Lumen/implementation/Goal_6_Plan.md)
 
-- [ ] **Goal 7: Post-Extraction Validation Layer**
-  - Enforce Pydantic schema validation on all LLM-generated JSON.
-  - Implement 3-attempt retry loop with re-extraction on validation failure.
-  - Write `failed_extraction` edge on 3rd failure.
-  - *Test:* Feed broken/hallucinated JSON; verify errors are caught and retries fire.
+- [x] **Goal 7: Post-Extraction Validation Layer** ✅
+  - Implemented `lumen/pipeline/extraction/retry.py` plus a correction prompt, correction
+    validation, and failure records. Goal 6 already validated every item and dropped what
+    broke a rule; this goal asks again for what a second question could plausibly fix, and
+    keeps what it cannot.
+  - **A correction re-asks only the refused items**, quoted back with the rule each broke.
+    Items that already validated are never re-rolled, so the output is stable across
+    attempts. Three attempts in total — the first reading plus two corrections.
+  - **The retryable set is a frozen table of five rules**, and what is absent from it is the
+    point. `QUOTE_NOT_FOUND` — the Goal 6 rule that drops a feeling the person never put
+    into words — is **never** re-asked: the correction would be a direct instruction to
+    produce the missing quote, and the produced one would pass the check it exists to fail.
+    Four other rules are terminal for duller reasons (audio-only types, wrong path,
+    one-step chains, over-limit truncation). Terminal rejections are discarded, not failed.
+  - **A failed item becomes a real `ObservationNode`** with `status: EXTRACTION_FAILED`, its
+    content untouched, typed `CONTEXT` because the type is usually the thing that was wrong,
+    with the attempted type and the refusing rule preserved in `raw_evidence` for the review
+    card. Returned on a separate `failed_observations` list so nothing downstream can mistake
+    one for a real finding.
+  - **An unreadable reply is re-read rather than corrected** — there is nothing to correct —
+    and after the last attempt `read_failed` says so, so Goal 10 can mark the episode
+    `SUSPENDED` instead of storing one that merely looks empty. Nothing is ever invented.
+  - **A correction that recovers nothing ends the loop.** A model that returned an unusable
+    answer once returns it again; the remaining call only pays to watch it happen.
+  - *Amends Goal 6:* `ExtractionResult.failed_observations` and `.read_failed`;
+    `retry_count` and `extraction_attempt` now record what actually happened rather than
+    being fixed at 0 and 1. `validation_passed` now means *something was lost for good*, so
+    a fully recovered reading is trusted again.
+  - *Docs amended ahead of coding:* `Reconciliation.md` (**"3 re-extractions" against "on the
+    third failure" resolved to three total attempts** — the same paragraph said both),
+    `Architecture.md` (the retryable/terminal table with the reason each rule sits where it
+    does), `Schema.md`, `Technical_HLD.md` §5.
+  - *Flagged, not fixed:* `hitl_queue.audit_node_id` is `NOT NULL` and unique, but an
+    extraction failure never reaches Reconciliation and so has no `DecisionAuditNode` —
+    which cannot be built honestly for one. Recorded in `Schema.md` §9 for Goal 18. Also:
+    the `failed_extraction` edge is `EpisodeNode → ObservationNode` only, so a failed *event*
+    or *chain* has nowhere to be recorded and is discarded with a warning.
+  - *Result:* 1253 tests passing (1151 from Goals 1–6 + 102 new), **100% coverage** on
+    `lumen/pipeline/`, `lumen/config.py`, `lumen/schemas/pipeline.py`.
+  - *Plan:* [`implementation/Goal_7_Plan.md`](file:///Users/hemangmishra/Projects/Lumen/implementation/Goal_7_Plan.md)
 
 - [ ] **Goal 8: Stage 2 — Retrieval (HyDE + Hybrid Search)**
   - Implement `lumen/pipeline/retrieval.py`.

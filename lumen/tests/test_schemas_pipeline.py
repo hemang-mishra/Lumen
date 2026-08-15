@@ -265,6 +265,28 @@ class TestExtractionResult:
         assert len(result.events) == 1
         assert len(result.causal_steps) == 1
 
+    def test_a_reading_is_assumed_to_have_happened(self):
+        result = ExtractionResult(
+            episode_id="ep_1", extraction_model="gemini-2.0-flash",
+            validation_passed=True,
+        )
+        assert result.read_failed is False
+        assert result.failed_observations == []
+
+    def test_what_could_not_be_read_is_kept_apart(self, sample_observation):
+        # Failures live in their own list rather than being marked among the
+        # real findings, so nothing downstream can mistake one for the other
+        # by forgetting to check a status.
+        result = ExtractionResult(
+            episode_id="ep_1", observations=[sample_observation],
+            failed_observations=[sample_observation],
+            extraction_model="gemini-2.0-flash", validation_passed=False,
+            retry_count=2, read_failed=False,
+        )
+        assert len(result.observations) == 1
+        assert len(result.failed_observations) == 1
+        assert result.retry_count == 2
+
 
 class TestCandidateNode:
     def test_semantic_requires_similarity_score(self):

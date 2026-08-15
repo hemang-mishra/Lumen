@@ -408,6 +408,43 @@ class TestLimitsAreHonoured:
         assert len(result.observations) == 5
 
 
+class TestWhatCouldNotBeRead:
+    def test_failures_are_kept_apart_from_findings(
+        self, make_extraction_input, extraction_providers
+    ):
+        # Structurally apart, not merely flagged, so nothing downstream can
+        # treat a failed reading as a real finding by forgetting to check.
+        light, thinking = extraction_providers(
+            {
+                "reflection": reflection_reply(
+                    observations=[
+                        {"type": "MADE_UP", "content": "unreadable", "raw_evidence": ["x"]},
+                        {"type": "EMOTION", "content": "felt small", "raw_evidence": ["felt small"]},
+                    ]
+                ),
+                "correction": reflection_reply(observations=[]),
+            }
+        )
+
+        result = extract(make_extraction_input(), lightweight=light, thinking=thinking)
+
+        assert [node.type for node in result.observations] == [ObservationType.EMOTION]
+        assert len(result.failed_observations) == 1
+        assert not set(node.node_id for node in result.observations) & set(
+            node.node_id for node in result.failed_observations
+        )
+
+    def test_a_clean_reading_leaves_no_failures(
+        self, make_extraction_input, extraction_providers
+    ):
+        light, thinking = extraction_providers({"reflection": reflection_reply()})
+
+        result = extract(make_extraction_input(), lightweight=light, thinking=thinking)
+
+        assert result.failed_observations == []
+        assert result.read_failed is False
+
+
 class TestNoInfrastructure:
     def test_the_stage_reaches_for_no_database_or_store(self):
         # A stage that could read the graph would be a way to smuggle

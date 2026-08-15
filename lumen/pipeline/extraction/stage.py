@@ -25,8 +25,8 @@ import logging
 import time
 
 from lumen.config import AppConfig
-from lumen.pipeline.extraction import passes
-from lumen.pipeline.extraction.contracts import ExtractionOutcome
+from lumen.pipeline.extraction import passes, retry
+from lumen.pipeline.extraction.contracts import DropRule, ExtractionOutcome
 from lumen.providers.protocols import LLMProvider
 from lumen.schemas.enums import EntryClass
 from lumen.schemas.pipeline import ExtractionResult, MicroextractionInput
@@ -55,6 +55,11 @@ def extract(
     safely stored, so a failed reading costs an analysis that can be run
     again; a filled-in one would cost the truth of their history, and
     nothing downstream would ever be able to tell.
+
+    A close reading that comes back partly unusable is asked about again
+    before it is given up on. A thin entry is not: it is one cheap call
+    with almost nothing in it to get wrong, and the one rule it can break
+    is the one rule that must never be re-asked.
     """
     started = time.perf_counter()
     limits = (config or AppConfig()).pipeline
@@ -66,7 +71,9 @@ def extract(
         )
         model_name = lightweight.model_name
     else:
-        outcome = passes.read_reflection(payload, provider=thinking, limits=limits)
+        outcome = retry.read_with_corrections(
+            payload, provider=thinking, limits=limits
+        )
         model_name = thinking.model_name
 
     elapsed_ms = int((time.perf_counter() - started) * 1000)
@@ -79,9 +86,11 @@ def extract(
         sessions=list(outcome.sessions),
         causal_chains=list(outcome.chains),
         causal_steps=list(outcome.steps),
+        failed_observations=list(outcome.failed),
         extraction_model=model_name,
         validation_passed=_is_trustworthy(outcome),
-        retry_count=0,
+        retry_count=outcome.attempts - 1,
+        read_failed=outcome.used_fallback,
     )
 
 
@@ -90,18 +99,29 @@ def _is_trustworthy(outcome: ExtractionOutcome) -> bool:
     Decide whether this reading can be relied on as complete.
 
     Three things make it not. The reading may have failed outright. It may
-    have produced something, but with pieces thrown away along the way. Or
-    it may have come back clean and empty, which for an entry judged worth
-    reading closely means the reading did not work, whatever the model
-    reported.
+    have given up on something — an item nobody could correct, or one
+    trimmed off for being over the limit. Or it may have come back clean
+    and empty, which for an entry judged worth reading closely means the
+    reading did not work, whatever the model reported.
 
-    This is the flag the retry step reads to decide whether to ask again,
-    so it errs towards asking. Asking twice costs one call; not asking
-    leaves a hole nobody ever notices.
+    A stumble that was recovered does not count against it. An item refused
+    on the first attempt and accepted on the second cost nothing in the
+    end, and reporting the run as untrustworthy because of a mistake that
+    was fixed would make the flag useless for telling real losses apart.
     """
-    if outcome.used_fallback or outcome.drops:
+    if outcome.used_fallback or outcome.abandoned or _was_truncated(outcome):
         return False
     return not outcome.is_empty
+
+
+def _was_truncated(outcome: ExtractionOutcome) -> bool:
+    """
+    True when something was cut for being over a ceiling.
+
+    Never re-asked, since nothing was wrong with the items themselves, but
+    still a real loss and so still worth reporting as one.
+    """
+    return any(record.rule is DropRule.OVER_LIMIT for record in outcome.drops)
 
 
 def _log_outcome(
@@ -137,7 +157,9 @@ def _log_outcome(
             "anchored": bool(outcome.sessions),
             "dropped": len(outcome.drops),
             "drop_reasons": sorted({record.rule.value for record in outcome.drops}),
+            "failed": len(outcome.failed),
             "ungrounded": outcome.ungrounded,
+            "attempts": outcome.attempts,
             "read_failed": outcome.used_fallback,
             "duration_ms": duration_ms,
         },

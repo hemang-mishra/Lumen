@@ -41,6 +41,7 @@ from lumen.pipeline.extraction.prompts import (
     render_people,
 )
 from lumen.pipeline.extraction.validation import (
+    ValidationContext,
     ValidationReport,
     build_context,
     validate_raw_capture,
@@ -60,6 +61,7 @@ def read_reflection(
     *,
     provider: LLMProvider,
     limits: PipelineConfig,
+    factory: NodeFactory | None = None,
 ) -> ExtractionOutcome:
     """
     Read an episode closely and record everything in it.
@@ -69,6 +71,10 @@ def read_reflection(
     disagree with each other — a chain describing a moment that no finding
     records, or two accounts of the same feeling. They describe the same
     material and so they are read at once.
+
+    The thing that names nodes can be handed in, because an episode read
+    more than once must keep counting where it left off. Two readings that
+    each started from one would hand out the same names twice.
     """
     prompt = REFLECTION_PROMPT.format(
         type_dictionary=render_type_dictionary(),
@@ -76,7 +82,7 @@ def read_reflection(
         people=render_people(payload.coreference_map),
         text=payload.episode.cleaned_text,
     )
-    response = _request(
+    response = request(
         provider=provider,
         prompt=prompt,
         response_model=ReflectionExtractionResponse,
@@ -85,16 +91,9 @@ def read_reflection(
     if response is None:
         return _nothing_extracted()
 
-    context = build_context(
-        episode_text=payload.episode.cleaned_text,
-        coreference_map=payload.coreference_map,
-        raw_capture=False,
-        limits=limits,
-    )
-    return _assemble(
-        validate_reflection(response, context),
-        payload=payload,
-        provider=provider,
+    return assemble(
+        validate_reflection(response, reflection_context(payload, limits)),
+        factory=factory or NodeFactory(payload, extraction_model=provider.model_name),
         with_anchor=True,
     )
 
@@ -104,6 +103,7 @@ def read_raw_capture(
     *,
     provider: LLMProvider,
     limits: PipelineConfig,
+    factory: NodeFactory | None = None,
 ) -> ExtractionOutcome:
     """
     Take the little there is from a thin entry.
@@ -113,7 +113,7 @@ def read_raw_capture(
     in it to read closely, and reading closely anyway is how a shrug
     becomes a diagnosis in someone's permanent history.
     """
-    response = _request(
+    response = request(
         provider=provider,
         prompt=RAW_CAPTURE_PROMPT.format(text=payload.episode.cleaned_text),
         response_model=RawCaptureResponse,
@@ -128,12 +128,16 @@ def read_raw_capture(
         raw_capture=True,
         limits=limits,
     )
-    return _assemble(
+    outcome = assemble(
         validate_raw_capture(response, context),
-        payload=payload,
-        provider=provider,
+        factory=factory or NodeFactory(payload, extraction_model=provider.model_name),
         with_anchor=False,
     )
+    # On this path every note is a loss and none of them will be asked
+    # about again: the only two things it can produce are the topic and a
+    # feeling the person stated, so a note means one of those two did not
+    # survive.
+    return outcome.model_copy(update={"abandoned": len(outcome.drops)})
 
 
 # ---------------------------------------------------------------------------
@@ -141,7 +145,26 @@ def read_raw_capture(
 # ---------------------------------------------------------------------------
 
 
-def _request(
+def reflection_context(
+    payload: MicroextractionInput, limits: PipelineConfig
+) -> ValidationContext:
+    """
+    Build the facts a close reading is judged against.
+
+    Shared with the correction step, so a corrected item is held to exactly
+    the same standard as a first-attempt one — the same permitted
+    categories, the same known people, the same text to check quotes
+    against.
+    """
+    return build_context(
+        episode_text=payload.episode.cleaned_text,
+        coreference_map=payload.coreference_map,
+        raw_capture=False,
+        limits=limits,
+    )
+
+
+def request(
     *,
     provider: LLMProvider,
     prompt: str,
@@ -178,12 +201,12 @@ def _request(
         return None
 
 
-def _assemble(
+def assemble(
     report: ValidationReport,
     *,
-    payload: MicroextractionInput,
-    provider: LLMProvider,
+    factory: NodeFactory,
     with_anchor: bool,
+    attempt: int = 1,
 ) -> ExtractionOutcome:
     """
     Turn everything that survived checking into graph nodes.
@@ -192,8 +215,7 @@ def _assemble(
     produced nothing has nothing to anchor, and a session node standing
     alone would claim a piece of thinking happened that left no trace.
     """
-    factory = NodeFactory(payload, extraction_model=provider.model_name)
-    observations = factory.observations(report.observations)
+    observations = factory.observations(report.observations, attempt=attempt)
     events = factory.events(report.events)
     chains, steps = factory.chains(report.chains)
 
@@ -208,7 +230,9 @@ def _assemble(
         chains=tuple(chains),
         steps=tuple(steps),
         drops=report.drops,
+        rejected=report.rejected,
         ungrounded=report.ungrounded,
+        attempts=attempt,
     )
 
 
@@ -225,4 +249,4 @@ def _log_failure(pass_name: str, reason: str, detail: str | None = None) -> None
     )
 
 
-__all__ = ["read_reflection", "read_raw_capture"]
+__all__ = ["read_reflection", "read_raw_capture", "request", "assemble", "reflection_context"]

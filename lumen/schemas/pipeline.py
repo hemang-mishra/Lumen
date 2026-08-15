@@ -390,12 +390,22 @@ class ExtractionResult(PipelineDTO):
             episode's observations and events.
         causal_steps: The individual steps making up each causal chain
             above.
+        failed_observations: Observations that broke a rule and could not
+            be corrected within the allowed attempts. Kept apart from the
+            good ones rather than marked among them, so nothing can
+            accidentally treat a failed reading as a real finding. They
+            are held onto so a person can be shown what could not be read
+            and put it right themselves.
         extraction_model: The name of the model used to perform the
             extraction.
         validation_passed: Whether the extracted data passed schema
             validation.
         retry_count: How many times extraction had to be retried before
             it validated successfully.
+        read_failed: True when the episode could not be read at all, as
+            opposed to being read and found to hold little. The two look
+            identical from the outside — both leave an empty result — but
+            only one of them is worth trying again.
     """
 
     episode_id: str = Field(min_length=1)
@@ -404,9 +414,11 @@ class ExtractionResult(PipelineDTO):
     sessions: list[SessionNode] = Field(default_factory=list)
     causal_chains: list[CausalChainNode] = Field(default_factory=list)
     causal_steps: list[CausalStepNode] = Field(default_factory=list)
+    failed_observations: list[ObservationNode] = Field(default_factory=list)
     extraction_model: str = Field(min_length=1)
     validation_passed: bool
     retry_count: int = Field(default=0, ge=0)
+    read_failed: bool = False
 
 
 class RetrievalResult(PipelineDTO):

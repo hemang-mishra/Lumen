@@ -16,6 +16,13 @@ from datetime import UTC, datetime
 import pytest
 
 from lumen.pipeline.extraction.assembly import NodeFactory, strongest_signal
+from lumen.pipeline.extraction.contracts import (
+    DropRule,
+    ExtractedCausalChain,
+    ExtractedEvent,
+    ExtractedObservation,
+    RejectedItem,
+)
 from lumen.pipeline.extraction.validation import (
     CleanChain,
     CleanEvent,
@@ -374,6 +381,110 @@ class TestTheAnchor:
         assert anchor.status is NodeStatus.ACTIVE
         assert anchor.occurred_at == payload.occurred_at
         assert anchor.created_at == RECORDED_AT
+
+
+class TestFindingsThatCouldNotBeRead:
+    def refused(self, **overrides) -> RejectedItem:
+        defaults = {
+            "item_kind": "observation",
+            "index": 0,
+            "rule": DropRule.UNKNOWN_TYPE,
+            "detail": "VIBES",
+            "payload": ExtractedObservation(
+                type="VIBES", content="The comparing is what hurts"
+            ),
+            "attempts": 3,
+        }
+        return RejectedItem(**{**defaults, **overrides})
+
+    def test_it_is_marked_as_a_failed_reading(self, factory):
+        node = factory().failed_observation(self.refused())
+
+        assert node.status is ObservationStatus.EXTRACTION_FAILED
+
+    def test_the_persons_words_survive_untouched(self, factory):
+        # The whole reason for keeping it is that somebody can be shown what
+        # the reading could not make sense of.
+        node = factory().failed_observation(self.refused())
+
+        assert node.content == "The comparing is what hurts"
+
+    def test_the_type_falls_back_to_the_plainest_one(self, factory):
+        # The type is usually the very thing that was wrong, so it is the
+        # one field here that cannot be trusted.
+        node = factory().failed_observation(self.refused())
+
+        assert node.type is ObservationType.CONTEXT
+
+    def test_the_attempted_type_and_the_rule_are_both_recoverable(self, factory):
+        node = factory().failed_observation(self.refused())
+
+        assert any("VIBES" in note for note in node.raw_evidence)
+        assert any("UNKNOWN_TYPE" in note for note in node.raw_evidence)
+
+    def test_a_later_problem_is_recorded_alongside_the_first(self, factory):
+        node = factory().failed_observation(
+            self.refused(last_rule=DropRule.SIGNAL_FLOOR)
+        )
+
+        assert any("UNKNOWN_TYPE" in note for note in node.raw_evidence)
+        assert any("SIGNAL_FLOOR" in note for note in node.raw_evidence)
+
+    def test_the_same_problem_twice_is_not_repeated(self, factory):
+        node = factory().failed_observation(
+            self.refused(last_rule=DropRule.UNKNOWN_TYPE)
+        )
+
+        assert len(node.raw_evidence) == 2
+
+    def test_how_many_attempts_it_cost_is_recorded(self, factory):
+        node = factory().failed_observation(self.refused(attempts=3))
+
+        assert node.extraction_attempt == 3
+
+    def test_an_item_with_no_type_at_all_says_so(self, factory):
+        node = factory().failed_observation(
+            self.refused(payload=ExtractedObservation(content="something"))
+        )
+
+        assert any("none given" in note for note in node.raw_evidence)
+
+    def test_a_refused_event_keeps_its_summary(self, factory):
+        node = factory().failed_observation(
+            self.refused(
+                item_kind="event",
+                payload=ExtractedEvent(event_summary="Went to the cafe"),
+            )
+        )
+
+        assert node.content == "Went to the cafe"
+
+    def test_a_refused_sequence_keeps_its_description(self, factory):
+        node = factory().failed_observation(
+            self.refused(
+                item_kind="chain",
+                payload=ExtractedCausalChain(chain_summary="comparison, then relief"),
+            )
+        )
+
+        assert node.content == "comparison, then relief"
+
+    def test_an_item_with_nothing_readable_still_builds(self, factory):
+        # Arriving blank is itself one of the ways an item gets refused, and
+        # a node has to say something.
+        node = factory().failed_observation(
+            self.refused(rule=DropRule.EMPTY_CONTENT, payload=ExtractedObservation())
+        )
+
+        assert node.content.strip()
+
+    def test_it_shares_the_naming_run_of_the_findings_that_worked(self, factory):
+        built = factory()
+        kept = built.observations((finding(),))
+
+        failed = built.failed_observation(self.refused())
+
+        assert failed.node_id != kept[0].node_id
 
 
 class TestWeighing:

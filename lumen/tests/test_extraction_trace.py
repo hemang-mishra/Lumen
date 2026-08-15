@@ -150,6 +150,74 @@ class TestTheWritingStaysOut:
         assert "UNKNOWN_TYPE" in logged
 
 
+class TestAskingAgainStaysTraceable:
+    def test_every_line_of_a_corrected_run_carries_the_trace(
+        self, make_extraction_input, extraction_providers, bound_trace, captured_logs
+    ):
+        light, thinking = extraction_providers(
+            {
+                "reflection": json.dumps(
+                    {"observations": [{"type": "VIBES", "content": "x", "raw_evidence": [PRIVATE]}]}
+                ),
+                "correction": json.dumps(
+                    {
+                        "observations": [
+                            {"type": "BELIEF", "content": "x", "raw_evidence": [PRIVATE]}
+                        ]
+                    }
+                ),
+            }
+        )
+
+        extract(
+            make_extraction_input(PRIVATE_ENTRY), lightweight=light, thinking=thinking
+        )
+
+        assert any(
+            line["msg"] == "extraction correction attempted" for line in captured_logs
+        )
+        assert all(line["trace_id"] == bound_trace for line in captured_logs)
+
+    def test_a_correction_never_logs_the_entry(
+        self, make_extraction_input, extraction_providers, captured_logs
+    ):
+        light, thinking = extraction_providers(
+            {
+                "reflection": json.dumps(
+                    {"observations": [{"type": "VIBES", "content": PRIVATE, "raw_evidence": [PRIVATE]}]}
+                ),
+                "correction": json.dumps({"observations": []}),
+            }
+        )
+
+        extract(
+            make_extraction_input(PRIVATE_ENTRY), lightweight=light, thinking=thinking
+        )
+
+        assert PRIVATE not in everything(captured_logs)
+
+    def test_a_failed_finding_keeps_its_content_out_of_the_log(
+        self, make_extraction_input, extraction_providers, captured_logs
+    ):
+        # The content is deliberately preserved on the node so a person can
+        # read it. That makes it the easiest thing in the stage to leak.
+        light, thinking = extraction_providers(
+            {
+                "reflection": json.dumps(
+                    {"observations": [{"type": "VIBES", "content": PRIVATE, "raw_evidence": [PRIVATE]}]}
+                ),
+                "correction": json.dumps({"observations": []}),
+            }
+        )
+
+        result = extract(
+            make_extraction_input(PRIVATE_ENTRY), lightweight=light, thinking=thinking
+        )
+
+        assert result.failed_observations[0].content == PRIVATE
+        assert PRIVATE not in everything(captured_logs)
+
+
 class TestWhatTheLogDoesSay:
     def test_the_closing_line_counts_what_was_produced(
         self, make_extraction_input, extraction_providers, captured_logs

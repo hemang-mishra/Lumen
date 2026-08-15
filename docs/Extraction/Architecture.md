@@ -156,8 +156,29 @@ The full set of validation rules is defined in [`Reconciliation.md`](Reconciliat
 
 **On validation failure:**
 - Validation is **per item**, not per response. A single bad observation is dropped on its own; its valid siblings in the same response survive. Rejecting a whole extraction over one malformed entry would discard good work and pay for a second call to recover it.
-- Re-extraction is attempted for the failing items, with a correction prompt that names the violated rule and the offending field.
-- **An observation may be re-extracted at most 3 times.** On the third failure it is written with `status: EXTRACTION_FAILED`, linked to its episode with a `failed_extraction` edge, and surfaced in the next HITL queue session. This matches the re-extraction limit in [`Reconciliation.md`](Reconciliation.md); an earlier version of this document said one attempt, which was wrong.
+- Re-extraction is attempted for the failing items only, with a correction prompt that names the violated rule and the offending field. Items that already validated are never re-asked, so a good observation from the first attempt cannot be re-rolled into a worse one on the second.
+- **An observation gets at most 3 attempts in total** — the first reading plus two corrections. On the third failure it is written with `status: EXTRACTION_FAILED`, linked to its episode with a `failed_extraction` edge, and surfaced in the next HITL queue session. Matches [`Reconciliation.md`](Reconciliation.md).
+
+### Which Rejections Are Re-Asked
+
+A retry is a request for output, and a model asked twice will produce something. So the retryable set is fixed and deliberately small.
+
+| Rejection | Re-asked | Reason |
+|---|---|---|
+| Unrecognised observation type | ✅ | The commonest failure and the most recoverable — the model can be shown the dictionary again. |
+| Unrecognised enum value (provenance, signal strength, confidence) | ✅ | The same mistake in a smaller field. |
+| Mandatory signal floor violated | ✅ | The model contradicted itself: it chose a type that marks unusual weight, then called it ordinary. |
+| Unrecognised causal step type | ✅ | One unreadable step costs the whole sequence, so recovery is worth a call. |
+| Empty content | ✅ | An item that arrived blank may simply have been truncated. |
+| Type requires audio (`PROSODY_SIGNAL`) | ❌ | The pipeline has a transcript. No number of attempts changes that. |
+| Type not permitted on this path | ❌ | The wrong reading was run over a thin entry; re-asking repeats the mistake. |
+| Causal chain shorter than two steps | ❌ | A one-step sequence is a finding, not a chain. Asking again invites the model to pad it into one. |
+| Over the per-episode ceiling | ❌ | Nothing was wrong with the item; there were simply too many. |
+| **Stated-feeling quote not found in the entry** | ❌ **never** | This fires when a thin entry produced a feeling the person never put into words. A correction prompt asking for the missing quote is a direct instruction to produce one, and the fabricated quote would then pass the check. Retrying this rule would convert the strongest guard in the pipeline into the mechanism for defeating it. |
+
+Rejections in the ❌ rows are discarded outright and never become `EXTRACTION_FAILED` records.
+
+**When the reading itself fails** — a provider error, an unparseable reply, or a reply of the wrong shape — the request is re-issued rather than corrected, since there is nothing to correct. After the last attempt the episode is marked unreadable so its `EpisodeNode` is written with `reconciliation_status: SUSPENDED` rather than being stored as an episode that merely looks empty. Nothing is ever invented to fill the gap.
 
 ---
 

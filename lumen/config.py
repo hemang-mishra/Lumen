@@ -141,10 +141,16 @@ class PipelineConfig:
       LUMEN_MAX_OBSERVATIONS      — ceiling on findings taken from one episode
       LUMEN_MAX_CAUSAL_CHAINS     — ceiling on cause-and-effect sequences per episode
       LUMEN_MAX_CAUSAL_STEPS      — ceiling on steps within one sequence
+      LUMEN_MAX_EXTRACTION_ATTEMPTS — tries at reading one episode before giving up
 
-    The last three are ceilings, not targets. They exist so that one runaway
+    The three ceilings are limits, not targets. They exist so that one runaway
     reply cannot turn a single paragraph into two hundred nodes; a normal
     entry never comes close to them.
+
+    The attempt count covers the first reading plus any corrections asked for
+    afterwards, so the default of three means one reading and at most two
+    goes at fixing what it got wrong. Setting it to one turns correction off
+    entirely.
     """
 
     min_reflection_words: int = _env_int("LUMEN_MIN_REFLECTION_WORDS", 30)
@@ -154,6 +160,7 @@ class PipelineConfig:
     max_observations_per_episode: int = _env_int("LUMEN_MAX_OBSERVATIONS", 25)
     max_causal_chains_per_episode: int = _env_int("LUMEN_MAX_CAUSAL_CHAINS", 5)
     max_causal_steps_per_chain: int = _env_int("LUMEN_MAX_CAUSAL_STEPS", 12)
+    max_extraction_attempts: int = _env_int("LUMEN_MAX_EXTRACTION_ATTEMPTS", 3)
 
 
 @dataclass(frozen=True)

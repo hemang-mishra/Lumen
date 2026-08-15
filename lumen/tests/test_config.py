@@ -105,6 +105,10 @@ class TestPipelineConfig:
         assert cfg.coherence_threshold == 0.4
         assert cfg.reflection_prompt_count == 3
         assert cfg.max_episodes_per_session == 12
+        assert cfg.max_observations_per_episode == 25
+        assert cfg.max_causal_chains_per_episode == 5
+        assert cfg.max_causal_steps_per_chain == 12
+        assert cfg.max_extraction_attempts == 3
 
     @pytest.mark.parametrize(
         "variable,value,field,expected",
@@ -113,6 +117,10 @@ class TestPipelineConfig:
             ("LUMEN_COHERENCE_THRESHOLD", "0.65", "coherence_threshold", 0.65),
             ("LUMEN_REFLECTION_PROMPT_COUNT", "5", "reflection_prompt_count", 5),
             ("LUMEN_MAX_EPISODES", "4", "max_episodes_per_session", 4),
+            ("LUMEN_MAX_OBSERVATIONS", "9", "max_observations_per_episode", 9),
+            ("LUMEN_MAX_CAUSAL_CHAINS", "2", "max_causal_chains_per_episode", 2),
+            ("LUMEN_MAX_CAUSAL_STEPS", "6", "max_causal_steps_per_chain", 6),
+            ("LUMEN_MAX_EXTRACTION_ATTEMPTS", "1", "max_extraction_attempts", 1),
         ],
     )
     def test_each_threshold_is_overridable_on_its_own(
@@ -128,6 +136,10 @@ class TestPipelineConfig:
             "coherence_threshold": 0.4,
             "reflection_prompt_count": 3,
             "max_episodes_per_session": 12,
+            "max_observations_per_episode": 25,
+            "max_causal_chains_per_episode": 5,
+            "max_causal_steps_per_chain": 12,
+            "max_extraction_attempts": 3,
         }
         del untouched[field]
         for name, default in untouched.items():

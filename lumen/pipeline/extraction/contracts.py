@@ -21,6 +21,7 @@ were dropped.
 from __future__ import annotations
 
 from enum import StrEnum
+from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -184,7 +185,12 @@ class DropRule(StrEnum):
     TYPE_NOT_ALLOWED_HERE = "TYPE_NOT_ALLOWED_HERE"
     QUOTE_NOT_FOUND = "QUOTE_NOT_FOUND"
     OVER_LIMIT = "OVER_LIMIT"
-    REJECTED_BY_SCHEMA = "REJECTED_BY_SCHEMA"
+
+    # Raised only during correction: the model was asked to fix an item and
+    # returned nothing for it. Offering that as an allowed answer is
+    # deliberate — the alternative is a demand for output, which is how a
+    # correction turns into an invention.
+    NOT_CORRECTED = "NOT_CORRECTED"
 
 
 class DropRecord(BaseModel):
@@ -213,6 +219,50 @@ class DropRecord(BaseModel):
     detail: str = ""
 
 
+class RejectedItem(BaseModel):
+    """
+    An item that broke a rule, kept whole so it can be asked about again.
+
+    Deliberately separate from DropRecord, which describes the same event.
+    A drop note is written to the log and so must never carry the person's
+    words; this carries the entire item and never leaves memory. One
+    structure serving both purposes would work exactly until somebody
+    logged it.
+
+    Attributes:
+        item_kind: Whether this was a finding, an event, or a sequence.
+        index: Where it sat in the reply, used to match a correction back
+            to the thing it corrects.
+        rule: What was wrong with it the first time. Never overwritten,
+            because this is what decides whether asking again could help,
+            and it is what a person needs to see if it never comes right.
+        detail: The short, non-identifying note from the drop record.
+        payload: The item itself, exactly as the model returned it.
+        attempts: How many readings this item has now cost. Starts at one,
+            since arriving broken is itself an attempt.
+        last_rule: What went wrong on the most recent attempt, when that
+            differs from the original. An item can arrive with a made-up
+            type, come back with a real one and a contradictory weight, and
+            both facts are worth keeping.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    item_kind: Literal["observation", "event", "chain"]
+    index: int = Field(ge=0)
+    rule: DropRule
+    detail: str = ""
+    payload: ExtractedObservation | ExtractedEvent | ExtractedCausalChain
+    attempts: int = Field(default=1, ge=1)
+    last_rule: DropRule | None = None
+
+    def again(self, *, rule: DropRule) -> "RejectedItem":
+        """Note that another attempt was spent on this item and still failed."""
+        return self.model_copy(
+            update={"last_rule": rule, "attempts": self.attempts + 1}
+        )
+
+
 class ExtractionOutcome(BaseModel):
     """
     Everything one episode produced, after checking.
@@ -223,11 +273,23 @@ class ExtractionOutcome(BaseModel):
         sessions: The anchor node for this episode, when one was minted.
         chains: Cause-and-effect sequences.
         steps: The individual links of those sequences.
+        failed: Findings that broke a rule and could not be corrected in
+            the attempts allowed. Empty until the last attempt has been
+            spent.
         drops: Items that were thrown away, with reasons.
+        rejected: The items behind those drops, kept whole so they can be
+            asked about again. Empty by the time a reading is finished:
+            whatever is still here at the end becomes a failed finding or
+            is discarded.
         ungrounded: How many findings quoted evidence that could not be
             located in the entry. Not fatal — a translated entry is
             legitimately paraphrased — but worth watching, because a rising
             number is what invention looks like from the outside.
+        abandoned: How many items were given up on for good. This is what
+            separates a reading that lost something from one that briefly
+            stumbled and recovered: a finding refused on the first attempt
+            and fixed on the second cost nothing in the end.
+        attempts: How many readings this episode cost, counting the first.
         used_fallback: True when the model call itself failed and nothing
             was extracted.
     """
@@ -239,8 +301,12 @@ class ExtractionOutcome(BaseModel):
     sessions: tuple[SessionNode, ...] = ()
     chains: tuple[CausalChainNode, ...] = ()
     steps: tuple[CausalStepNode, ...] = ()
+    failed: tuple[ObservationNode, ...] = ()
     drops: tuple[DropRecord, ...] = ()
+    rejected: tuple[RejectedItem, ...] = ()
     ungrounded: int = 0
+    abandoned: int = Field(default=0, ge=0)
+    attempts: int = Field(default=1, ge=1)
     used_fallback: bool = False
 
     @property
@@ -258,5 +324,6 @@ __all__ = [
     "RawCaptureResponse",
     "DropRule",
     "DropRecord",
+    "RejectedItem",
     "ExtractionOutcome",
 ]
