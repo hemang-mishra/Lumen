@@ -42,7 +42,7 @@ from lumen.schemas.enums import (
     DecisionStatus,
     ReconciliationAction,
 )
-from lumen.schemas.ids import make_node_id
+from lumen.schemas.ids import make_scoped_node_id
 from lumen.schemas.nodes import ContradictionNode, DecisionAuditNode, RollbackPointer
 from lumen.schemas.pipeline import PlannedBookkeeping, PlannedEdge, PlannedNode
 
@@ -90,6 +90,10 @@ class PlanContext:
         anchor_node_id: What a change can be attributed to — something that
             happened, or the session the thinking happened in.
         anchor_node_type: Which of the two that is.
+        episode_index: Where this episode sits within its entry. Decisions
+            are numbered from one within an episode, and one day's writing
+            often holds several episodes, so without this the second
+            episode would mint note identifiers the first one already used.
     """
 
     at: datetime
@@ -98,6 +102,18 @@ class PlanContext:
     exists: Callable[[str], bool] = lambda _node_id: False
     anchor_node_id: str | None = None
     anchor_node_type: str | None = None
+    episode_index: int = 1
+
+
+# The standing records that should carry a link to every decision made
+# about them, so that "why does the system believe this" can be answered
+# from the record itself rather than only from whatever triggered it.
+#
+# Findings are not on this list because they already get that link as the
+# subject of their own decision.
+_DECIDED_ABOUT_TYPES: frozenset[str] = frozenset(
+    {"PatternNode", "BeliefNode", "ContradictionNode"}
+)
 
 
 # What one action's own records and links come to, before the decision note
@@ -120,7 +136,9 @@ def plan_for(
     was deliberately not done look identical in a graph, and only one of
     them is waiting on somebody.
     """
-    audit_id = make_node_id("d", context.event_date, sequence)
+    audit_id = make_scoped_node_id(
+        "d", context.event_date, context.episode_index, sequence
+    )
 
     writes = (
         _ActionWrites()
@@ -524,20 +542,38 @@ def _edge_handle(edge: PlannedEdge | None) -> str | None:
 def _decided_by(
     decision: SettledDecision, audit_id: str, context: PlanContext
 ) -> list[PlannedEdge]:
-    """Link a finding to the note of the decision made about it."""
-    edge = _edge_between(
-        LogicalEdgeType.DECIDED_BY,
-        from_node_id=decision.item.node_id,
-        from_type=decision.item.node_type,
-        to_node_id=audit_id,
-        to_type="DecisionAuditNode",
-        edge=LumenEdge(
-            source_node_id=decision.item.node_id,
-            target_node_id=audit_id,
-            valid_from=context.at,
-        ),
-    )
-    return [edge] if edge else []
+    """
+    Link the note of a decision to both records it concerns.
+
+    The finding always. And the standing record the decision acted on, when
+    there was one, because that is the record somebody will later be looking
+    at when they ask why the system believes it.
+
+    Only linking the finding leaves a pattern with twenty pieces of evidence
+    unable to say where any of them came from: each decision is filed under
+    the note that triggered it, and there is no way back from the thing that
+    was changed to the changes made to it.
+    """
+    ends = [(decision.item.node_id, decision.item.node_type)]
+    if decision.target_node_id and decision.target_type in _DECIDED_ABOUT_TYPES:
+        ends.append((decision.target_node_id, decision.target_type))
+
+    edges = [
+        _edge_between(
+            LogicalEdgeType.DECIDED_BY,
+            from_node_id=node_id,
+            from_type=node_type,
+            to_node_id=audit_id,
+            to_type="DecisionAuditNode",
+            edge=LumenEdge(
+                source_node_id=node_id,
+                target_node_id=audit_id,
+                valid_from=context.at,
+            ),
+        )
+        for node_id, node_type in ends
+    ]
+    return [edge for edge in edges if edge]
 
 
 def _link(

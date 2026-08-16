@@ -11,7 +11,7 @@ from __future__ import annotations
 
 from enum import StrEnum
 
-from lumen.schemas.enums import HitlEntryType
+from lumen.schemas.enums import HitlEntryType, PipelineStage
 
 
 class BufferStatus(StrEnum):
@@ -56,16 +56,6 @@ class JobStatus(StrEnum):
     CANCELLED = "CANCELLED"
 
 
-class PipelineStage(StrEnum):
-    """The stages a session passes through, in order."""
-
-    STAGE_0_PREPROCESSING = "STAGE_0_PREPROCESSING"
-    STAGE_1_MICROEXTRACTION = "STAGE_1_MICROEXTRACTION"
-    STAGE_2_RETRIEVAL = "STAGE_2_RETRIEVAL"
-    STAGE_3_RECONCILIATION = "STAGE_3_RECONCILIATION"
-    STAGE_4_GRAPH_WRITE = "STAGE_4_GRAPH_WRITE"
-
-
 class StageStatus(StrEnum):
     """Outcome of a single attempt at one stage."""
 
@@ -84,10 +74,11 @@ class WriteTarget(StrEnum):
     VECTOR = "VECTOR"
 
 
-# Why an item is waiting for a person is decided by reconciliation, not by
-# the queue, so that vocabulary lives with the pipeline schemas. It is
-# imported at the top of this module and re-exported below for the code
-# that stores it.
+# Two vocabularies here belong to the pipeline rather than to the database,
+# so they are defined with the pipeline schemas and imported at the top of
+# this module: why an item is waiting for a person, which reconciliation
+# decides, and the list of pipeline stages. Both are re-exported below for
+# the code that stores them.
 
 
 class HitlItemStatus(StrEnum):

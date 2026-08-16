@@ -38,6 +38,7 @@ from lumen.schemas.enums import (
     ObservationType,
     PrincipleDomain,
     Provenance,
+    QualityGateDecision,
     ReconciliationAction,
     RelationshipToUser,
     ReportType,
@@ -1149,3 +1150,366 @@ def seed_belief(graph_store):
         return node_id
 
     return _seed
+
+
+# ---------------------------------------------------------------------------
+# Orchestration fixtures
+#
+# Running a whole entry touches every stage, so these build one script that
+# answers all of them. Each stage's fake looks up its reply by a phrase
+# unique to its own prompt, which means one dictionary can serve the lot and
+# a test only has to override the step it cares about.
+# ---------------------------------------------------------------------------
+
+FULL_RUN_PROMPT_KEYS = {
+    **PROMPT_KEYS,
+    **{f"extract_{k}": v for k, v in EXTRACTION_PROMPT_KEYS.items()},
+    **RETRIEVAL_PROMPT_KEYS,
+    **RECONCILIATION_PROMPT_KEYS,
+    # "ITEMS:" is enough to spot the search prompt when it is the only one
+    # being scripted, but a whole run also sends the decision prompt, which
+    # contains the same heading. A phrase unique to the search prompt keeps
+    # the decision call from being answered with search text.
+    "hyde": "write a single sentence as it might appear",
+}
+
+# One episode's worth of replies, enough to carry an entry all the way from
+# raw text to saved records: it is cleaned, split into one episode, judged
+# worth analysing, read, searched for, and decided about.
+FULL_RUN_SCRIPT: dict[str, str] = {
+    "normalize_text": json.dumps(
+        {
+            "cleaned_text": EPISODE_TEXT,
+            "detected_languages": ["en"],
+            "translated": False,
+        }
+    ),
+    "structure": json.dumps(
+        {
+            "episodes": [
+                {
+                    "episode_summary": "Comparing himself to Alex after a good morning",
+                    "text": EPISODE_TEXT,
+                    "overarching_themes": ["comparison"],
+                }
+            ],
+            "coreference": {
+                "resolved_entities": [
+                    {
+                        "span": "he",
+                        "resolved_to": "Alex",
+                        "confidence": 0.9,
+                        "resolution_basis": "named earlier in the entry",
+                    }
+                ],
+                "ambiguous_refs": [],
+            },
+        }
+    ),
+    "triage": json.dumps(
+        {
+            "scores": [
+                {
+                    "episode_index": 1,
+                    "coherence_score": 0.85,
+                    "reason": "a clear thought with a feeling and a context",
+                }
+            ]
+        }
+    ),
+    "extract_reflection": json.dumps(
+        {
+            "observations": [
+                {
+                    "type": "PATTERN",
+                    "content": "Comparing himself to Alex is what causes the pain",
+                    "raw_evidence": ["I think the comparing is the thing that hurts"],
+                    "extraction_signal_strength": "HIGH",
+                    "person_ref": "Alex",
+                }
+            ],
+            "events": [
+                {
+                    "event_summary": "Ate at the cafe alone without dread",
+                    "raw_evidence": ["I went to the cafe alone today"],
+                    "person_refs": [],
+                }
+            ],
+            "causal_mechanisms": [],
+        }
+    ),
+    "extract_raw_capture": json.dumps(
+        {"context": "A short note about the day", "emotion": None}
+    ),
+    "hyde": json.dumps(
+        {
+            "hypotheticals": [
+                {"index": 1, "text": "He compares himself to other people"},
+                {"index": 2, "text": "He ate somewhere on his own"},
+                {"index": 3, "text": "He reflected on comparison"},
+            ]
+        }
+    ),
+    "decision": json.dumps(
+        {
+            "decisions": [
+                {
+                    "item_index": 1,
+                    "primary": {
+                        "action": "BRANCH",
+                        "confidence": 0.9,
+                        "reason": "nothing like this has been said before",
+                    },
+                    "runner_up": {"action": "AMBIGUOUS", "confidence": 0.1},
+                    "new_node": {
+                        "kind": "PATTERN",
+                        "name": "comparison_spiral",
+                        "statement": "Comparing himself to others is what hurts",
+                        "domain": "SELF_CONCEPT",
+                    },
+                },
+                {
+                    "item_index": 2,
+                    "primary": {
+                        "action": "AMBIGUOUS",
+                        "confidence": 0.2,
+                        "reason": "an ordinary meal",
+                    },
+                },
+                {
+                    "item_index": 3,
+                    "primary": {
+                        "action": "AMBIGUOUS",
+                        "confidence": 0.2,
+                        "reason": "the session itself",
+                    },
+                },
+            ],
+            "people": [
+                {"name": "Alex", "relationship": "COLLEAGUE", "sentiment": "MIXED"}
+            ],
+        }
+    ),
+}
+
+
+@pytest.fixture
+def full_run_providers():
+    """
+    Build a pair of stand-in models that can answer every stage of a run.
+
+    Both models share one script, so a test never has to know which of the
+    two a given step happens to use. Overrides are merged on top, which is
+    how a test makes one step fail or answer differently.
+    """
+    from lumen.providers.fake import FakeLLMProvider
+
+    def _build(overrides: dict[str, str] | None = None):
+        replies = {**FULL_RUN_SCRIPT, **(overrides or {})}
+        script = {
+            FULL_RUN_PROMPT_KEYS[step]: reply for step, reply in replies.items()
+        }
+        return (
+            FakeLLMProvider(dict(script), role=ModelRole.LIGHTWEIGHT, model="fake-light"),
+            FakeLLMProvider(dict(script), role=ModelRole.THINKING, model="fake-thinker"),
+        )
+
+    return _build
+
+
+@pytest.fixture
+def decayed_session(ops_store, make_event):
+    """
+    A conversation sitting in the operational store, ready to be processed.
+
+    A run creates a job against a real buffer row, so the buffer has to
+    exist before the pipeline is pointed at it.
+    """
+
+    def _build(
+        text: str = EPISODE_TEXT,
+        *,
+        session_label: str = "A",
+        source_modality: SourceModality = SourceModality.TEXT_ENTRY,
+    ):
+        buffer = ops_store.buffers.find_or_create(
+            user_id="local", event_date=TODAY, session_label=session_label
+        )
+        ops_store.buffers.append_message(
+            buffer.session_id,
+            BufferMessageRecord(
+                message_id="msg_0",
+                session_id=buffer.session_id,
+                seq=0,
+                role="USER",
+                content=text,
+                timestamp=datetime(2026, 6, 11, 21, 0, tzinfo=UTC),
+                event_date=TODAY,
+            ),
+        )
+        return make_event(
+            [("USER", text)],
+            session_id=buffer.session_id,
+            source_modality=source_modality,
+        )
+
+    return _build
+
+
+@pytest.fixture
+def make_preprocessing(make_episode):
+    """
+    Build the result of cleaning one session, for tests downstream of it.
+
+    Only the parts the orchestrator reads are worth setting here: the
+    episodes it loops over, who the pronouns meant, and which languages the
+    writing was in.
+    """
+
+    def _build(
+        *,
+        episodes: list | None = None,
+        decision: QualityGateDecision = QualityGateDecision.REFLECTION,
+        languages: list[str] | None = None,
+        session_id: str = "sess_test_001",
+    ):
+        from lumen.schemas.pipeline import CoreferenceMap, PreprocessingResult, ResolvedEntity
+
+        return PreprocessingResult(
+            session_id=session_id,
+            episodes=episodes if episodes is not None else [make_episode()],
+            coreference_map=CoreferenceMap(
+                entry_id=session_id,
+                resolved_entities=[
+                    ResolvedEntity(
+                        span="he",
+                        resolved_to="Alex",
+                        confidence=0.9,
+                        resolution_basis="named earlier in the entry",
+                    )
+                ],
+            ),
+            quality_gate_decision=decision,
+            processing_time_ms=5,
+            detected_languages=languages if languages is not None else ["en"],
+        )
+
+    return _build
+
+
+@pytest.fixture
+def reconciliation_outcome(sample_pattern, sample_decision_audit):
+    """
+    One episode's worth of decisions, already made.
+
+    Hand-built rather than produced by running the deciding stage, because
+    the tests that use it are about what happens to a set of decisions
+    afterwards, not about how those decisions were reached. Holds one of
+    each thing a decision can produce: a new record, the link to it, a small
+    update to something that already existed, the note of the decision, and
+    one item nobody could settle.
+    """
+    from lumen.schemas.edges import LogicalEdgeType, ReconciliationEdge
+    from lumen.schemas.enums import BookkeepingOperation, HitlEntryType
+    from lumen.schemas.pipeline import (
+        GraphWritePlan,
+        HitlEscalation,
+        PlannedBookkeeping,
+        PlannedEdge,
+        PlannedNode,
+        ReconciliationOutcome,
+        ReconciliationResult,
+    )
+
+    moment = datetime(2026, 6, 11, 20, 0, tzinfo=UTC)
+    new_pattern = sample_pattern.model_copy(update={"node_id": "pat_new_one"})
+
+    return ReconciliationOutcome(
+        episode_id="ep_new",
+        results=[
+            ReconciliationResult(
+                source_node_id="obs_new_1",
+                action=ReconciliationAction.BRANCH,
+                target_node_id=None,
+                confidence=0.9,
+                decision_model="fake-light",
+                escalated_to_hitl=False,
+                audit_node_id=sample_decision_audit.node_id,
+            )
+        ],
+        audit_nodes=[sample_decision_audit],
+        write_plan=GraphWritePlan(
+            nodes=[
+                PlannedNode(node_type="PatternNode", node=new_pattern),
+                PlannedNode(node_type="DecisionAuditNode", node=sample_decision_audit),
+            ],
+            edges=[
+                PlannedEdge(
+                    logical_type=LogicalEdgeType.BRANCHES_TO,
+                    table="branches_to_obs_pat",
+                    from_node_id="obs_new_1",
+                    to_node_id="pat_new_one",
+                    edge=ReconciliationEdge(
+                        source_node_id="obs_new_1",
+                        target_node_id="pat_new_one",
+                        valid_from=moment,
+                        decision_id=sample_decision_audit.node_id,
+                        confidence=0.9,
+                    ),
+                )
+            ],
+            bookkeeping=[
+                PlannedBookkeeping(
+                    operation=BookkeepingOperation.RECORD_REINFORCEMENT,
+                    node_id="pat_existing",
+                    at=moment,
+                )
+            ],
+            existing_node_ids=frozenset({"obs_new_1", "pat_existing"}),
+        ),
+        escalations=[
+            HitlEscalation(
+                audit_node_id=sample_decision_audit.node_id,
+                source_node_id="obs_new_1",
+                episode_id="ep_new",
+                entry_type=HitlEntryType.AMBIGUOUS_TIE,
+                signal_strength=SignalStrength.HIGH,
+                summary="BRANCH against no existing record held back: TIE",
+            )
+        ],
+        decision_model="fake-light",
+    )
+
+
+# ---------------------------------------------------------------------------
+# Web API fixtures
+#
+# The application is built by a function, so a test points the whole thing at
+# temporary databases by replacing the two dependencies rather than by
+# reaching into it. That is also how the real deployment is wired, so what
+# these tests exercise is the shipped path.
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def api_client(graph_store, ops_store):
+    """A client for the web API, wired to the test databases."""
+    from fastapi.testclient import TestClient
+
+    from lumen.api.deps import get_graph, get_ops
+    from lumen.api.main import create_app
+
+    app = create_app()
+    app.dependency_overrides[get_graph] = lambda: graph_store
+    app.dependency_overrides[get_ops] = lambda: ops_store
+
+    # The stores are supplied directly, so the application's own startup —
+    # which would open a second pair against the configured paths — is
+    # skipped rather than run and thrown away.
+    app.state.graph = graph_store
+    app.state.ops = ops_store
+
+    # Server-side failures are answered rather than re-raised, because
+    # what the caller receives when something breaks is the thing being
+    # tested — and a leaked stack trace is the failure being guarded against.
+    return TestClient(app, raise_server_exceptions=False)

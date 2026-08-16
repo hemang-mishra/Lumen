@@ -99,4 +99,17 @@ lumen/
 | Pydantic-typed `write_node()` signature | Goal 2 |
 | Sparse/BM25 vector configuration | Goal 8 |
 | DDL extraction to structured schema builder (P2 from review) | Backlog |
-| `execute_cypher()` for ad-hoc traversal | Goal 11 |
+| `execute_cypher()` for ad-hoc traversal | **Cancelled in Goal 11** — see below |
+
+**Amendment (Goal 11): `execute_cypher()` was cancelled, not deferred again.**
+
+It would have let a caller run any query at all, which reads as flexibility and is really
+the opposite: query building moves out to callers, Cypher spreads into the web layer, and
+the promise that Kuzu can be swapped for Neo4j quietly stops being true — every caller
+would have to be rewritten with it.
+
+Goal 11 shipped seven named questions on `ReadOnlyGraph` instead: list records, walk out
+N steps, follow a version chain, read a record's decisions, read what one entry produced,
+read a causal sequence, and count what exists. Anything not on that list is a deliberate
+addition, visible in review, rather than something a caller can improvise. Goal 11's plan
+records the reasoning in full.

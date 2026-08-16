@@ -71,6 +71,17 @@ raw_text_hash: "sha256:a3f..."           # hash of cleaned episode text for dedu
 
 **Composite key:** `(event_date, session_label)` uniquely identifies the originating session. A single calendar day can have sessions `"A"`, `"B"`, etc. Episodes from the same session share the same `(event_date, session_label)` and are linked via `follows_from` edges to preserve intra-session narrative flow.
 
+**Who creates it:** the orchestrator, at write time. No stage does — Stage 0 produces the
+cleaned episode, and Stage 1 through Stage 3 are shown what was extracted from it rather
+than the episode itself. The orchestrator is the only component holding the episode, the
+entry it belongs to, and the outcome of reconciling it at the same moment.
+
+**`coreference_map_id` resolves to the operational store**, not to a node in this graph.
+There is no coreference-map table here and there should not be: who the pronouns referred
+to is a working note about how the text was read, not something the person believes or
+experienced. The id is derived from the entry (`coref_<entry_id>`) rather than generated,
+so re-processing an entry points at the map it already has instead of orphaning it.
+
 ---
 
 ### 2. ObservationNode
@@ -594,6 +605,22 @@ Every node and every edge carries timestamps that enable time-range queries and 
 | `valid_from` | All edges | When the edge was created |
 | `invalidated_at` | All edges | Null if active. Set to a timestamp when the edge is rolled back. |
 | `decision_id` | All Reconciliation edges | Foreign key to the `DecisionAuditNode` that produced this edge |
+
+### Reading the Graph at a Past Date
+
+Because every node carries `valid_from` and every edge carries `valid_from` plus
+`invalidated_at`, "what did this look like in March" needs no separate history — it is two
+comparisons:
+
+```
+node.valid_from <= T
+edge.invalidated_at IS NULL OR edge.invalidated_at > T
+```
+
+An edge withdrawn *after* T was still live at T and is followed. `CausalStepNode`,
+`PersonEntityNode`, `DecisionAuditNode` and `MacroextractionReportNode` have no
+`valid_from` at all — a step belongs to whenever its chain was, a person does not start on
+a date — so a date filter does not apply to them and they are never excluded by one.
 
 ### Temporal Decay
 

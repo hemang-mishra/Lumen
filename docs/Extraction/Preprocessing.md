@@ -145,6 +145,12 @@ separate detection step would be a second read of the same string.
 3. If any non-English span is present (including code-mixed Hindi/English), it is translated into English. Interleaved code-mixed sentences are translated as a whole so meaning stays coherent.
 4. Completeness scoring, segmentation, coreference, and extraction always receive English text.
 
+> **The detected languages leave the stage.** `PreprocessingResult.detected_languages`
+> carries them out, and the orchestrator writes them to `EpisodeNode.language_tags`. They
+> were previously worked out, logged, and then dropped — which left `language_tags` with no
+> producer at all, so an entry written in Hindi would be stored as English with nothing
+> anywhere recording that what is on disk is a translation.
+
 > **Why not a dedicated language-ID model.** An on-device classifier such as
 > `fastText lid.176.ftz` would let pure-English entries skip a call, but it cannot be
 > trusted to make that decision here: the canonical code-mixed example below is romanized

@@ -86,7 +86,11 @@ def existing_belief(node_id: str = "bel_old") -> HistoricalNode:
     )
 
 
-def context(*records: HistoricalNode, anchor: tuple[str, str] | None = ("sess_1", "SessionNode")):
+def context(
+    *records: HistoricalNode,
+    anchor: tuple[str, str] | None = ("sess_1", "SessionNode"),
+    episode_index: int = 1,
+):
     return plan.PlanContext(
         at=AT,
         event_date=date(2026, 6, 11),
@@ -94,6 +98,7 @@ def context(*records: HistoricalNode, anchor: tuple[str, str] | None = ("sess_1"
         exists=lambda _node_id: False,
         anchor_node_id=anchor[0] if anchor else None,
         anchor_node_type=anchor[1] if anchor else None,
+        episode_index=episode_index,
     )
 
 
@@ -440,7 +445,7 @@ class TestEveryDecisionIsRecorded:
             sequence=3,
         )
 
-        assert audit.node_id == "d_2026_06_11_003"
+        assert audit.node_id == "d_2026_06_11_01_003"
         assert any(node.node.node_id == audit.node_id for node in fragment.nodes)
 
     def test_the_finding_points_at_its_note(self, make_settled):
@@ -476,7 +481,11 @@ class TestEveryDecisionIsRecorded:
 
         assert audit.status is DecisionStatus.BELOW_THRESHOLD
         assert [node.node_type for node in fragment.nodes] == ["DecisionAuditNode"]
-        assert tables(fragment) == ["decided_by_obs"]
+        # The note is linked from both records it concerns: the finding, and
+        # the pattern that was nearly changed. A decision held back is still
+        # something that was considered about that pattern, and reading it
+        # only from the finding would hide it from the record it was about.
+        assert tables(fragment) == ["decided_by_obs", "decided_by_pat"]
 
     def test_a_tie_is_recorded_as_waiting_for_a_person(self, make_settled):
         decision = make_settled(ReconciliationAction.AMBIGUOUS).refuse(GateRule.TIE)
@@ -549,7 +558,30 @@ class TestReversingADecision:
 
         _, audit = plan.plan_for(decision, context(), sequence=1)
 
-        assert audit.rollback_pointer.edge_to_invalidate == "none:d_2026_06_11_001"
+        assert audit.rollback_pointer.edge_to_invalidate == "none:d_2026_06_11_01_001"
+
+
+class TestNotesFromDifferentEpisodesStayApart:
+    def test_two_episodes_of_one_day_mint_different_note_ids(self, make_settled):
+        # Decisions are numbered from one within an episode, and one day's
+        # writing often holds several. Without the episode in the
+        # identifier, the second episode would reuse the first one's ids and
+        # the save would be refused on a duplicate key.
+        decision = make_settled(ReconciliationAction.AMBIGUOUS)
+
+        _, first = plan.plan_for(decision, context(episode_index=1), sequence=1)
+        _, second = plan.plan_for(decision, context(episode_index=2), sequence=1)
+
+        assert first.node_id != second.node_id
+
+    def test_the_episode_number_is_visible_in_the_id(self, make_settled):
+        _, audit = plan.plan_for(
+            make_settled(ReconciliationAction.AMBIGUOUS),
+            context(episode_index=3),
+            sequence=2,
+        )
+
+        assert audit.node_id == "d_2026_06_11_03_002"
 
 
 class TestAPlanRefusesToBeBuiltWrong:
@@ -760,7 +792,7 @@ class TestEveryActionHasABuilder:
         fragment, _ = plan.plan_for(decision, context(), sequence=1)
 
         assert [node.node_type for node in fragment.nodes] == ["DecisionAuditNode"]
-        assert tables(fragment) == ["decided_by_obs"]
+        assert tables(fragment) == ["decided_by_obs", "decided_by_pat"]
 
 
 class TestHowAWaitingDecisionIsRecorded:

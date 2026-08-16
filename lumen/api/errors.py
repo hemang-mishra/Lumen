@@ -1,0 +1,75 @@
+"""
+Turning things going wrong into answers a caller can act on.
+
+Two rules. A caller asking for something that is not there gets told exactly
+that, by name, because "which of the four identifiers in my request was
+wrong" is otherwise a guessing game. Anything unexpected gets a plain
+apology and nothing else — the details go to the log, where the trace id
+ties them to the run that produced them.
+
+The second rule matters more than it looks. A stack trace or a database
+error returned to a caller leaks the shape of the store and, in a system
+holding somebody's private history, occasionally the contents too.
+"""
+
+from __future__ import annotations
+
+import logging
+
+from fastapi import FastAPI, Request
+from fastapi.responses import JSONResponse
+
+from lumen.observability.trace import get_trace_id
+
+logger = logging.getLogger(__name__)
+
+
+class NotFound(Exception):
+    """
+    Something was asked for by name and there is nothing by that name.
+
+    Carries what kind of thing and which name, so the answer can say which
+    part of the request was wrong instead of only that something was.
+    """
+
+    def __init__(self, kind: str, identifier: str) -> None:
+        self.kind = kind
+        self.identifier = identifier
+        super().__init__(f"no {kind} with id {identifier!r}")
+
+
+def register_error_handlers(app: FastAPI) -> None:
+    """Teach the application how to answer when something goes wrong."""
+
+    @app.exception_handler(NotFound)
+    async def _not_found(_request: Request, exc: NotFound) -> JSONResponse:
+        return JSONResponse(
+            status_code=404,
+            content={
+                "error": "not_found",
+                "detail": str(exc),
+                "kind": exc.kind,
+                "id": exc.identifier,
+            },
+        )
+
+    @app.exception_handler(Exception)
+    async def _unexpected(request: Request, exc: Exception) -> JSONResponse:
+        # Logged in full, answered in one line. What went wrong is worth
+        # keeping; sending it back would hand a caller the shape of the
+        # store, and sometimes a piece of what it holds.
+        logger.exception(
+            "request failed",
+            extra={"path": request.url.path, "error": type(exc).__name__},
+        )
+        return JSONResponse(
+            status_code=500,
+            content={
+                "error": "internal_error",
+                "detail": "something went wrong handling this request",
+                "trace_id": get_trace_id(),
+            },
+        )
+
+
+__all__ = ["NotFound", "register_error_handlers"]

@@ -465,10 +465,17 @@ class TestNoInfrastructure:
         # Settings read at runtime would be a way to change a stage's
         # behaviour without changing its inputs, which is exactly what the
         # pure-function rule exists to prevent.
-        package = Path(__file__).resolve().parents[1] / "pipeline"
+        #
+        # The orchestrator is the one exception, because recording what a
+        # run did is the whole of its job. Naming the stages individually
+        # rather than scanning the package keeps the rule as strict as it
+        # was everywhere it still applies.
+        pipeline = Path(__file__).resolve().parents[1] / "pipeline"
+        stages = ("preprocessing", "extraction", "retrieval", "reconciliation")
         offenders = [
-            path.name
-            for path in package.rglob("*.py")
+            f"{stage}/{path.name}"
+            for stage in stages
+            for path in (pipeline / stage).rglob("*.py")
             if "lumen.operational" in path.read_text()
         ]
 

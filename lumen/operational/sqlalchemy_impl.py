@@ -49,6 +49,7 @@ from lumen.operational.repositories import (
 )
 from lumen.operational.schemas import (
     BufferMessageRecord,
+    CoreferenceRecord,
     ErasureAuditRecord,
     HitlQueueItemRecord,
     PipelineJobRecord,
@@ -413,14 +414,20 @@ class SqlAlchemyPipelineJobRepository:
         stage: PipelineStage,
         input_payload: dict[str, Any] | None = None,
         attempt: int | None = None,
+        episode_id: str = "",
     ) -> StageRunRecord:
         with self._sessions.session() as db:
             job = self._require_job(db, job_id)
-            resolved_attempt = attempt if attempt is not None else self._next_attempt(db, job_id, stage)
+            resolved_attempt = (
+                attempt
+                if attempt is not None
+                else self._next_attempt(db, job_id, stage, episode_id)
+            )
 
             row = models.PipelineStageRun(
                 job_id=job_id,
                 trace_id=job.trace_id,
+                episode_id=episode_id,
                 stage=stage.value,
                 attempt=resolved_attempt,
                 status=StageStatus.RUNNING.value,
@@ -485,6 +492,7 @@ class SqlAlchemyPipelineJobRepository:
         edge_type: str | None = None,
         from_id: str | None = None,
         to_id: str | None = None,
+        episode_id: str = "",
     ) -> None:
         with self._sessions.session() as db:
             job = self._require_job(db, job_id)
@@ -496,6 +504,7 @@ class SqlAlchemyPipelineJobRepository:
             entry = WriteLogEntry(
                 job_id=job_id,
                 trace_id=job.trace_id,
+                episode_id=episode_id,
                 stage=stage,
                 target=target,
                 node_id=node_id,
@@ -508,6 +517,7 @@ class SqlAlchemyPipelineJobRepository:
                 models.PipelineWriteLog(
                     job_id=job_id,
                     trace_id=job.trace_id,
+                    episode_id=entry.episode_id,
                     stage=entry.stage.value,
                     target=entry.target.value,
                     node_id=entry.node_id,
@@ -562,14 +572,61 @@ class SqlAlchemyPipelineJobRepository:
             raise RecordNotFoundError(f"no pipeline job with id {job_id!r}")
         return row
 
-    def _next_attempt(self, db: Session, job_id: str, stage: PipelineStage) -> int:
+    def _next_attempt(
+        self, db: Session, job_id: str, stage: PipelineStage, episode_id: str
+    ) -> int:
+        """
+        The next attempt number for one stage of one episode.
+
+        Counted per episode, because each episode runs the middle stages
+        independently. Counting per job would make the second episode's
+        first try look like the first episode's second.
+        """
         highest = db.scalar(
             select(func.max(models.PipelineStageRun.attempt)).where(
                 models.PipelineStageRun.job_id == job_id,
                 models.PipelineStageRun.stage == stage.value,
+                models.PipelineStageRun.episode_id == episode_id,
             )
         )
         return (highest or 0) + 1
+
+
+class SqlAlchemyCoreferenceMapRepository:
+    """Stores who the pronouns in an entry referred to."""
+
+    def __init__(self, sessions: _SessionManager) -> None:
+        self._sessions = sessions
+
+    def save(self, record: CoreferenceRecord) -> str:
+        """
+        Store one entry's resolutions, overwriting any earlier version.
+
+        Overwriting matters for re-runs: reading the same entry again
+        produces the same map, and a run should not fail because it already
+        succeeded once.
+        """
+        with self._sessions.session() as db:
+            row = db.get(models.CoreferenceMapRecord, record.id)
+            if row is None:
+                row = models.CoreferenceMapRecord(
+                    id=record.id, created_at=_utcnow()
+                )
+                db.add(row)
+
+            row.job_id = record.job_id
+            row.trace_id = record.trace_id
+            row.session_id = record.session_id
+            row.entry_id = record.entry_id
+            row.resolved_entities = record.resolved_entities
+            row.ambiguous_refs = record.ambiguous_refs
+            db.flush()
+            return record.id
+
+    def get(self, map_id: str) -> CoreferenceRecord | None:
+        with self._sessions.session() as db:
+            row = db.get(models.CoreferenceMapRecord, map_id)
+            return _to_coref_record(row) if row else None
 
 
 class SqlAlchemyHitlQueueRepository:
@@ -803,7 +860,7 @@ class SQLAlchemyOperationalStore:
     """
     One way in to all operational data.
 
-    Owns the connection and the five repositories, so callers hold a single
+    Owns the connection and every repository, so callers hold a single
     object rather than assembling pieces themselves.
     """
 
@@ -820,6 +877,7 @@ class SQLAlchemyOperationalStore:
 
         self.buffers = SqlAlchemySessionBufferRepository(self._sessions)
         self.jobs = SqlAlchemyPipelineJobRepository(self._sessions)
+        self.coref = SqlAlchemyCoreferenceMapRepository(self._sessions)
         self.hitl = SqlAlchemyHitlQueueRepository(self._sessions)
         self.settings = SqlAlchemyUserSettingsRepository(self._sessions)
         self.erasure = SqlAlchemyDataErasureAuditRepository(self._sessions)
@@ -958,6 +1016,7 @@ def _to_stage_record(row: models.PipelineStageRun) -> StageRunRecord:
         id=row.id,
         job_id=row.job_id,
         trace_id=row.trace_id,
+        episode_id=row.episode_id or "",
         stage=PipelineStage(row.stage),
         attempt=row.attempt,
         status=StageStatus(row.status),
@@ -978,6 +1037,7 @@ def _to_write_entry(row: models.PipelineWriteLog) -> WriteLogEntry:
         id=row.id,
         job_id=row.job_id,
         trace_id=row.trace_id,
+        episode_id=row.episode_id or "",
         stage=PipelineStage(row.stage),
         target=WriteTarget(row.target),
         node_id=row.node_id,
@@ -985,6 +1045,19 @@ def _to_write_entry(row: models.PipelineWriteLog) -> WriteLogEntry:
         from_id=row.from_id,
         to_id=row.to_id,
         written_at=_aware(row.written_at),
+    )
+
+
+def _to_coref_record(row: models.CoreferenceMapRecord) -> CoreferenceRecord:
+    return CoreferenceRecord(
+        id=row.id,
+        job_id=row.job_id,
+        trace_id=row.trace_id,
+        session_id=row.session_id,
+        entry_id=row.entry_id,
+        resolved_entities=list(row.resolved_entities or []),
+        ambiguous_refs=list(row.ambiguous_refs or []),
+        created_at=_aware(row.created_at),
     )
 
 
@@ -1038,6 +1111,7 @@ __all__ = [
     "SQLAlchemyOperationalStore",
     "SqlAlchemySessionBufferRepository",
     "SqlAlchemyPipelineJobRepository",
+    "SqlAlchemyCoreferenceMapRepository",
     "SqlAlchemyHitlQueueRepository",
     "SqlAlchemyUserSettingsRepository",
     "SqlAlchemyDataErasureAuditRepository",

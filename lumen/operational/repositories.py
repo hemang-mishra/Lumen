@@ -24,6 +24,7 @@ from lumen.operational.enums import (
 )
 from lumen.operational.schemas import (
     BufferMessageRecord,
+    CoreferenceRecord,
     ErasureAuditRecord,
     HitlQueueItemRecord,
     PipelineJobRecord,
@@ -164,11 +165,16 @@ class PipelineJobRepository(Protocol):
         stage: PipelineStage,
         input_payload: dict[str, Any] | None = None,
         attempt: int | None = None,
+        episode_id: str = "",
     ) -> StageRunRecord:
         """
         Record that a stage has begun, saving what went into it so the stage
         can be replayed later. The attempt number is worked out automatically
         when not given.
+
+        The episode is named for stages that run once per episode. Attempts
+        are then counted per episode, so running four episodes reads as four
+        first attempts rather than one stage retried three times.
         """
         ...
 
@@ -196,6 +202,7 @@ class PipelineJobRepository(Protocol):
         edge_type: str | None = None,
         from_id: str | None = None,
         to_id: str | None = None,
+        episode_id: str = "",
     ) -> None:
         """Note that a run created something in the graph or vector store."""
         ...
@@ -211,6 +218,29 @@ class PipelineJobRepository(Protocol):
         This is the reverse lookup that makes any node in the graph traceable
         back to the conversation it came from.
         """
+        ...
+
+
+@runtime_checkable
+class CoreferenceMapRepository(Protocol):
+    """
+    Stores who the pronouns in an entry referred to.
+
+    Every episode in the graph carries the id of one of these. Without
+    somewhere to keep them, that id would point at nothing.
+    """
+
+    def save(self, record: CoreferenceRecord) -> str:
+        """
+        Store one entry's resolutions, replacing any earlier version.
+
+        Replacing rather than refusing, because re-running an entry produces
+        the same map again and a second run should not fail over it.
+        """
+        ...
+
+    def get(self, map_id: str) -> CoreferenceRecord | None:
+        """Fetch one map, or None if there is no such map."""
         ...
 
 
@@ -309,6 +339,7 @@ class OperationalStore(Protocol):
 
     buffers: SessionBufferRepository
     jobs: PipelineJobRepository
+    coref: CoreferenceMapRepository
     hitl: HitlQueueRepository
     settings: UserSettingsRepository
     erasure: DataErasureAuditRepository
@@ -338,6 +369,7 @@ __all__ = [
     "UnknownSettingKeyError",
     "SessionBufferRepository",
     "PipelineJobRepository",
+    "CoreferenceMapRepository",
     "HitlQueueRepository",
     "UserSettingsRepository",
     "DataErasureAuditRepository",

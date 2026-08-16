@@ -395,6 +395,7 @@ def _finish(
         processing_time_ms=elapsed_ms,
         pending_reflections=outcome.pending_reflections,
         co_created_spans=adopted,
+        detected_languages=list(normalized.detected_languages) if normalized else [],
     )
 
 

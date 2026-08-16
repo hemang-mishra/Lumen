@@ -190,6 +190,19 @@ AMBIGUOUS items are never auto-executed. The action is immediately written to th
 
 Because `SUSPENDED` now means *partially reconciled with something outstanding* rather than *nothing written*, `GraphProvider.find_unresolved_high_signal` treats `SUSPENDED` and `PENDING_RERECONCILIATION` alike. Without that, the retrieval anchor built to surface un-reconciled weighty material would stop finding exactly the items Stage 3 set aside.
 
+**Who writes the queue row.** Stage 3 returns the escalations; the orchestrator enqueues
+them, immediately after the episode's graph transaction commits and never before — each
+row points at the `DecisionAuditNode` of the decision it is waiting on, and that note has
+to exist first. Enqueuing is keyed on the audit node, so re-running an entry does not ask
+the person the same question twice. The queue's cap, snooze and auto-resolve behaviour
+remains Goal 18's.
+
+**An extraction failure is not queued.** `hitl_queue.audit_node_id` is `NOT NULL` and
+unique, and an item that failed extraction never reached Stage 3, so it has no audit node
+and one cannot be built honestly for it. Those items are written to the graph as
+`status: EXTRACTION_FAILED` with a `failed_extraction` edge, and their episode is marked
+`SUSPENDED`; surfacing them for review waits on Goal 18 resolving the schema question.
+
 ### HITL Presentation for AMBIGUOUS Items
 
 In the HITL queue, AMBIGUOUS items are presented with:

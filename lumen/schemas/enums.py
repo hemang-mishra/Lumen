@@ -319,6 +319,44 @@ class ReconciliationStatus(StrEnum):
     PENDING_RERECONCILIATION = "PENDING_RERECONCILIATION"
 
 
+class PipelineStage(StrEnum):
+    """
+    The stages a session passes through, in order.
+
+    Lives here rather than with the database vocabularies because it
+    describes the pipeline itself. The operational package re-exports it for
+    the tables that record stage runs, so there is still only one list.
+    """
+
+    STAGE_0_PREPROCESSING = "STAGE_0_PREPROCESSING"
+    STAGE_1_MICROEXTRACTION = "STAGE_1_MICROEXTRACTION"
+    STAGE_2_RETRIEVAL = "STAGE_2_RETRIEVAL"
+    STAGE_3_RECONCILIATION = "STAGE_3_RECONCILIATION"
+    STAGE_4_GRAPH_WRITE = "STAGE_4_GRAPH_WRITE"
+
+
+class EpisodeRunStatus(StrEnum):
+    """
+    How one episode's trip through the pipeline ended.
+
+    Separate from an episode's reconciliation status, which says what the
+    episode *means*. This says what the run *did*, and the two can differ:
+    a skipped episode is complete in the graph and did nothing this time.
+
+    COMPLETE  — decided and saved.
+    SUSPENDED — saved, but something in it is waiting for the person.
+    SKIPPED   — already in the graph; not read or decided again.
+    FAILED    — nothing was saved for it. Other episodes are unaffected.
+    DISCARDED — held nothing worth extracting.
+    """
+
+    COMPLETE = "COMPLETE"
+    SUSPENDED = "SUSPENDED"
+    SKIPPED = "SKIPPED"
+    FAILED = "FAILED"
+    DISCARDED = "DISCARDED"
+
+
 class ReconciliationAction(StrEnum):
     """The 8 Reconciliation actions. See Reconciliation.md."""
 
@@ -512,6 +550,8 @@ __all__ = [
     "EntryClass",
     "QualityGateDecision",
     "ReconciliationStatus",
+    "PipelineStage",
+    "EpisodeRunStatus",
     "ReconciliationAction",
     "PrincipleDomain",
     "LifecycleState",

@@ -205,6 +205,7 @@ The personal version runs all services as Python modules in a single process. Th
 | **Retrieval Service** | Step 2 (HyDE + Hybrid Search) | Function call in Extraction Worker | Separate FastAPI service (CPU-bound, scale independently) |
 | **Reconciliation Worker** | Step 3 (Reconciliation decisions + HITL escalation) | Python-RQ worker | Celery worker, separate queue from Extraction |
 | **Graph Service** | Step 4 + all graph reads | Module in BFF | Separate FastAPI service with connection pool |
+
 | **Query Service** | Step 5 (GraphRAG + Conversational RAG Mode) | Module in BFF | Separate FastAPI service |
 | **HITL Service** | Review queue management, one-tap decisions | Module in BFF | Separate FastAPI service |
 | **Scheduler** | Trigger Macroextraction jobs on schedule | APScheduler in BFF | Kubernetes CronJob |
@@ -426,6 +427,25 @@ nodes this same run extracted, which the orchestrator writes immediately before 
 plan runs). A dangling reference fails while planning rather than halfway through
 saving.
 
+**The orchestrator adds the structural half.** Stage 3 is shown what was extracted, not
+the episode it came from, so it cannot create the `EpisodeNode` or link anything to it.
+The orchestrator builds that half — the episode record, `contains_*`, `chain_contains`,
+`failed_extraction`, `follows_from` — and merges it with Stage 3's plan into one
+`GraphWritePlan`, so the plan's own checks cover the whole episode. It returns a
+`RunReport` carrying one `EpisodeOutcome` per episode.
+
+```python
+def run_pipeline(
+    event: SessionDecayEvent, *, graph: GraphProvider, vectors: VectorProvider,
+    embedder: EmbeddingProvider, lightweight: LLMProvider, thinking: LLMProvider,
+    ops: OperationalStore, config: AppConfig | None = None,
+) -> RunReport: ...
+```
+
+It is a plain synchronous function today, not a queued task. The RQ/Redis topology below
+is Goal 20's, along with the watcher that starts a run when a session goes idle — the
+personal build has no long-running process to host either yet.
+
 Each worker accepts an input model and emits an output model. The orchestrator is the only component that chains them. This means any stage can be tested in complete isolation by constructing its input model and asserting its output model — no real DB, no real LLM required.
 
 ---
@@ -510,6 +530,18 @@ app/
 - Timeline scrubber: see the graph at any past date (uses `valid_from` timestamps)
 - Filter by domain, sensitivity tier, date range
 
+> **What backs each of these.** The starting view and the filters are
+> `GET /graph/nodes`; the counters are `GET /graph/stats`; expand-on-click is
+> `GET /graph/nodes/{id}/neighbors`, which returns nodes and edges together and sets
+> `truncated` when a limit cut the answer short — a partial graph drawn as a complete one
+> is a wrong answer that looks right. The detail panel is `GET /graph/nodes/{id}` plus
+> `/versions` and `/decisions`. The timeline scrubber is the `as_of` parameter on
+> `neighbors`, which also keeps links a later rollback withdrew.
+>
+> **Depth is capped at three hops.** Past that, a well-connected graph is mostly reachable
+> from anywhere in it, so a deeper walk is not a more detailed answer — it is the whole
+> history fetched by accident.
+
 **HITL Review Queue**
 - Card-based UI: one card per AMBIGUOUS decision
 - Shows: what was extracted, what was retrieved, what the AI proposed
@@ -522,6 +554,13 @@ app/
 - Expandable: click any stage to see the exact Pydantic model that entered and exited
 - Re-run button: re-queue a failed stage without reprocessing the full pipeline
 - Decision Audit Trail: visual diff of what EVOLVE changed
+
+> **What backs it.** `GET /debug/traces/{trace_id}` returns the job, every stage attempt in
+> order with its timings and model, the payloads that went in and came out, and everything
+> the run wrote. `GET /debug/nodes/{node_id}/provenance` answers the other direction — node
+> to run to conversation — which is why no trace identifier has to live on graph nodes.
+>
+> The re-run button has no endpoint yet: `rerun_from_stage` is not implemented (see §10).
 
 ### 7.3 Real-time Updates
 
@@ -539,6 +578,18 @@ These rules are the architectural contract that keeps the codebase debuggable an
 
 ### Rule 1: Providers are always Protocols
 No direct imports of `google.generativeai`, `openai`, `kuzu`, or `qdrant_client` outside their `providers/` module. Every call goes through a Protocol. Business logic has zero knowledge of vendor SDKs.
+
+**There is no general query method, and there will not be one.** Every graph read is a
+named question — "what is within N steps of this", "how has this belief changed" — rather
+than a way to run arbitrary Cypher. A general one would push query building out to
+callers, spread graph-shaped thinking into the web layer, and quietly end the promise that
+Kuzu can be swapped for Neo4j without touching business logic. An `execute_cypher()` was
+once planned for the read APIs and was **cancelled** for exactly that reason; anything the
+system cannot answer today is a deliberate addition to `ReadOnlyGraph`, visible in review.
+
+**Read-only callers get `ReadOnlyGraph`.** `GraphProvider` extends it with the writes. A
+component whose job is reading — the web layer, today — is handed the narrower type, so a
+write is not merely discouraged there: the method is not on the object it was given.
 
 ### Rule 2: Pipeline stages are pure functions
 Each stage function accepts a Pydantic input model and returns a Pydantic output model. No global state. No direct DB calls from within a stage — the stage returns its result and the orchestrator handles persistence. This means any stage is unit-testable with no infrastructure.
@@ -644,6 +695,20 @@ Any failed or incorrect pipeline stage can be re-queued with the original input.
 - `rerun_from_stage(session_id, stage)` — re-process from a given stage forward
 - `rerun_session(session_id)` — full re-processing with the current model configuration
 - Invalidate + re-run reconciliation for specific nodes (without touching extraction)
+
+**What is implemented today is the second one, and it is safe to repeat.** Calling
+`run_pipeline` again on a session skips any episode whose record is already in the graph —
+the whole episode, including reading and deciding it, not merely its saving. Skipping only
+the saving would run Reconciliation against a graph that already holds its own previous
+output and record the entry as a repeat of itself.
+
+`rerun_from_stage` is not built yet. Every stage's input and output payload is already
+recorded on `pipeline_stage_runs`, so it is a small addition when a caller needs it.
+
+**Repairing an index gap.** The graph and the vector store cannot share a transaction, so
+a record can commit to the graph and fail to reach the index. `repair_index(trace_id, …)`
+recovers exactly those: `pipeline_write_log` records node writes and vector writes
+separately, and the difference between the two lists is the repair set.
 
 ---
 

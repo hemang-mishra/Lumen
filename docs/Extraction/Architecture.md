@@ -93,6 +93,15 @@ Stage 4: Graph Write
 
 - **Pass B — Structural Retrieval:** A deterministic, graph-keyed lookup that bypasses embedding entirely. It runs whenever any of the following anchors are present in the current episode:
   1. **Named persons** from the coreference map — retrieves all active `BeliefNode`, `PatternNode`, and `ObservationNode` instances linked to that `PersonEntityNode`.
+
+     > **Two hops, not one.** Only observations, events and sessions carry a `mentions`
+     > edge to a person. A belief or pattern is *about* someone because a finding about
+     > them turned into it, so those are reached through whichever `branches_to`,
+     > `reinforces` or `same_as` edge a decision created. Withdrawn links are not
+     > followed, and a record reachable by two routes is offered once — a duplicate wastes
+     > one of at most eight candidate places. Without the second hop, someone named again
+     > months later surfaces only individual notes, and the standing pattern those notes
+     > produced is invisible unless the wording happens to match.
   2. **`historical_era` tags** — retrieves all nodes tagged with that era (e.g., `a major entrance exam_PREP`).
   3. **High-sensitivity open nodes** — retrieves any `INAUTHENTICITY_STATE`, `IDENTITY_FUSION_STATE`, `EXISTENTIAL_REFLECTION`, or `SUPPRESSED_EMOTION_SURFACING` observations **belonging to an episode whose `reconciliation_status` is `PENDING_RERECONCILIATION`**.
 
@@ -129,6 +138,34 @@ Stage 4: Graph Write
 > Creates".
 
 **Stage 4 summary:** Executes the Reconciliation decisions as graph writes. Content nodes are append-only and immutable. Decision Audit Nodes are first-class, reversible graph nodes. See [`Reconciliation.md`](Reconciliation.md).
+
+Stage 4 also writes the half of the graph that Reconciliation never sees. Reconciliation
+is shown what was extracted, not the episode it came from, so the orchestrator creates the
+`EpisodeNode` and the structural skeleton around it — `contains_*` to every extracted
+child, `chain_contains` from a causal chain to its steps, `failed_extraction` to anything
+that could not be read, and `follows_from` to the previous episode of the same entry. That
+half is merged with the Reconciliation write plan into a single plan before anything is
+saved, so the plan's own consistency checks cover the whole episode rather than half of it.
+
+> **One episode is one unit of saving.** Every record, link and bookkeeping update an
+> episode produces commits in a single graph transaction; a failure partway through leaves
+> the graph exactly as it was. Episodes of the same entry are saved separately and fail
+> independently — one bad episode does not cost the others, and the entry's `follows_from`
+> chain is built against the last episode that actually committed, never one whose
+> transaction was rolled back.
+
+> **The search index is written after the graph commits, and cannot join it.** Every
+> record's vector is computed *before* the transaction opens, so an embedding failure costs
+> nothing and the episode is simply retried. Only the index write itself happens after the
+> commit; if it fails, the records are real and correct but unfindable, the job is marked
+> failed, and the write log names them so `repair_index()` can recover them without redoing
+> the entry. Which node types are indexed is the set the semantic retrieval pass reads —
+> asserted equal in code, because indexing a type nothing searches for is waste and failing
+> to index one it does search for is a hole that never announces itself.
+
+> **Re-running an entry skips episodes already in the graph — whole, not just their
+> writing.** Skipping only the save would run Reconciliation against a graph that already
+> contains its own previous output, which reads the entry as a repeat of itself.
 
 ---
 

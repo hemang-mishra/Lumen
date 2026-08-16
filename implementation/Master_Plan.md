@@ -349,20 +349,147 @@ This document outlines the systematic, stage-by-stage implementation plan for th
 ## Phase 3: Graph Construction & E2E Testing (Goals 10-12)
 **Objective:** Tie the extraction pipeline to the databases, execute full runs, and manually inspect the graph.
 
-- [ ] **Goal 10: End-to-End Extraction Pipeline Harness**
-  - Implement `lumen/pipeline/orchestrator.py` — chains Stage 0 → 1 → 2 → 3 → Graph Write → Vector Write.
-  - Graph writes go through `GraphProvider` (HLD Rule 3: one write path).
-  - *Test:* Run full pipeline on a single text file, verify Kuzu nodes + Qdrant vectors written.
+- [x] **Goal 10: End-to-End Extraction Pipeline Harness** ✅
+  - Implemented `lumen/pipeline/orchestration/` as a package (`runner`, `episode`,
+    `compose`, `embed`, `commit`, `contracts`, `bookkeeping`) rather than the single
+    `orchestrator.py` named above — same call as Goals 5–9. `run_pipeline()` and
+    `repair_index()` are the only public names.
+  - Input: `SessionDecayEvent` → Output: **`RunReport`**, carrying one `EpisodeOutcome`
+    per episode. Every store and model is injected, so the signature is a complete
+    statement of what a run can touch.
+  - **A plain synchronous function, not a queued task** (per explicit user decision).
+    Redis/RQ and the idle-conversation watcher move to Goal 20, where a long-running
+    process exists to host them; Goals 11–12 want ordered runs anyway.
+  - **An episode saves whole or not at all** (per explicit user decision). Added
+    `GraphProvider.transaction()` — the database always supported it and we had never
+    exposed it. Nesting is refused rather than silently flattened.
+  - **Episodes fail independently** (per explicit user decision). One bad topic does not
+    cost the other three; the `follows_from` chain is built against the last episode that
+    actually committed, never one whose transaction was rolled back.
+  - **The orchestrator writes the half Stage 3 never sees:** the `EpisodeNode` — which
+    nothing had ever created despite every stage naming it — plus `contains_*`,
+    `chain_contains`, `failed_extraction` and `follows_from`. Merged with Stage 3's plan
+    into one `GraphWritePlan`, so its three validators cover the whole episode.
+  - **Vectors are computed before the transaction opens** (per explicit user decision), so
+    an embedding failure costs nothing. Only the index write happens after the commit; if
+    it fails the records are kept, the run reports failure, and `repair_index()` recovers
+    them from the write log — node writes and vector writes are logged separately, so the
+    difference between the two lists *is* the repair set. `INDEXED_NODE_TYPES` **is**
+    retrieval's `CONTENT_TABLES`, asserted identical, so the two cannot drift.
+  - **Re-running skips whole episodes, not just their saving** (per explicit user
+    decision). Skipping only the write would re-decide an entry against a graph holding
+    its own previous conclusions and record it as a repeat of itself.
+  - **Undecided items reach the review queue now** (per explicit user decision), keyed on
+    the audit node so a re-run never asks twice. Cap/snooze/auto-resolve stay Goal 18's;
+    extraction failures still cannot be queued (`hitl_queue.audit_node_id` is `NOT NULL`
+    and they have no audit node).
+  - **The coreference map finally has a home** (per explicit user decision): a
+    `coreference_maps` table in the operational DB, id derived as `coref_<entry_id>`.
+    `EpisodeNode.coreference_map_id` had always pointed at something nothing stored.
+  - *Amends Goal 9:* audit ids are now episode-scoped (`d_2026_06_11_01_001`) — two
+    episodes of one day both numbered their notes from one and collided on a duplicate
+    key, a bug only reachable once something ran two episodes in a row. *Amends Goal 5:*
+    `PreprocessingResult.detected_languages` — `EpisodeNode.language_tags` had no producer,
+    so a Hindi entry would be stored as English with nothing saying it was translated.
+    *Amends Goal 1:* Kuzu rollback tolerates the database having already abandoned the
+    transaction, which was replacing every real failure with a complaint about cleanup.
+    *Amends Goal 3:* `episode_id` on `pipeline_stage_runs` and `pipeline_write_log`,
+    uniqueness moved to `(job, stage, episode, attempt)`, migration `0002_orchestration`.
+    `PipelineStage` moved to `schemas/enums.py` — the same move Goal 9 made for
+    `HitlEntryType`.
+  - *Narrowed, not deleted:* Goals 5 and 6 asserted that nothing in `lumen/pipeline/`
+    imports `lumen.operational`. That rule protects stage purity, and persistence is the
+    orchestrator's entire job; both guards now name the four stage packages individually.
+  - *Test:* A real journal entry read from a file produces episode/observation/event/
+    session/pattern/person/audit records in a real Kuzu database and matching vectors in a
+    real Qdrant collection — verified by reading both stores back, not by trusting the
+    report.
+  - *Result:* 1799 tests passing (1649 from Goals 1–9 + 150 new), **100% coverage** on
+    `lumen/pipeline/orchestration/` and `lumen/operational/`, 98% on `lumen/graph/`.
+  - *Plan:* [`implementation/Goal_10_Plan.md`](file:///Users/hemangmishra/Projects/Lumen/implementation/Goal_10_Plan.md)
 
-- [ ] **Goal 11: Graph Read/Debug APIs**
-  - Implement graph traversal queries in `lumen/graph/kuzu_impl.py` (multi-hop, time-range, domain filter).
-  - Expose in `lumen/api/routes/graph.py` as FastAPI endpoints.
-  - *Test:* Programmatically traverse the graph to verify edges, version chains, and causal anchors.
+- [x] **Goal 11: Graph Read & Debug APIs** ✅
+  - Implemented seven named traversals on `GraphProvider` (`find_nodes`, `get_neighborhood`,
+    `get_version_chain`, `get_decision_history`, `get_episode_contents`, `get_causal_chain`,
+    `count_by_type`) plus `lumen/graph/queries.py` for filter composition and row tidying —
+    `kuzu_impl.py` was already ~800 lines and the fiddly half is checkable with no database.
+  - Implemented `lumen/api/` (`main`, `deps`, `schemas`, `errors`, `routes/graph`,
+    `routes/debug`) — eleven read-only endpoints, the project's first HTTP surface.
+  - **No general query method, and Goal 1's `execute_cypher()` is cancelled rather than
+    deferred again.** It would push query building out to callers, spread Cypher into the
+    web layer, and end the promise that Kuzu can be swapped for Neo4j. Anything the system
+    cannot answer is now a deliberate addition, visible in review.
+  - **`ReadOnlyGraph` extracted; `GraphProvider` extends it.** The API is handed the
+    narrower type, so a write endpoint is not merely discouraged — the method is not on the
+    object it was given. Asserted by a test, along with "every exposed verb is GET".
+  - **Nothing raw crosses the boundary.** A node read from Kuzu arrives as the union of
+    every column across every table — 121 fields, almost all empty, lists stored as text.
+    Responses are tidied, checked models instead.
+  - **`truncated` on every subgraph.** A piece that was cut and a piece that was genuinely
+    that size look identical otherwise, and a partial graph drawn as a complete one is a
+    wrong answer that looks right. Depth is capped at three hops.
+  - **Time travel is a filter, not a feature:** `as_of` compares `valid_from`, and a link
+    withdrawn *after* that date was still live then. Withdrawn links are hidden by default
+    and reachable on request.
+  - *Amends Goal 8:* `find_linked_to_person` now takes the second hop it recorded as
+    "belongs with Goal 11's traversal work" — beliefs and patterns reached through the
+    observation that produced them, withdrawn links not followed, duplicates offered once.
+  - *Bugs found by running it:* `OpenLoopNode` has `resolution_status`, not `status`, and
+    four tables have no `valid_from` at all — both would have crashed an ordinary listing
+    rather than returning nothing, so both lists are now derived from the schema with a
+    test asserting every named column exists. And **a node's shape depends on how it was
+    fetched** (121 columns untyped, 21 typed), which made a version chain describe the same
+    history differently depending on where the walk started; chains now collect ids and
+    fetch once.
+  - *Test:* The API tests build their graph by **actually running the pipeline** on Goal
+    10's entry rather than seeding fixtures — a hand-seeded graph agrees with whatever
+    shape the test author imagined.
+  - *Result:* 1937 tests passing (1799 from Goals 1–10 + 138 new), **100% coverage** on
+    `lumen/api/` and `lumen/graph/queries.py`, 99% on `lumen/graph/`.
+  - *Plan:* [`implementation/Goal_11_Plan.md`](file:///Users/hemangmishra/Projects/Lumen/implementation/Goal_11_Plan.md)
 
-- [ ] **Goal 12: Multi-Session Integrity Test**
-  - Feed 3–5 consecutive days of simulated journal logs.
-  - Verify: patterns accumulate `evidence_count`, version chains link correctly, `follows_from` edges order episodes.
-  - *Test:* Traverse Kuzu graph to ensure patterns aren't fragmented across sessions.
+- [x] **Goal 12: Multi-Session Integrity** ✅
+  - Implemented `lumen/simulation/` (`corpus`, `themes`, `runner`, `__main__`) — five
+    consecutive days written as a journal with an arc, a stand-in embedder that clusters
+    by theme, and one call that feeds the days through the real pipeline in order.
+  - **The corpus ships in the package, not the test folder.** Phase 3's objective is to
+    "manually inspect the graph" and there was no way to fill one; `python -m
+    lumen.simulation` now does it in one command. Same precedent as Goal 4's fakes.
+  - **A themed stand-in embedder was necessary, not convenient.** The existing one hashes
+    text, so two entries about one struggle land as far apart as two unrelated ones —
+    under it the pipeline *must* fragment, and the test would have failed for a reason
+    that has nothing to do with the pipeline. The new one is *told* the theme rather than
+    inferring it, and says so.
+  - **The four integrity properties hold:** one theme across five days is one pattern with
+    `evidence_count` 3; a belief created on day 4 and evolved on day 5 forms a linked
+    version chain with exactly one current version and the older kept; every record traces
+    to its entry, run and decision; the two episodes of one day are ordered. Running the
+    same week twice produces the same graph.
+  - **Assertions read through Goal 11's API** where possible, so the test exercises what a
+    person would actually use.
+  - *Amends Goal 9 — two real bugs, both unreachable from a single entry:*
+    **a person mentioned again on a later day crashed the whole episode** (they are found
+    rather than created, so nothing in the plan created them and the link to them looked
+    like it pointed at nothing — `_known_ids` now counts every bookkeeping target as an
+    existing record); and **a standing record could not report its own decision history**,
+    because `decided_by` was written only from the finding, leaving three of the six link
+    tables unreachable and "why does the system believe this?" unanswerable from the
+    record itself.
+  - *Amends Goal 8/11:* retrieval's `PERSON_LINKED_TYPES` gains `PatternNode` and
+    `BeliefNode`. Goal 11 built the second hop and nothing called it, so a person named
+    again surfaced only individual notes and never the pattern they produced.
+  - *Corpus changed after the fact, recorded in Section C:* day 4's observation type
+    (the deciding model's `new_node.kind` is asked for and never read — what a finding
+    becomes is decided by its type), day 5's action (a version chain needs an EVOLVE and
+    nothing evolved), and day 5's wording (it claimed a theme its words no longer
+    contained — caught by a corpus test).
+  - *Test:* 60 new tests. The five days run against real Kuzu and Qdrant; an opt-in live
+    variant runs the same corpus against real models and is deselected by default,
+    because whether a real model recognises Wednesday from Monday is a question about
+    prompts that can change without this repository changing.
+  - *Result:* 2010 tests passing (1937 from Goals 1–11 + 73 new), **100% coverage** on
+    `lumen/simulation/` and `lumen/pipeline/reconciliation/`.
+  - *Plan:* [`implementation/Goal_12_Plan.md`](file:///Users/hemangmishra/Projects/Lumen/implementation/Goal_12_Plan.md)
 
 ## Phase 4: Query Layer (Goals 13-16)
 **Objective:** Build the real-time, invisible RAG injection system per [`docs/Query/Conversational_RAG_Mode.md`](file:///Users/hemangmishra/Projects/Lumen/docs/Query/Conversational_RAG_Mode.md).

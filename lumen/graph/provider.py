@@ -9,17 +9,201 @@ See: docs/hld/Technical_HLD.md Section 2.2
 
 from __future__ import annotations
 
-from datetime import datetime
-from typing import TYPE_CHECKING, Any, Protocol
+from contextlib import AbstractContextManager
+from datetime import date, datetime
+from typing import TYPE_CHECKING, Any, NamedTuple, Protocol
 
 if TYPE_CHECKING:
     from lumen.schemas.base import GraphNode
 
 
-class GraphProvider(Protocol):
+class EdgeRow(NamedTuple):
+    """
+    One link, as it comes back from a read.
+
+    Links have no identifier of their own in the store, so the table and the
+    two ends together are the only way to name a particular one. That triple
+    is what a rollback has to be told, and it is why this is three fields
+    rather than an id.
+
+    Attributes:
+        edge_type: The table the link lives in, which is also what it means.
+        from_node_id: Where it starts.
+        to_node_id: Where it ends.
+        properties: Its own columns — when it was made, which decision made
+            it, and how sure that decision was.
+    """
+
+    edge_type: str
+    from_node_id: str
+    to_node_id: str
+    properties: dict[str, Any]
+
+
+class GraphSlice(NamedTuple):
+    """
+    A piece of the graph: some records and the links among them.
+
+    Both halves are needed together or neither is useful. Records without
+    their links are a list, and links without their records are a set of
+    identifiers nobody can read.
+
+    Attributes:
+        nodes: The records in this piece.
+        edges: The links between them.
+        truncated: True when a limit cut the answer short. A piece of the
+            graph that was cut and a piece that was genuinely that size look
+            identical otherwise, and a partial graph presented as a whole one
+            is a wrong answer that looks right.
+    """
+
+    nodes: list[dict[str, Any]]
+    edges: list[EdgeRow]
+    truncated: bool = False
+
+
+class ReadOnlyGraph(Protocol):
+    """
+    Everything that can be asked of the graph, and nothing that changes it.
+
+    Exists so that a component with no business writing can be handed
+    something that structurally cannot. The web layer takes one of these, so
+    a write is not merely discouraged there — the method is not on the type
+    it was given.
+
+    Every read is a named question rather than a way to run any query at
+    all. A general one would let graph-shaped thinking spread into whatever
+    called it, and would quietly end the promise that the store behind this
+    can be replaced.
+    """
+
+    def get_node(self, node_id: str) -> dict[str, Any] | None:
+        """Retrieve a node's properties by its ID. Returns None if not found."""
+        ...
+
+    def get_nodes_by_ids(self, node_ids: list[str]) -> list[dict[str, Any]]:
+        """Retrieve several nodes at once, skipping any that do not exist."""
+        ...
+
+    def find_nodes(
+        self,
+        node_types: list[str],
+        *,
+        since: datetime | date | None = None,
+        until: datetime | date | None = None,
+        domain: str | None = None,
+        signal_strength: str | None = None,
+        era_tag: str | None = None,
+        active_only: bool = True,
+        limit: int = 50,
+        offset: int = 0,
+    ) -> list[dict[str, Any]]:
+        """
+        List records of the given kinds, narrowed by whatever was asked for.
+
+        A filter a kind of record cannot answer is skipped for that kind
+        rather than failing the whole request — an observation records no
+        part of life, so there is no such thing as an observation about
+        work, and a caller should not have to know that to ask.
+        """
+        ...
+
+    def count_by_type(self) -> dict[str, int]:
+        """How many records of each kind exist. Counts everything, live or not."""
+        ...
+
+    def get_neighborhood(
+        self,
+        node_id: str,
+        *,
+        depth: int = 1,
+        edge_types: list[str] | None = None,
+        direction: str = "both",
+        as_of: datetime | date | None = None,
+        include_invalidated: bool = False,
+        limit: int = 200,
+    ) -> GraphSlice:
+        """
+        Everything within a few steps of one record, and the links between.
+
+        The starting record is always included, so a record with nothing
+        attached comes back as itself rather than as nothing at all.
+
+        Withdrawn links are not followed unless asked for. A decision that
+        was rolled back should not still be shaping what the graph appears
+        to say.
+        """
+        ...
+
+    def get_version_chain(self, node_id: str) -> list[dict[str, Any]]:
+        """
+        Every version of a belief or pattern, oldest first.
+
+        Reached from any version, not only the newest or the first: someone
+        looking at a record found by search has no idea where in its own
+        history they have landed.
+
+        A record with no versions before or after it comes back as a chain
+        of one. Anything that is not versioned at all comes back empty.
+        """
+        ...
+
+    def get_decision_history(self, node_id: str) -> list[dict[str, Any]]:
+        """
+        Every decision ever recorded about one record, newest first.
+
+        This is the answer to "where did this come from" — what was compared,
+        what was decided, how sure the model was, and what it would take to
+        undo it.
+        """
+        ...
+
+    def get_episode_contents(self, episode_id: str) -> GraphSlice:
+        """
+        Everything one piece of writing produced, and the links between.
+
+        Includes the findings that could not be read, since an episode that
+        yielded nothing and one whose reading failed look the same otherwise.
+        """
+        ...
+
+    def get_causal_chain(self, chain_id: str) -> list[dict[str, Any]]:
+        """One cause-and-effect sequence's steps, in the order they happened."""
+        ...
+
+    def find_linked_to_person(
+        self, canonical_name: str, *, node_types: list[str], limit: int = 10
+    ) -> list[dict[str, Any]]:
+        """Find active nodes that mention a particular person."""
+        ...
+
+    def find_by_era(
+        self, era_tag: str, *, node_types: list[str], limit: int = 10
+    ) -> list[dict[str, Any]]:
+        """Find active nodes anchored to a named period of the person's past."""
+        ...
+
+    def find_unresolved_high_signal(
+        self, observation_types: list[str], *, limit: int = 10
+    ) -> list[dict[str, Any]]:
+        """Find weighty observations whose episode is still awaiting reconciliation."""
+        ...
+
+    def count_prior_decisions(
+        self, target_node_id: str, *, actions: list[str]
+    ) -> int:
+        """Count how many past decisions of the given kinds were made about a node."""
+        ...
+
+
+class GraphProvider(ReadOnlyGraph, Protocol):
     """
     Abstract protocol defining the interface for the Graph Database.
     This ensures we can swap Kuzu for Neo4j seamlessly as the project scales.
+
+    Everything a reader can do, plus the writes. Anything that only reads
+    should ask for `ReadOnlyGraph` instead, so that what it cannot do is
+    visible in its signature rather than left to discipline.
     """
 
     def init_schema(self) -> None:
@@ -27,6 +211,21 @@ class GraphProvider(Protocol):
 
         Must be idempotent — calling twice on an already-initialized
         database must not raise.
+        """
+        ...
+
+    def transaction(self) -> AbstractContextManager[None]:
+        """
+        Group several writes so that they all land or none of them do.
+
+        Saving one journal entry means writing many nodes and links that
+        only make sense together. Without this, a failure partway through
+        leaves an entry that looks complete to anything reading the graph
+        but is missing half of what it said.
+
+        Not reusable inside itself. Nesting one of these inside another
+        would quietly widen the group of writes being protected to
+        something the caller never chose, so a nested call raises instead.
         """
         ...
 
@@ -52,86 +251,6 @@ class GraphProvider(Protocol):
         
         The implementation must resolve the correct FROM/TO node table types
         internally from the edge_type, avoiding Cartesian product scans.
-        """
-        ...
-
-    def get_node(self, node_id: str) -> dict[str, Any] | None:
-        """Retrieve a node's properties by its ID. Returns None if not found."""
-        ...
-
-    def get_nodes_by_ids(self, node_ids: list[str]) -> list[dict[str, Any]]:
-        """
-        Retrieve multiple nodes by their IDs.
-        Required by the HLD read path (Section 4.2):
-            candidate_ids = vector_store.hybrid_search(...)
-            candidates = graph_store.get_nodes_by_ids(candidate_ids)
-        """
-        ...
-
-    # ------------------------------------------------------------------
-    # Anchor lookups
-    #
-    # Three narrow, named reads rather than one general query method. A
-    # general one would push query building out to callers and start
-    # letting graph-shaped thinking leak into business logic, which is the
-    # thing this Protocol exists to prevent. Each of these answers one
-    # question that candidate retrieval actually asks.
-    # ------------------------------------------------------------------
-
-    def find_linked_to_person(
-        self, canonical_name: str, *, node_types: list[str], limit: int = 10
-    ) -> list[dict[str, Any]]:
-        """
-        Find active nodes that mention a particular person.
-
-        Someone described across a year is described differently every
-        time, so their name is a far more reliable way back to what was
-        said about them than any measure of similarity.
-
-        Returns an empty list when nobody by that name is known.
-        """
-        ...
-
-    def find_by_era(
-        self, era_tag: str, *, node_types: list[str], limit: int = 10
-    ) -> list[dict[str, Any]]:
-        """
-        Find active nodes anchored to a named period of the person's past.
-
-        When someone says "back during exam prep", everything already filed
-        under that period is relevant regardless of what words they used
-        this time.
-        """
-        ...
-
-    def find_unresolved_high_signal(
-        self, observation_types: list[str], *, limit: int = 10
-    ) -> list[dict[str, Any]]:
-        """
-        Find weighty observations whose episode is still awaiting
-        reconciliation.
-
-        Reached through the episode rather than the observation, because it
-        is the episode that records whether reconciliation is outstanding.
-
-        This exists for the case similarity search handles worst: someone
-        describing recovery uses none of the words they used describing the
-        injury, so the two look unrelated by any measure of distance. This
-        lookup does not care what either one says.
-        """
-        ...
-
-    def count_prior_decisions(
-        self, target_node_id: str, *, actions: list[str]
-    ) -> int:
-        """
-        Count how many past decisions of the given kinds were made about a
-        node.
-
-        Used to tell a first deviation from a repeated one. Someone breaking
-        a long-held belief once has had a good day; someone breaking it for
-        the fifth time has changed, and only the count can tell the two
-        apart.
         """
         ...
 

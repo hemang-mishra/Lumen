@@ -27,7 +27,9 @@ from lumen.schemas.enums import (
     CandidateRetrievalSource,
     DialogueAct,
     EntryClass,
+    EpisodeRunStatus,
     HitlEntryType,
+    PipelineStage,
     QualityGateDecision,
     ReconciliationAction,
     ReconciliationStatus,
@@ -329,6 +331,10 @@ class PreprocessingResult(PipelineDTO):
             summarized, there is no way to tell whose words were whose.
             Later stages use them to credit an idea to the conversation
             rather than to the person alone.
+        detected_languages: Short codes for the languages found in the
+            original writing, before anything was translated. Recorded
+            against the episode so a later reader knows the stored English
+            is a translation and not what the person actually typed.
     """
 
     session_id: str = Field(min_length=1)
@@ -338,6 +344,7 @@ class PreprocessingResult(PipelineDTO):
     processing_time_ms: int = Field(ge=0)
     pending_reflections: list[str] = Field(default_factory=list)
     co_created_spans: list[str] = Field(default_factory=list)
+    detected_languages: list[str] = Field(default_factory=list)
 
 
 class MicroextractionInput(PipelineDTO):
@@ -765,6 +772,90 @@ class ReconciliationOutcome(PipelineDTO):
     decision_failed: bool = False
 
 
+class EpisodeOutcome(BaseModel):
+    """
+    What happened to one episode on one trip through the pipeline.
+
+    Every episode produces one of these, including the ones that failed and
+    the ones that were skipped. Reporting only the successes would make a
+    run that saved three of four topics look identical to one that saved
+    all four.
+
+    Attributes:
+        episode_id: The piece of writing this is about.
+        status: How its run ended.
+        entry_class: Whether it was treated as a full reflection or a light
+            capture, which is what decided how much of the pipeline it ran.
+        nodes_written: How many records it added to the graph.
+        edges_written: How many links it added.
+        vectors_written: How many of those records were made searchable.
+        escalations: How many items in it are waiting for the person.
+        unindexed_node_ids: Records that reached the graph but whose search
+            entry failed. Named individually because each one is invisible
+            to future searches until it is repaired.
+        stages_run: Which stages actually ran, so a skipped stage is
+            visible rather than looking like one that produced nothing.
+        error: What went wrong, for an episode that failed.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    episode_id: str = Field(min_length=1)
+    status: EpisodeRunStatus
+    entry_class: EntryClass | None = None
+    nodes_written: int = Field(default=0, ge=0)
+    edges_written: int = Field(default=0, ge=0)
+    vectors_written: int = Field(default=0, ge=0)
+    escalations: int = Field(default=0, ge=0)
+    unindexed_node_ids: list[str] = Field(default_factory=list)
+    stages_run: list[PipelineStage] = Field(default_factory=list)
+    error: str | None = None
+
+
+class RunReport(PipelineDTO):
+    """
+    Everything one session's trip through the whole pipeline came to.
+
+    This is what the orchestrator hands back. It says what was saved,
+    what is waiting for a person, and what failed — enough to answer
+    "did that work?" without reading a log.
+
+    Attributes:
+        job_id: The run's own identifier in the operational database.
+        session_id: The conversation that was processed.
+        quality_gate_decision: Whether the entry was worth analysing at all.
+        episodes: One outcome per episode, in the order they were written.
+        job_status: How the run as a whole ended.
+        duration_ms: How long everything took, in milliseconds.
+    """
+
+    job_id: str = Field(min_length=1)
+    session_id: str = Field(min_length=1)
+    quality_gate_decision: QualityGateDecision
+    episodes: list[EpisodeOutcome] = Field(default_factory=list)
+    job_status: str = Field(min_length=1)
+    duration_ms: int = Field(default=0, ge=0)
+
+    @property
+    def nodes_written(self) -> int:
+        """Records added to the graph across every episode."""
+        return sum(episode.nodes_written for episode in self.episodes)
+
+    @property
+    def vectors_written(self) -> int:
+        """Records made searchable across every episode."""
+        return sum(episode.vectors_written for episode in self.episodes)
+
+    @property
+    def unindexed_node_ids(self) -> list[str]:
+        """Every record that reached the graph but not the search index."""
+        return [
+            node_id
+            for episode in self.episodes
+            for node_id in episode.unindexed_node_ids
+        ]
+
+
 __all__ = [
     "PipelineDTO",
     "BufferMessage",
@@ -785,4 +876,6 @@ __all__ = [
     "HitlEscalation",
     "ReconciliationResult",
     "ReconciliationOutcome",
+    "EpisodeOutcome",
+    "RunReport",
 ]

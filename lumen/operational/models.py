@@ -205,6 +205,18 @@ class PipelineStageRun(Base):
     )
     trace_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
 
+    # Which episode this stage was working on. One entry usually splits into
+    # several, and each runs the middle stages on its own, so without this a
+    # four-episode entry would look like one episode retried three times.
+    # Empty for stages that run once for the whole entry, such as cleanup.
+    #
+    # Empty rather than null on purpose: databases treat two nulls as
+    # different values, so a nullable column here would switch the
+    # uniqueness rule below off for exactly the rows it should still cover.
+    episode_id: Mapped[str] = mapped_column(
+        String(256), nullable=False, default="", index=True
+    )
+
     stage: Mapped[str] = mapped_column(String(48), nullable=False)
     attempt: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
     status: Mapped[str] = mapped_column(
@@ -228,7 +240,13 @@ class PipelineStageRun(Base):
     job: Mapped[PipelineJob] = relationship(back_populates="stage_runs")
 
     __table_args__ = (
-        UniqueConstraint("job_id", "stage", "attempt", name="uq_stage_run_job_stage_attempt"),
+        UniqueConstraint(
+            "job_id",
+            "stage",
+            "episode_id",
+            "attempt",
+            name="uq_stage_run_job_stage_episode_attempt",
+        ),
     )
 
 
@@ -252,6 +270,13 @@ class PipelineWriteLog(Base):
     )
     trace_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
 
+    # The episode whose processing produced this write. Makes "show me
+    # everything this episode put in the graph" a single query, which is
+    # what any attempt to explain a wrong graph starts with.
+    episode_id: Mapped[str] = mapped_column(
+        String(256), nullable=False, default="", index=True
+    )
+
     stage: Mapped[str] = mapped_column(String(48), nullable=False)
     target: Mapped[str] = mapped_column(String(32), nullable=False)
 
@@ -265,6 +290,36 @@ class PipelineWriteLog(Base):
     written_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
     job: Mapped[PipelineJob] = relationship(back_populates="writes")
+
+
+class CoreferenceMapRecord(Base):
+    """
+    Who the pronouns in one journal entry referred to.
+
+    Cleanup works out that "she" meant Priya and "my boss" meant Alex, once
+    for a whole entry. Every episode record in the graph points back here by
+    id, which is how anyone can later check why a person was matched the way
+    they were.
+
+    It lives here rather than in the graph because it is a working note
+    about how the text was read, not something the person believes or
+    experienced. Putting it in the graph would mix the two.
+    """
+
+    __tablename__ = "coreference_maps"
+
+    id: Mapped[str] = mapped_column(String(256), primary_key=True)
+    job_id: Mapped[str | None] = mapped_column(
+        String(128), ForeignKey("pipeline_jobs.job_id", ondelete="SET NULL"), index=True
+    )
+    trace_id: Mapped[str | None] = mapped_column(String(64), index=True)
+    session_id: Mapped[str] = mapped_column(String(128), nullable=False, index=True)
+    entry_id: Mapped[str] = mapped_column(String(128), nullable=False, index=True)
+
+    resolved_entities: Mapped[list] = mapped_column(JSON, nullable=False, default=list)
+    ambiguous_refs: Mapped[list] = mapped_column(JSON, nullable=False, default=list)
+
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
 
 class HitlQueueItem(Base):

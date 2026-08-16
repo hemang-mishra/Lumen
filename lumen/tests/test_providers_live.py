@@ -150,3 +150,75 @@ class TestTheConfiguredSetupWorks:
         from lumen.providers.factory import validate_providers
 
         validate_providers(AppConfig())
+
+
+@needs_gemini
+class TestTheWrittenWeekAgainstRealModels:
+    """
+    The five-day corpus, read by a real model instead of a stand-in.
+
+    Everything else about the week is checked with scripted replies, which
+    proves the machinery between a decision and a changed history — the
+    retrieval, the gates, the write plan, the counters. What it cannot prove
+    is that a real reading of Wednesday recognises Monday, because a
+    stand-in was told the answer.
+
+    That is the question here, and it is asked separately because it is a
+    question about prompts and models rather than about code. It needs a
+    credential, it costs money, and its answer can change without a single
+    line of this repository changing — which is exactly why it must not sit
+    in the suite that gates a commit.
+    """
+
+    def test_a_real_model_recognises_the_thread_returning(self, tmp_path):
+        from lumen.config import OperationalConfig
+        from lumen.graph.kuzu_impl import KuzuGraphProvider
+        from lumen.operational.engine import create_ops_engine
+        from lumen.operational.migrator import upgrade_to_head
+        from lumen.operational.sqlalchemy_impl import SQLAlchemyOperationalStore
+        from lumen.providers.factory import get_embedding_provider, get_llm_provider
+        from lumen.simulation import CORPUS, simulate_days
+        from lumen.simulation.corpus import PATTERN_COMPARISON
+        from lumen.vector.qdrant_impl import QdrantVectorProvider
+
+        config = AppConfig()
+        graph = KuzuGraphProvider(str(tmp_path / "graph"))
+        graph.init_schema()
+        vectors = QdrantVectorProvider(
+            location=":memory:", vector_size=config.vector.vector_size
+        )
+        vectors.init_collection()
+        ops_config = OperationalConfig(db_url=f"sqlite:///{tmp_path / 'ops.db'}")
+        engine = create_ops_engine(ops_config)
+        upgrade_to_head(engine)
+        ops = SQLAlchemyOperationalStore(ops_config, engine=engine)
+
+        try:
+            simulate_days(
+                CORPUS,
+                graph=graph,
+                vectors=vectors,
+                ops=ops,
+                embedder=get_embedding_provider(config),
+                models=(
+                    get_llm_provider(ModelRole.LIGHTWEIGHT, config),
+                    get_llm_provider(ModelRole.THINKING, config),
+                ),
+                config=config,
+            )
+
+            standing = graph.find_nodes(["PatternNode", "BeliefNode"], active_only=False)
+            # Deliberately loose. A real model will not reproduce the
+            # scripted arc, and demanding that it did would make this a test
+            # of prompt phrasing. What is being asked is only whether five
+            # days about a handful of themes accumulate at all, or shatter.
+            assert standing, "five days produced no standing record of anything"
+            assert len(standing) <= 8, (
+                "five days about three themes produced "
+                f"{len(standing)} separate standing records: "
+                + ", ".join(row["node_id"] for row in standing)
+            )
+        finally:
+            graph.close()
+            vectors.close()
+            ops.close()

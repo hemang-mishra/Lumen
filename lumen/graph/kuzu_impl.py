@@ -13,12 +13,15 @@ from __future__ import annotations
 
 import json
 import logging
-from datetime import datetime
+from collections.abc import Iterator
+from contextlib import contextmanager
+from datetime import date, datetime
 from typing import Any
 
 import kuzu
 
-from lumen.graph.provider import GraphProvider
+from lumen.graph import queries
+from lumen.graph.provider import EdgeRow, GraphProvider, GraphSlice
 from lumen.schemas.base import GraphNode
 
 logger = logging.getLogger(__name__)
@@ -153,6 +156,33 @@ MENTIONS_EDGES: dict[str, str] = {
     "SessionNode": "mentions_sess",
 }
 
+# The links a decision makes from a finding to a standing record, per kind
+# of standing record. These are the second step for anything that never
+# names a person itself: a belief about someone exists because a finding
+# about them turned into it.
+_FINDING_TO_STANDING: dict[str, tuple[str, ...]] = {
+    "PatternNode": ("branches_to_obs_pat", "reinforces_obs_pat", "same_as_obs_pat"),
+    "BeliefNode": ("branches_to_obs_bel", "reinforces_obs_bel"),
+}
+
+_REACHED_THROUGH_A_FINDING: frozenset[str] = frozenset(_FINDING_TO_STANDING)
+
+
+def _first_unique(rows: list[dict[str, Any]], limit: int) -> list[dict[str, Any]]:
+    """
+    The first few distinct records, keeping the order they were found in.
+
+    One record can be reached twice — a belief that a finding both branched
+    into and later reinforced — and offering the same thing twice in a short
+    list of candidates wastes one of very few places.
+    """
+    seen: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        node_id = row.get("node_id")
+        if node_id and node_id not in seen:
+            seen[str(node_id)] = row
+    return list(seen.values())[:limit]
+
 # Where each table records the past period a node belongs to. The column is
 # not named the same in both places, and only these three record one at all.
 ERA_COLUMNS: dict[str, str] = {
@@ -179,6 +209,80 @@ def _active_clause(table: str) -> str:
 # back. Both mean the same thing here: what that episode holds has not been
 # settled yet, so it is still worth surfacing.
 UNSETTLED_EPISODE_STATUSES: tuple[str, ...] = ("PENDING_RERECONCILIATION", "SUSPENDED")
+
+
+# The kinds of record that keep a version history. Only these two are ever
+# replaced by a newer version of themselves; everything else is written once
+# and stands.
+_VERSIONED_TABLES: frozenset[str] = frozenset({"PatternNode", "BeliefNode"})
+
+# The links meaning "this came out of that". Asking what an episode produced
+# follows only these — an episode also points at the episode before it and at
+# any report that analysed it, and following those would answer a wider
+# question than the one asked.
+CONTAINMENT_EDGES: tuple[str, ...] = (
+    "contains_obs",
+    "contains_evt",
+    "contains_sess",
+    "contains_chain",
+    "failed_extraction",
+)
+
+
+def _as_text(value: datetime | date) -> str:
+    """A stored timestamp's own form, which is how dates are compared."""
+    return value.isoformat()
+
+
+def _recency_key(row: dict[str, Any]) -> str:
+    """
+    How recent a record is, for ordering a mixed list of kinds.
+
+    Records with no date of their own sort last rather than crashing the
+    comparison — they are the two kinds that belong to something else's
+    moment rather than having one.
+    """
+    return str(row.get(queries.VALID_FROM) or row.get("created_at") or "")
+
+
+def _drop_after(
+    nodes: list[dict[str, Any]],
+    edges: list[EdgeRow],
+    *,
+    as_of: datetime | date,
+    keep: str,
+) -> tuple[list[dict[str, Any]], list[EdgeRow]]:
+    """
+    Remove whatever did not exist yet on the date being asked about.
+
+    Applied after the walk rather than during it, because the tables are
+    mixed by then and two of them have no date column at all — asking those
+    for one is an error rather than an empty answer.
+
+    The record the walk started from is always kept. Someone asking what was
+    around a node in March is asking about its surroundings, and answering
+    with nothing at all because the node itself is newer would be a strange
+    reading of the question.
+    """
+    cutoff = _as_text(as_of)
+    surviving = {
+        str(row["node_id"])
+        for row in nodes
+        if row.get("node_id")
+        and (
+            str(row["node_id"]) == keep
+            or not row.get(queries.VALID_FROM)
+            or str(row[queries.VALID_FROM]) <= cutoff
+        )
+    }
+    return (
+        [row for row in nodes if str(row.get("node_id")) in surviving],
+        [
+            edge
+            for edge in edges
+            if edge.from_node_id in surviving and edge.to_node_id in surviving
+        ],
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -385,6 +489,7 @@ class KuzuGraphProvider(GraphProvider):
         self.db_path = db_path
         self.db = kuzu.Database(db_path)
         self.conn = kuzu.Connection(self.db)
+        self._in_transaction = False
         logger.info("KuzuGraphProvider initialized at %s", db_path)
 
     def __enter__(self) -> KuzuGraphProvider:
@@ -453,6 +558,59 @@ class KuzuGraphProvider(GraphProvider):
     # ------------------------------------------------------------------
     # Write Operations
     # ------------------------------------------------------------------
+
+    @contextmanager
+    def transaction(self) -> Iterator[None]:
+        """
+        Run a group of writes so that they all land or none of them do.
+
+        Anything raised inside the block undoes every write made in it and
+        is then passed on to the caller, so a failure never leaves a
+        half-written entry behind.
+
+        Nesting is rejected rather than quietly flattened. A caller who
+        opens a second one of these is asking for a smaller group of writes
+        to be protected on its own, and the database cannot give them that
+        — silently handing back a wider group would be the wrong answer to
+        a question they were entitled to ask.
+        """
+        if self._in_transaction:
+            raise RuntimeError(
+                "a graph transaction is already open; nested transactions "
+                "are not supported"
+            )
+
+        self.conn.execute("BEGIN TRANSACTION")
+        self._in_transaction = True
+        try:
+            yield
+        except BaseException:
+            self._rollback()
+            logger.warning("graph transaction rolled back")
+            raise
+        self.conn.execute("COMMIT")
+        self._in_transaction = False
+        logger.debug("graph transaction committed")
+
+    def _rollback(self) -> None:
+        """
+        Undo everything in the open transaction, however it ended.
+
+        A statement that fails is enough for Kuzu to abandon the transaction
+        on its own, and asking it to roll back after that is an error. The
+        writes are already gone at that point, which is the outcome wanted,
+        so it is treated as done rather than as a new problem — raising here
+        would replace whatever actually went wrong with a complaint about
+        the cleanup.
+        """
+        try:
+            self.conn.execute("ROLLBACK")
+        except RuntimeError as exc:
+            if "no active transaction" not in str(exc).lower():
+                raise
+            logger.debug("transaction had already been abandoned by the database")
+        finally:
+            self._in_transaction = False
 
     def write_node(self, node_type: str, properties: GraphNode | dict[str, Any]) -> str:
         """
@@ -566,6 +724,347 @@ class KuzuGraphProvider(GraphProvider):
         return nodes
 
     # ------------------------------------------------------------------
+    # Traversal
+    #
+    # Named questions, one method each. There is deliberately no method
+    # that runs an arbitrary query: it would push query building out to
+    # callers, spread graph-shaped thinking into the web layer, and quietly
+    # end the promise that this store can be replaced.
+    # ------------------------------------------------------------------
+
+    def find_nodes(
+        self,
+        node_types: list[str],
+        *,
+        since: datetime | date | None = None,
+        until: datetime | date | None = None,
+        domain: str | None = None,
+        signal_strength: str | None = None,
+        era_tag: str | None = None,
+        active_only: bool = True,
+        limit: int = 50,
+        offset: int = 0,
+    ) -> list[dict[str, Any]]:
+        """
+        List records of the given kinds, newest first.
+
+        Asked for several kinds at once, each is queried on its own terms —
+        the same quality lives under different column names, and some kinds
+        do not record it at all. The results are then merged and ordered as
+        one list, which is why each table is asked for enough rows to cover
+        the whole window rather than its share of it.
+        """
+        wanted = [t for t in node_types if t in NODE_TABLES] or list(NODE_TABLES)
+        reach = max(int(limit) + int(offset), 1)
+        gathered: list[dict[str, Any]] = []
+
+        for table in wanted:
+            filters = queries.build_filters(
+                table,
+                since=since,
+                until=until,
+                domain=domain,
+                signal_strength=signal_strength,
+                era_tag=era_tag,
+                active_only=active_only,
+            )
+            gathered.extend(
+                self._collect(
+                    f"MATCH (n:{table}) {filters.where()} "
+                    f"RETURN n {self._newest_first(table)} LIMIT {reach}",
+                    filters.params,
+                )
+            )
+
+        gathered.sort(key=_recency_key, reverse=True)
+        return gathered[offset : offset + limit]
+
+    def count_by_type(self) -> dict[str, int]:
+        """How many records of each kind exist, including retired ones."""
+        counts: dict[str, int] = {}
+        for table in NODE_TABLES:
+            res = self.conn.execute(f"MATCH (n:{table}) RETURN count(n)")
+            counts[table] = int(res.get_next()[0]) if res.has_next() else 0
+        return counts
+
+    def get_neighborhood(
+        self,
+        node_id: str,
+        *,
+        depth: int = 1,
+        edge_types: list[str] | None = None,
+        direction: str = "both",
+        as_of: datetime | date | None = None,
+        include_invalidated: bool = False,
+        limit: int = 200,
+    ) -> GraphSlice:
+        """
+        Everything within a few steps of one record.
+
+        Walked a step at a time rather than as one long pattern, because a
+        single variable-length match hands back whole paths and loses which
+        record each link actually joined — and the two ends of a link are
+        the only way to name it. Stepping out also means the limit stops the
+        walk rather than trimming an answer already fetched.
+        """
+        start = self.get_node(node_id)
+        if start is None:
+            return GraphSlice(nodes=[], edges=[], truncated=False)
+
+        seen = {node_id}
+        frontier = [node_id]
+        edges: list[EdgeRow] = []
+        truncated = False
+
+        for _ in range(max(int(depth), 1)):
+            if not frontier or truncated:
+                break
+
+            found = self._step_out(
+                frontier,
+                edge_types=edge_types,
+                direction=direction,
+                include_invalidated=include_invalidated,
+                as_of=as_of,
+            )
+
+            next_frontier: list[str] = []
+            for edge in found:
+                edges.append(edge)
+                for end in (edge.from_node_id, edge.to_node_id):
+                    if end not in seen:
+                        seen.add(end)
+                        next_frontier.append(end)
+                if len(seen) >= limit:
+                    truncated = True
+                    break
+            frontier = next_frontier
+
+        nodes = self.get_nodes_by_ids(sorted(seen))
+        if as_of is not None:
+            nodes, edges = _drop_after(nodes, edges, as_of=as_of, keep=node_id)
+
+        return GraphSlice(nodes=nodes, edges=edges, truncated=truncated)
+
+    def get_version_chain(self, node_id: str) -> list[dict[str, Any]]:
+        """
+        Every version of a belief or pattern, oldest first.
+
+        Walked in both directions from wherever the caller happened to
+        start. Someone who reached a record through a search has no idea
+        whether they are looking at the first version or the fifth, and a
+        history that only runs one way from there is not a history.
+        """
+        start = self.get_node(node_id)
+        if start is None:
+            return []
+
+        table = start.get("_label")
+        if table not in _VERSIONED_TABLES:
+            logger.debug("%s is not a versioned kind of record", table)
+            return []
+
+        # The ids are walked first and the records fetched together
+        # afterwards. Asking for one node by itself and asking for it as one
+        # of a kind come back in different shapes — the first carries a
+        # column for every kind of record in the store and the second only
+        # its own — so a chain assembled as it was walked would describe the
+        # same history in two different shapes depending on where the walk
+        # started.
+        ids = self._walk_back(node_id)
+        ids += self._walk_forward(node_id, table=str(table))
+
+        chain = self.get_nodes_by_ids(ids)
+        chain.sort(key=lambda row: row.get("version") or 0)
+        return chain
+
+    def get_decision_history(self, node_id: str) -> list[dict[str, Any]]:
+        """
+        Every decision recorded about one record, newest first.
+
+        Reached by following the links that name a decision, which exist
+        precisely so this question has an answer — a change to somebody's
+        history that nobody can explain is worse than no change at all.
+        """
+        return sorted(
+            self._collect(
+                "MATCH (n)-[r]->(d:DecisionAuditNode) WHERE n.node_id = $node_id "
+                "RETURN d",
+                {"node_id": node_id},
+            ),
+            key=lambda row: str(row.get("created_at") or ""),
+            reverse=True,
+        )
+
+    def get_episode_contents(self, episode_id: str) -> GraphSlice:
+        """
+        Everything one piece of writing produced.
+
+        Only the links that mean "this came out of that" are followed. An
+        episode also points at the episode before it and at any report that
+        analysed it, and pulling those in would answer a wider question than
+        the one asked.
+        """
+        episode = self.get_node(episode_id)
+        if episode is None:
+            return GraphSlice(nodes=[], edges=[], truncated=False)
+
+        edges = self._step_out(
+            [episode_id],
+            edge_types=list(CONTAINMENT_EDGES),
+            direction="out",
+            include_invalidated=True,
+            as_of=None,
+        )
+        child_ids = sorted({edge.to_node_id for edge in edges})
+
+        # A sequence's steps hang off the sequence, not off the episode, so
+        # they need one more step out or a chain arrives with nothing in it.
+        chain_ids = [cid for cid in child_ids if cid.startswith("chain_")]
+        if chain_ids:
+            step_edges = self._step_out(
+                chain_ids,
+                edge_types=["chain_contains"],
+                direction="out",
+                include_invalidated=True,
+                as_of=None,
+            )
+            edges.extend(step_edges)
+            child_ids.extend(edge.to_node_id for edge in step_edges)
+
+        return GraphSlice(
+            nodes=[episode, *self.get_nodes_by_ids(sorted(set(child_ids)))],
+            edges=edges,
+            truncated=False,
+        )
+
+    def get_causal_chain(self, chain_id: str) -> list[dict[str, Any]]:
+        """One cause-and-effect sequence's steps, in the order they happened."""
+        return self._collect(
+            "MATCH (c:CausalChainNode)-[:chain_contains]->(s:CausalStepNode) "
+            "WHERE c.node_id = $chain_id RETURN s ORDER BY s.step_index",
+            {"chain_id": chain_id},
+        )
+
+    # ------------------------------------------------------------------
+    # Traversal helpers
+    # ------------------------------------------------------------------
+
+    def _step_out(
+        self,
+        ids: list[str],
+        *,
+        edge_types: list[str] | None,
+        direction: str,
+        include_invalidated: bool,
+        as_of: datetime | date | None,
+    ) -> list[EdgeRow]:
+        """
+        Every link one step from the given records.
+
+        The link table is asked for by name rather than matched per type,
+        so one query covers all forty-eight of them instead of forty-eight
+        queries covering one each.
+        """
+        liveness = queries.edge_liveness_clause(
+            include_invalidated=include_invalidated, as_of=as_of
+        )
+        conditions = [liveness]
+        params: dict[str, Any] = {"ids": ids}
+        if as_of is not None:
+            params["as_of"] = _as_text(as_of)
+        if edge_types:
+            conditions.append("label(r) IN $edge_types")
+            params["edge_types"] = list(edge_types)
+        where = " AND ".join(conditions)
+
+        found: list[EdgeRow] = []
+        if direction in ("out", "both"):
+            found.extend(
+                self._edges(
+                    f"MATCH (a)-[r]->(b) WHERE a.node_id IN $ids AND {where} "
+                    "RETURN a.node_id, label(r), b.node_id, r",
+                    params,
+                )
+            )
+        if direction in ("in", "both"):
+            found.extend(
+                self._edges(
+                    f"MATCH (a)-[r]->(b) WHERE b.node_id IN $ids AND {where} "
+                    "RETURN a.node_id, label(r), b.node_id, r",
+                    params,
+                )
+            )
+        return found
+
+    def _edges(self, query: str, params: dict[str, Any]) -> list[EdgeRow]:
+        """Run a query returning links and gather them, dropping duplicates."""
+        res = self.conn.execute(query, params)
+        found: dict[tuple[str, str, str], EdgeRow] = {}
+        while res.has_next():
+            from_id, table, to_id, row = res.get_next()
+            key = (str(table), str(from_id), str(to_id))
+            found[key] = EdgeRow(
+                edge_type=str(table),
+                from_node_id=str(from_id),
+                to_node_id=str(to_id),
+                properties={
+                    k: v for k, v in row.items() if not k.startswith("_") and v is not None
+                },
+            )
+        return list(found.values())
+
+    def _walk_back(self, node_id: str) -> list[str]:
+        """
+        Follow previous_version_id back to the first version.
+
+        Includes the record started from. A version already seen stops the
+        walk: a chain that pointed at itself would otherwise be followed
+        forever, and a graph that has been written to by hand can hold one.
+        """
+        seen = [node_id]
+        current = self.get_node(node_id)
+        while current and (previous_id := current.get("previous_version_id")):
+            if str(previous_id) in seen:
+                logger.warning("version chain loops back on itself at %s", previous_id)
+                break
+            previous = self.get_node(str(previous_id))
+            if previous is None:
+                logger.debug("version %s names a previous one that is gone", node_id)
+                break
+            seen.insert(0, str(previous_id))
+            current = previous
+        return seen
+
+    def _walk_forward(self, node_id: str, *, table: str) -> list[str]:
+        """
+        Follow whichever record names this one as its previous version.
+
+        Does not include the record started from, so the two halves of a
+        walk join without repeating the middle.
+        """
+        found: list[str] = []
+        current = node_id
+        while rows := self._collect(
+            f"MATCH (n:{table}) WHERE n.previous_version_id = $node_id "
+            "RETURN n.node_id",
+            {"node_id": current},
+        ):
+            following = str(rows[0])
+            if following in found or following == node_id:
+                logger.warning("version chain loops back on itself at %s", following)
+                break
+            found.append(following)
+            current = following
+        return found
+
+    def _newest_first(self, table: str) -> str:
+        """An ordering clause, for the tables that record when they began."""
+        if not queries.has_start_date(table):
+            return ""
+        return f"ORDER BY n.{queries.VALID_FROM} DESC"
+
+    # ------------------------------------------------------------------
     # Anchor Lookups
     # ------------------------------------------------------------------
 
@@ -573,28 +1072,55 @@ class KuzuGraphProvider(GraphProvider):
         self, canonical_name: str, *, node_types: list[str], limit: int = 10
     ) -> list[dict[str, Any]]:
         """
-        Find active nodes that mention a particular person.
+        Find active nodes to do with a particular person.
 
-        Only the three node types that actually carry a mentions edge can be
-        found this way. Beliefs and patterns are linked to a person only
-        through the observation that produced them, which is a second hop
-        this method does not make — see MENTIONS_EDGES below.
+        Three kinds of record name a person directly. A belief or a pattern
+        never does — it reaches one only through the finding that produced
+        it, so those take a second step, through whichever observation
+        branched into or reinforced them.
+
+        Both halves are asked for, because "what do I know about Alex" means
+        the same thing whether the answer is a note from Tuesday or a
+        standing belief that grew out of one.
         """
         found: list[dict[str, Any]] = []
         for table in node_types:
-            edge = MENTIONS_EDGES.get(table)
-            if edge is None:
-                logger.debug("no mentions edge from %s to a person; skipping", table)
-                continue
-            found.extend(
-                self._collect(
-                    f"MATCH (n:{table})-[:{edge}]->(p:PersonEntityNode) "
-                    f"WHERE p.canonical_name = $name AND {_active_clause(table)} "
-                    f"RETURN n LIMIT {int(limit)}",
-                    {"name": canonical_name},
+            if edge := MENTIONS_EDGES.get(table):
+                found.extend(
+                    self._collect(
+                        f"MATCH (n:{table})-[:{edge}]->(p:PersonEntityNode) "
+                        f"WHERE p.canonical_name = $name AND {_active_clause(table)} "
+                        f"RETURN n LIMIT {int(limit)}",
+                        {"name": canonical_name},
+                    )
                 )
-            )
-        return found[:limit]
+            elif table in _REACHED_THROUGH_A_FINDING:
+                found.extend(self._through_a_finding(canonical_name, table, limit))
+            else:
+                logger.debug("no route from %s to a person; skipping", table)
+
+        return _first_unique(found, limit)
+
+    def _through_a_finding(
+        self, canonical_name: str, table: str, limit: int
+    ) -> list[dict[str, Any]]:
+        """
+        Beliefs or patterns reached through an observation about someone.
+
+        The middle step is any link a decision makes from a finding to a
+        standing record — the finding branched into it, or reinforced it, or
+        was judged the same thing. Which of those it was does not change the
+        answer to "what do I know about this person".
+        """
+        return self._collect(
+            f"MATCH (o:ObservationNode)-[r]->(n:{table}) "
+            "WHERE label(r) IN $links AND r.invalidated_at IS NULL "
+            "AND EXISTS { MATCH (o)-[:mentions_obs]->(p:PersonEntityNode) "
+            "WHERE p.canonical_name = $name } "
+            f"AND {_active_clause(table)} "
+            f"RETURN n LIMIT {int(limit)}",
+            {"name": canonical_name, "links": list(_FINDING_TO_STANDING[table])},
+        )
 
     def find_by_era(
         self, era_tag: str, *, node_types: list[str], limit: int = 10
