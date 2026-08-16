@@ -1,0 +1,152 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Lumen — Turn reader</title>
+  <link rel="stylesheet" href="app.css">
+</head>
+<body>
+<header>
+  <h1>Lumen</h1>
+  <nav>
+    <a href="index.html">Import</a>
+    <a href="episodes.html">Episodes</a>
+    <a href="trace.html">Runs</a>
+    <a href="chat.html">Turn reader</a>
+  </nav>
+  <span class="note">test harness — not the product UI</span>
+</header>
+
+<main>
+  <section>
+    <h2>What a sentence would look up</h2>
+    <div class="notice warn">
+      This is not the conversation layer. It reads a sentence and reports what
+      <em>would</em> be retrieved because of it — nothing is searched for, and no
+      answer is written. Retrieval and assembly are still to be built, so a
+      reply here would be a mock-up rather than the thing itself.
+    </div>
+    <p class="lede">
+      Everything this layer decides is invisible by design: it happens between
+      somebody speaking and the assistant answering, and never reaches a screen.
+      That is right for the product and unworkable for anybody trying to tell
+      whether the reading is any good. So there is one way in.
+    </p>
+
+    <div class="panel">
+      <div id="thread"></div>
+      <div class="row" style="margin-top:12px">
+        <textarea id="text" placeholder="Say something the way you would to the assistant…"></textarea>
+      </div>
+      <div class="row" style="margin-top:8px; justify-content:flex-end">
+        <button id="clear">Start over</button>
+        <button id="send">Read it</button>
+      </div>
+    </div>
+  </section>
+</main>
+
+<script src="app.js"></script>
+<script>
+/*
+ * The turn reader.
+ *
+ * The history is kept here in the page and sent with every request, because
+ * the endpoint holds nothing between calls on purpose — it exists to look at
+ * what one sentence is made of, and remembering a conversation would make
+ * every answer depend on whatever happened to be asked before it.
+ *
+ * Four turns of context are what the reader itself uses. Some sentences
+ * cannot be read alone: "I don't feel that anymore" says nothing without the
+ * one before it.
+ */
+
+const history = [];
+
+document.getElementById("send").addEventListener("click", read);
+document.getElementById("clear").addEventListener("click", () => {
+  history.length = 0;
+  fill("thread");
+});
+document.getElementById("text").addEventListener("keydown", (event) => {
+  if (event.key === "Enter" && (event.metaKey || event.ctrlKey)) read();
+});
+
+async function read() {
+  const box = document.getElementById("text");
+  const text = box.value.trim();
+  if (!text) return;
+
+  const thread = document.getElementById("thread");
+  thread.append(el("div", { class: "turn you" }, text));
+  box.value = "";
+
+  const button = document.getElementById("send");
+  button.disabled = true;
+  try {
+    const signal = await api("/query/formulate", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ text, history: history.slice(-4) }),
+    });
+    thread.append(reading(signal));
+    history.push({ role: "user", content: text });
+  } catch (error) {
+    thread.append(el("div", { class: "turn sys" }, say("bad", String(error.message))));
+  } finally {
+    button.disabled = false;
+    thread.scrollIntoView({ block: "end", behavior: "smooth" });
+  }
+}
+
+/** What the reader made of one sentence. */
+function reading(signal) {
+  const triggers = signal.retrieval_triggers || [];
+
+  return el("div", { class: "turn sys" },
+    el("div", { class: "stage-head" },
+      el("span", { class: "name" }, "Read as"),
+      el("span", { class: "tag queued" }, signal.emotional_register),
+      el("span", { class: "faint" }, signal.formulation_path),
+      el("span", { class: "dim" }, howLong(signal.latency_ms)),
+      signal.critical_domain_opened
+        ? el("span", { class: "tag dup" }, `opened ${signal.critical_domain_opened}`)
+        : null,
+    ),
+
+    // "Nothing was found" and "now is not the time" are different answers,
+    // and the second one is the whole reason the crisis floor exists.
+    signal.suppressed_by_crisis
+      ? say("warn", "Reasons to search were found and deliberately dropped: " +
+                    "this turn reads as distress, and now is not the time.")
+      : null,
+
+    triggers.length
+      ? el("table", { style: "margin-top:10px" },
+          el("thead", {}, el("tr", {},
+            el("th", {}, "Would look up"), el("th", {}, "Where"),
+            el("th", {}, "Because of"))),
+          el("tbody", {}, triggers.map((trigger) =>
+            el("tr", {},
+              el("td", {}, trigger.trigger_type),
+              el("td", { class: "dim" },
+                [trigger.domain, trigger.era].filter(Boolean).join(" · ") || "—"),
+              el("td", { class: "dim" }, (trigger.keywords || []).join(", ") || "—"),
+            )
+          )),
+        )
+      : el("div", { class: "faint", style: "margin-top:8px" },
+          "Nothing would be looked up for this turn."),
+
+    signal.named_entities_mentioned.length
+      ? el("div", { class: "dim", style: "margin-top:8px" },
+          "Named: " + signal.named_entities_mentioned.join(", "))
+      : null,
+
+    foldout("Everything it decided", signal),
+  );
+}
+</script>
+</body>
+</html>

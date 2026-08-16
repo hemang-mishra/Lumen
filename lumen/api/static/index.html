@@ -1,0 +1,198 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Lumen — Import</title>
+  <link rel="stylesheet" href="app.css">
+</head>
+<body>
+<header>
+  <h1>Lumen</h1>
+  <nav>
+    <a href="index.html">Import</a>
+    <a href="episodes.html">Episodes</a>
+    <a href="trace.html">Runs</a>
+    <a href="chat.html">Turn reader</a>
+  </nav>
+  <span class="note">test harness — not the product UI</span>
+</header>
+
+<main>
+  <section>
+    <h2>Import a conversation</h2>
+    <p class="lede">
+      Drop an exported chat here. Everything in one file is filed under the day
+      its first message was sent, and processing starts immediately — one
+      conversation is several model calls and takes a few minutes.
+    </p>
+
+    <div class="panel">
+      <div class="drop" id="drop">
+        <strong>Choose a file, or drop one here</strong>
+        <span>JSON exported from a chat application</span>
+      </div>
+      <input type="file" id="file" accept=".json,application/json" hidden>
+    </div>
+
+    <div id="result"></div>
+  </section>
+
+  <section>
+    <h2>Everything imported so far</h2>
+    <div class="panel" id="history"><div class="empty">Loading…</div></div>
+  </section>
+</main>
+
+<script src="app.js"></script>
+<script>
+/*
+ * The import page.
+ *
+ * Upload, watch, and a history underneath. The only subtlety is the polling:
+ * the upload answers before any work has been done, so what comes back is a
+ * batch identifier and the page follows that until the server says the whole
+ * upload has stopped changing.
+ */
+
+const drop = document.getElementById("drop");
+const picker = document.getElementById("file");
+
+drop.addEventListener("click", () => picker.click());
+drop.addEventListener("dragover", (event) => {
+  event.preventDefault();
+  drop.classList.add("over");
+});
+drop.addEventListener("dragleave", () => drop.classList.remove("over"));
+drop.addEventListener("drop", (event) => {
+  event.preventDefault();
+  drop.classList.remove("over");
+  if (event.dataTransfer.files.length) send(event.dataTransfer.files[0]);
+});
+picker.addEventListener("change", () => {
+  if (picker.files.length) send(picker.files[0]);
+});
+
+/** Send one file and start following what it turned into. */
+async function send(file) {
+  fill("result", say("ok", `Reading ${file.name}…`));
+
+  const form = new FormData();
+  form.append("file", file);
+
+  let receipt;
+  try {
+    receipt = await api("/ingest/file", { method: "POST", body: form });
+  } catch (error) {
+    fill("result", say("bad", String(error.message)));
+    return;
+  }
+
+  showReceipt(receipt);
+  refreshHistory();
+  if (receipt.queued > 0) follow(receipt.batch_id);
+}
+
+/** What the upload was understood to contain, before any work is done. */
+function showReceipt(receipt) {
+  const parts = [];
+
+  if (receipt.rejected.length) {
+    parts.push(say("warn",
+      `${receipt.rejected.length} conversation(s) in this file could not be read: ` +
+      receipt.rejected.map((r) => `${r.title || "untitled"} — ${r.reason}`).join("; ")
+    ));
+  }
+
+  const rows = receipt.conversations.map((c) =>
+    el("tr", { id: `imp-${c.import_id}` },
+      el("td", {}, c.title || "untitled"),
+      el("td", { class: "mono" }, c.event_date),
+      el("td", {}, String(c.message_count)),
+      el("td", {}, c.already_imported ? tag("DUPLICATE") : tag("QUEUED")),
+      el("td", { class: "mono" }, "—"),
+    )
+  );
+
+  parts.push(el("div", { class: "panel" },
+    el("h3", {}, receipt.filename || "upload",
+      el("span", { class: "dim" }, ` — ${receipt.queued} queued`)),
+    el("table", {},
+      el("thead", {}, el("tr", {},
+        el("th", {}, "Conversation"), el("th", {}, "Day"),
+        el("th", {}, "Messages"), el("th", {}, "Status"), el("th", {}, "Run"))),
+      el("tbody", { id: "receipt-rows" }, rows)),
+  ));
+
+  fill("result", parts);
+}
+
+/** Poll one upload until nothing in it will change again. */
+async function follow(batchId) {
+  for (;;) {
+    await new Promise((resolve) => setTimeout(resolve, 2000));
+
+    let batch;
+    try {
+      batch = await api(`/ingest/imports/${encodeURIComponent(batchId)}`);
+    } catch {
+      return;  // The page is still useful; the history below will catch up.
+    }
+
+    for (const record of batch.imports) {
+      const row = document.getElementById(`imp-${record.import_id}`);
+      if (!row) continue;
+      fill(row.children[3], tag(record.status));
+      fill(row.children[4], record.trace_id
+        ? el("a", { href: `trace.html?trace=${encodeURIComponent(record.trace_id)}` }, "open")
+        : el("span", { class: "faint" }, record.error || "—"));
+    }
+
+    if (batch.finished) {
+      refreshHistory();
+      return;
+    }
+  }
+}
+
+/** Everything ever imported, newest first. */
+async function refreshHistory() {
+  let imports;
+  try {
+    imports = await api("/ingest/imports?limit=100");
+  } catch (error) {
+    fill("history", say("bad", String(error.message)));
+    return;
+  }
+
+  if (!imports.length) {
+    fill("history", el("div", { class: "empty" }, "Nothing has been imported yet."));
+    return;
+  }
+
+  fill("history", el("table", {},
+    el("thead", {}, el("tr", {},
+      el("th", {}, "Conversation"), el("th", {}, "Day"), el("th", {}, "File"),
+      el("th", {}, "Messages"), el("th", {}, "Status"), el("th", {}, "Uploaded"),
+      el("th", {}, "Run"))),
+    el("tbody", {}, imports.map((record) =>
+      el("tr", {},
+        el("td", {}, record.title || "untitled"),
+        el("td", { class: "mono" }, record.event_date),
+        el("td", { class: "dim" }, record.filename || "—"),
+        el("td", {}, String(record.message_count)),
+        el("td", {}, tag(record.status),
+          record.error ? el("div", { class: "faint" }, record.error) : null),
+        el("td", { class: "dim" }, when(record.created_at)),
+        el("td", {}, record.trace_id
+          ? el("a", { href: `trace.html?trace=${encodeURIComponent(record.trace_id)}` }, "open")
+          : el("span", { class: "faint" }, "—")),
+      )
+    )),
+  ));
+}
+
+refreshHistory();
+</script>
+</body>
+</html>

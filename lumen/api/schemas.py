@@ -303,6 +303,257 @@ class FormulationRequest(BaseModel):
     history: list[FormulationTurn] = Field(default_factory=list, max_length=20)
 
 
+class ConversationReceipt(BaseModel):
+    """
+    What happened to one conversation from an uploaded file.
+
+    Handed back the moment the messages are stored, before the run that
+    processes them has started. That is deliberate: the identifiers are
+    settled by then, so the caller is given something to follow rather than
+    being made to wait several minutes for the same answer.
+
+    Attributes:
+        import_id: Follow this to see how it gets on.
+        session_id: The conversation as Lumen now holds it.
+        title: What the export called it.
+        event_date: The day it was filed under — taken from its first
+            message, and applied to the whole conversation.
+        message_count: How many messages were stored.
+        already_imported: True when this conversation arrived in an earlier
+            upload and nothing was queued. It is not an error and not a
+            silent skip: the earlier import is named, so the caller can go
+            and look at what it produced.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    import_id: str
+    session_id: str
+    title: str = ""
+    event_date: str
+    message_count: int = 0
+    already_imported: bool = False
+
+
+class RejectionView(BaseModel):
+    """
+    A conversation in the file that could not be read, and why.
+
+    Reported rather than raised. A file holding thirty conversations where
+    two are unreadable should still import twenty-eight, and whoever
+    uploaded it should be told exactly which two were dropped.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    source_conversation_id: str = ""
+    title: str = ""
+    reason: str
+
+
+class UploadReceipt(BaseModel):
+    """
+    What one uploaded file turned into.
+
+    Attributes:
+        batch_id: The upload. Poll this to watch every conversation in the
+            file finish.
+        filename: What the file was called.
+        queued: How many conversations were sent to be processed.
+        conversations: One receipt per conversation that could be read.
+        rejected: The ones that could not, each with its reason.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    batch_id: str
+    filename: str = ""
+    queued: int = 0
+    conversations: list[ConversationReceipt] = Field(default_factory=list)
+    rejected: list[RejectionView] = Field(default_factory=list)
+
+
+class ImportView(BaseModel):
+    """
+    One past import, as the history shows it.
+
+    Attributes:
+        import_id: The row.
+        batch_id: The upload it came in.
+        title: What the export called the conversation.
+        filename: The file it arrived in.
+        event_date: The day it was filed under.
+        message_count: How many messages it held.
+        status: Where it got to.
+        error: Why it failed, when it did.
+        session_id: The conversation as Lumen holds it.
+        trace_id: What to follow to see what the run did. Absent until the
+            run has started.
+        created_at: When it was uploaded.
+        finished_at: When it stopped changing.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    import_id: str
+    batch_id: str
+    title: str = ""
+    filename: str = ""
+    event_date: str
+    message_count: int = 0
+    status: str
+    error: str | None = None
+    session_id: str | None = None
+    trace_id: str | None = None
+    created_at: str | None = None
+    finished_at: str | None = None
+
+    @classmethod
+    def of(cls, record: Any) -> "ImportView":
+        """Shape one stored import for a reader."""
+        return cls(
+            import_id=record.import_id,
+            batch_id=record.batch_id,
+            title=record.title,
+            filename=record.filename,
+            event_date=record.event_date.isoformat(),
+            message_count=record.message_count,
+            status=record.status.value,
+            error=record.error,
+            session_id=record.session_id,
+            trace_id=record.trace_id,
+            created_at=record.created_at.isoformat() if record.created_at else None,
+            finished_at=record.finished_at.isoformat() if record.finished_at else None,
+        )
+
+
+class BatchStatusView(BaseModel):
+    """
+    How one upload is getting on.
+
+    What the page polls while a file is being processed.
+
+    Attributes:
+        batch_id: The upload.
+        filename: What the file was called.
+        finished: True once nothing in it will change again on its own —
+            the signal to stop polling.
+        imports: Every conversation in it, with where each has got to.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    batch_id: str
+    filename: str = ""
+    finished: bool = False
+    imports: list[ImportView] = Field(default_factory=list)
+
+
+class RunSummaryView(BaseModel):
+    """
+    One past run, enough to pick it out of a list.
+
+    Exists because fetching a run by its trace id is only useful to somebody
+    who already has one, and nothing else in the system hands them out.
+
+    Attributes:
+        trace_id: What to follow for the whole story of the run.
+        job_id: The run's own identifier.
+        session_id: The conversation it processed.
+        status: How it ended.
+        created_at: When it started.
+        finished_at: When it stopped.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    trace_id: str
+    job_id: str
+    session_id: str
+    status: str
+    created_at: str | None = None
+    finished_at: str | None = None
+
+    @classmethod
+    def of(cls, record: Any) -> "RunSummaryView":
+        """Shape one stored run for a reader."""
+        return cls(
+            trace_id=record.trace_id,
+            job_id=record.job_id,
+            session_id=record.session_id,
+            status=record.status.value,
+            created_at=record.created_at.isoformat() if record.created_at else None,
+            finished_at=record.finished_at.isoformat() if record.finished_at else None,
+        )
+
+
+class WrittenMessageView(BaseModel):
+    """
+    One message exactly as it was written.
+
+    Attributes:
+        seq: Where it came in the conversation.
+        role: Who said it — the person, or whatever they were talking to.
+        content: The text itself, unaltered.
+        timestamp: When it was said.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    seq: int = Field(ge=0)
+    role: str
+    content: str
+    timestamp: str | None = None
+
+    @classmethod
+    def of(cls, record: Any) -> "WrittenMessageView":
+        return cls(
+            seq=record.seq,
+            role=record.role,
+            content=record.content,
+            timestamp=record.timestamp.isoformat() if record.timestamp else None,
+        )
+
+
+class EpisodeSourceView(BaseModel):
+    """
+    The writing an episode was read from.
+
+    The graph keeps what was *concluded* — an episode carries a summary and a
+    hash of its text, never the text. That is the right thing for a store of
+    conclusions and the wrong thing for a person checking one: a claim about
+    somebody's history is only reviewable next to the words it came from.
+
+    So this reaches past the graph to the conversation the run processed, and
+    hands back what was actually written.
+
+    Attributes:
+        episode_id: The piece of writing this belongs to.
+        session_id: The conversation it was part of.
+        trace_id: The run that read it.
+        event_date: The day it was filed under.
+        session_label: What that day's conversation was called.
+        messages: Everything written, in order.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    episode_id: str = Field(min_length=1)
+    session_id: str = Field(min_length=1)
+    trace_id: str = ""
+    event_date: str | None = None
+    session_label: str = ""
+    messages: list[WrittenMessageView] = Field(default_factory=list)
+
+
+class RunListView(BaseModel):
+    """Recent runs, newest first."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    runs: list[RunSummaryView] = Field(default_factory=list)
+
+
 def _text(value: Any) -> str | None:
     """A stored value as text, or nothing when it was never set."""
     return None if value is None else str(value)
@@ -321,4 +572,13 @@ __all__ = [
     "HealthView",
     "FormulationTurn",
     "FormulationRequest",
+    "ConversationReceipt",
+    "RejectionView",
+    "UploadReceipt",
+    "ImportView",
+    "BatchStatusView",
+    "RunSummaryView",
+    "RunListView",
+    "WrittenMessageView",
+    "EpisodeSourceView",
 ]

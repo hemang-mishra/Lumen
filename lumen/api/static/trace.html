@@ -1,0 +1,282 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Lumen — Runs</title>
+  <link rel="stylesheet" href="app.css">
+</head>
+<body>
+<header>
+  <h1>Lumen</h1>
+  <nav>
+    <a href="index.html">Import</a>
+    <a href="episodes.html">Episodes</a>
+    <a href="trace.html">Runs</a>
+    <a href="chat.html">Turn reader</a>
+  </nav>
+  <span class="note">test harness — not the product UI</span>
+</header>
+
+<main>
+  <section>
+    <h2>Recent runs</h2>
+    <div class="panel">
+      <div class="row" style="margin-bottom:12px">
+        <input type="text" id="lookup" placeholder="…or paste a trace id">
+        <button id="go">Open</button>
+      </div>
+      <div id="runs"><div class="empty">Loading…</div></div>
+    </div>
+  </section>
+
+  <section id="story"></section>
+</main>
+
+<script src="app.js"></script>
+<script>
+/*
+ * The run story.
+ *
+ * One run, read top to bottom in the order it happened: what was processed,
+ * every stage attempt with what went in and what came back, then everything
+ * the run wrote to the graph.
+ *
+ * Stages are grouped by episode rather than listed flat. One entry usually
+ * holds several unrelated topics that are read and decided independently,
+ * and a flat list of thirty stage rows reads as one long run rather than as
+ * four short ones — which is exactly the thing worth being able to see.
+ */
+
+document.getElementById("go").addEventListener("click", () => {
+  const value = document.getElementById("lookup").value.trim();
+  if (value) openRun(value);
+});
+document.getElementById("lookup").addEventListener("keydown", (event) => {
+  if (event.key === "Enter") document.getElementById("go").click();
+});
+
+/** The list of runs to choose from. */
+async function listRuns() {
+  let body;
+  try {
+    body = await api("/debug/traces?limit=50");
+  } catch (error) {
+    fill("runs", say("bad", String(error.message)));
+    return;
+  }
+
+  if (!body.runs.length) {
+    fill("runs", el("div", { class: "empty" },
+      "Nothing has been run yet. Import a conversation first."));
+    return;
+  }
+
+  fill("runs", el("table", {},
+    el("thead", {}, el("tr", {},
+      el("th", {}, "Started"), el("th", {}, "Conversation"),
+      el("th", {}, "Status"), el("th", {}, "Trace"))),
+    el("tbody", {}, body.runs.map((run) =>
+      el("tr", { class: "clickable", onclick: () => openRun(run.trace_id) },
+        el("td", { class: "dim" }, when(run.created_at)),
+        el("td", { class: "mono" }, run.session_id),
+        el("td", {}, tag(run.status)),
+        el("td", { class: "mono" }, run.trace_id),
+      )
+    )),
+  ));
+}
+
+/** Fetch one run and draw the whole story of it. */
+async function openRun(traceId) {
+  fill("story", el("div", { class: "empty" }, "Loading…"));
+  history.replaceState(null, "", `?trace=${encodeURIComponent(traceId)}`);
+
+  let trace;
+  try {
+    trace = await api(`/debug/traces/${encodeURIComponent(traceId)}`);
+  } catch (error) {
+    fill("story", say("bad", String(error.message)));
+    return;
+  }
+
+  fill("story",
+    el("h2", {}, "The run"),
+    theJob(trace.job),
+    ...byEpisode(trace),
+    whatItWrote(trace.writes),
+  );
+  window.scrollTo({ top: document.getElementById("story").offsetTop - 70, behavior: "smooth" });
+}
+
+/** The run itself: what was processed, when, and how it ended. */
+function theJob(job) {
+  return el("div", { class: "panel" },
+    el("h3", {}, "Run ", el("span", { class: "mono" }, job.trace_id), " ", tag(job.status)),
+    el("table", {}, el("tbody", {},
+      field("Conversation", job.session_id, true),
+      field("Job", job.job_id, true),
+      field("Started", when(job.started_at || job.created_at)),
+      field("Finished", when(job.finished_at)),
+      job.error_message ? field("Failed with", `${job.error_type || ""} ${job.error_message}`) : null,
+    )),
+    foldout("The settings this run used", job.config_snapshot),
+  );
+}
+
+function field(label, value, mono) {
+  return el("tr", {},
+    el("td", { class: "dim", style: "width:160px" }, label),
+    el("td", { class: mono ? "mono" : "" }, value || "—"),
+  );
+}
+
+/**
+ * The stages, grouped into the episodes they belong to.
+ *
+ * Stages with no episode ran once for the whole entry — cleaning, splitting,
+ * triage — so they come first, under their own heading, in the order they
+ * actually happened.
+ */
+function byEpisode(trace) {
+  const groups = new Map();
+  for (const run of trace.stage_runs) {
+    const key = run.episode_id || "";
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(run);
+  }
+
+  const sections = [];
+  const shared = groups.get("") || [];
+  groups.delete("");
+
+  if (shared.length) {
+    sections.push(el("div", { class: "episode" },
+      el("h3", {}, "The whole entry", el("span", { class: "dim" }, " — cleaning, splitting, triage")),
+      shared.map(stage),
+    ));
+  }
+
+  for (const [episodeId, runs] of groups) {
+    const wrote = trace.writes.filter((w) => w.episode_id === episodeId);
+    sections.push(el("div", { class: "episode" },
+      el("h3", {}, "Episode ", el("span", { class: "mono" }, episodeId),
+        el("a", { href: `episodes.html?episode=${encodeURIComponent(episodeId)}` },
+          "read it")),
+      counts([
+        ["stages", runs.length],
+        ["records", wrote.filter((w) => w.target === "GRAPH_NODE").length],
+        ["links", wrote.filter((w) => w.target === "GRAPH_EDGE").length],
+        ["indexed", wrote.filter((w) => w.target === "VECTOR").length],
+      ]),
+      runs.map(stage),
+    ));
+  }
+
+  return sections.length ? [el("h2", { style: "margin-top:28px" }, "What happened, in order"), ...sections] : [];
+}
+
+/** One stage attempt: how it went, how long it took, and both payloads. */
+function stage(run) {
+  const shade = run.status === "SUCCESS" ? "ok" : run.status === "FAILED" ? "bad" : "";
+  return el("div", { class: `stage ${shade}` },
+    el("div", { class: "stage-head" },
+      el("span", { class: "name" }, run.stage),
+      tag(run.status === "SUCCESS" ? "COMPLETE" : run.status),
+      el("span", { class: "dim" }, howLong(run.duration_ms)),
+      run.model_used ? el("span", { class: "faint" }, run.model_used) : null,
+      run.attempt > 1 ? el("span", { class: "tag dup" }, `attempt ${run.attempt}`) : null,
+      run.validation_passed === false
+        ? el("span", { class: "tag bad" }, wentWrong(run.stage)) : null,
+      whyNothingWasDecided(run),
+    ),
+    run.error_message ? el("div", { class: "notice bad" }, run.error_message) : null,
+    foldout("What went in", run.input_payload),
+    foldout("What came back", run.output_payload),
+  );
+}
+
+/*
+ * What "this stage did not validate" actually means, which is not the same
+ * thing at every stage. One flag carries both, and reading a stage's meaning
+ * out of the other stage's wording is how a rate limit came to be described
+ * as a validation problem.
+ */
+function wentWrong(stage) {
+  if (stage === "STAGE_3_RECONCILIATION") return "no decision came back";
+  if (stage === "STAGE_1_MICROEXTRACTION") return "could not be read";
+  return "did not validate";
+}
+
+/** The reason deciding produced nothing, when the run recorded one. */
+function whyNothingWasDecided(run) {
+  const payload = run.output_payload || {};
+  const reason = typeof payload === "string" ? null : payload.no_decision_because;
+  return reason ? el("span", { class: "faint" }, reason) : null;
+}
+
+function counts(pairs) {
+  return el("div", { class: "counts" }, pairs.map(([label, n]) =>
+    el("div", { class: "count" }, el("span", { class: "n" }, String(n)),
+      el("span", { class: "l" }, label))));
+}
+
+/** Everything the run put into the graph. */
+function whatItWrote(writes) {
+  const nodes = writes.filter((w) => w.target === "GRAPH_NODE");
+  const edges = writes.filter((w) => w.target === "GRAPH_EDGE");
+  const vectors = new Set(writes.filter((w) => w.target === "VECTOR").map((w) => w.node_id));
+
+  if (!writes.length) {
+    return el("div", { class: "panel" },
+      el("h3", {}, "What it wrote"),
+      el("div", { class: "empty" }, "This run wrote nothing to the graph."));
+  }
+
+  return el("div", { class: "panel" },
+    el("h3", {}, "What it wrote"),
+    counts([["records", nodes.length], ["links", edges.length], ["indexed", vectors.size]]),
+
+    nodes.length ? el("table", {},
+      el("thead", {}, el("tr", {},
+        el("th", {}, "Record"), el("th", {}, "From stage"),
+        el("th", {}, "Findable by meaning"), el("th", {}, "Written"))),
+      el("tbody", {}, nodes.map((write) =>
+        el("tr", {},
+          el("td", { class: "mono" }, write.node_id),
+          el("td", { class: "dim" }, write.stage),
+          el("td", {}, vectors.has(write.node_id)
+            ? el("span", { class: "tag ok" }, "yes")
+            : el("span", { class: "tag bad" }, "no")),
+          el("td", { class: "dim" }, when(write.written_at)),
+        )
+      )),
+    ) : null,
+
+    edges.length ? el("details", { open: false },
+      el("summary", {}, `${edges.length} link(s)`),
+      el("table", {},
+        el("thead", {}, el("tr", {},
+          el("th", {}, "From"), el("th", {}, "Link"), el("th", {}, "To"))),
+        el("tbody", {}, edges.map((write) =>
+          el("tr", {},
+            el("td", { class: "mono" }, write.from_id),
+            el("td", {}, write.edge_type),
+            el("td", { class: "mono" }, write.to_id),
+          )
+        )),
+      ),
+    ) : null,
+  );
+}
+
+listRuns();
+
+const asked = new URLSearchParams(location.search).get("trace");
+if (asked) {
+  document.getElementById("lookup").value = asked;
+  openRun(asked);
+}
+</script>
+</body>
+</html>

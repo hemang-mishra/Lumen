@@ -26,6 +26,7 @@ EXPECTED_TABLES = {
     "hitl_queue",
     "user_settings",
     "data_erasure_audit",
+    "imports",
 }
 
 

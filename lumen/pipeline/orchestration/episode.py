@@ -251,6 +251,11 @@ def _decide(
             "waiting_for_a_person": len(outcome.escalations),
             "episode_status": outcome.episode_status.value,
         }
+        if outcome.decision_failure:
+            # Recorded here rather than only in the log, so the run can be
+            # read without a trace id and a grep. The stage itself did not
+            # fail — it ran, decided nothing, and said why.
+            span.output_payload["no_decision_because"] = outcome.decision_failure
         return outcome
 
 

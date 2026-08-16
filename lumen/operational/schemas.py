@@ -14,12 +14,14 @@ from datetime import date, datetime
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from lumen.operational.enums import (
+    TERMINAL_IMPORT_STATUSES,
     BufferSource,
     BufferStatus,
     ErasureInitiator,
     ErasureStatus,
     HitlEntryType,
     HitlItemStatus,
+    ImportStatus,
     JobStatus,
     PipelineStage,
     StageStatus,
@@ -272,6 +274,84 @@ class PipelineTrace(OperationalRecord):
     writes: list[WriteLogEntry] = Field(default_factory=list)
 
 
+class ImportRecord(OperationalRecord):
+    """
+    One conversation from one uploaded file, and what became of it.
+
+    Attributes:
+        import_id: This row.
+        batch_id: The upload it arrived in. Every conversation from one file
+            shares it.
+        user_id: Whose history this is.
+        source_conversation_id: The identifier the export gave it. Unique
+            per user, and the reason a second upload of the same file is
+            recognised rather than run again.
+        title: What the export called the conversation.
+        filename: What the uploaded file was called. Shown in the history;
+            nothing keys off it.
+        event_date: The day the conversation was filed under.
+        message_count: How many messages were stored.
+        session_id: The buffer its messages went into, once it has one.
+        job_id: The pipeline run over that buffer, once it has one.
+        trace_id: What to follow to see what the run did.
+        status: Where it has got to.
+        error: Why it failed, in language meant for whoever uploaded it.
+        created_at: When the file was uploaded.
+        finished_at: When it reached a state it will not leave on its own.
+    """
+
+    import_id: str = Field(min_length=1)
+    batch_id: str = Field(min_length=1)
+    user_id: str = Field(min_length=1)
+
+    source_conversation_id: str = Field(min_length=1)
+    title: str = ""
+    filename: str = ""
+    event_date: date
+    message_count: int = Field(default=0, ge=0)
+
+    session_id: str | None = None
+    job_id: str | None = None
+    trace_id: str | None = None
+
+    status: ImportStatus = ImportStatus.QUEUED
+    error: str | None = None
+
+    created_at: datetime | None = None
+    finished_at: datetime | None = None
+
+
+class ImportBatch(OperationalRecord):
+    """
+    One uploaded file, with everything it turned into.
+
+    What the upload endpoint hands back and what the page polls. Assembled
+    rather than stored: a batch is exactly its rows, and a second table
+    holding a count of them would be one more thing that can disagree with
+    the truth.
+
+    Attributes:
+        batch_id: The upload.
+        filename: What the file was called.
+        imports: One entry per conversation, in the order they were read.
+        rejected: Conversations in the file that could not be read at all,
+            each with the reason. These never became imports, so they have
+            no row of their own and are carried here instead.
+    """
+
+    batch_id: str = Field(min_length=1)
+    filename: str = ""
+    imports: list[ImportRecord] = Field(default_factory=list)
+    rejected: list[dict[str, str]] = Field(default_factory=list)
+
+    @property
+    def finished(self) -> bool:
+        """Whether every conversation in this upload has stopped changing."""
+        return all(
+            record.status in TERMINAL_IMPORT_STATUSES for record in self.imports
+        )
+
+
 __all__ = [
     "OperationalRecord",
     "BufferMessageRecord",
@@ -286,4 +366,6 @@ __all__ = [
     "StoredErasureAudit",
     "CoreferenceRecord",
     "PipelineTrace",
+    "ImportRecord",
+    "ImportBatch",
 ]

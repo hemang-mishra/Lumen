@@ -28,6 +28,11 @@ logger = logging.getLogger("lumen.providers")
 # Long enough to see what was asked, short enough not to bloat the log file.
 _MAX_BODY_CHARS = 2000
 
+# Failure messages come from the vendor, not from the entry, so they are safe
+# to keep — but a rejected request can be answered with the whole schema that
+# was sent, which is worth trimming.
+_MAX_ERROR_CHARS = 400
+
 
 def log_llm_call(
     *,
@@ -42,6 +47,7 @@ def log_llm_call(
     usage: LLMUsage | None = None,
     finish_reason: str | None = None,
     error_type: str | None = None,
+    error_detail: str | None = None,
     prompt: str | None = None,
     completion: str | None = None,
     log_prompts: bool = False,
@@ -52,6 +58,12 @@ def log_llm_call(
 
     Successes are logged at info level and failures at error level, so a
     problem stands out without needing to be searched for.
+
+    A failure records what went wrong as well as its type. The type alone says
+    a call was rejected but not why, and the two are very different questions:
+    "the model is retired" and "the request was malformed" both arrive as one
+    kind of error, and telling them apart from the log is the whole point of
+    writing the line.
     """
     fields: dict[str, Any] = {
         "provider": provider,
@@ -73,6 +85,8 @@ def log_llm_call(
         fields["finish_reason"] = finish_reason
     if error_type is not None:
         fields["error_type"] = error_type
+    if error_detail:
+        fields["error_detail"] = _truncate(error_detail, _MAX_ERROR_CHARS)
     if extra:
         fields.update(extra)
 
@@ -96,6 +110,7 @@ def log_embedding_call(
     text_count: int,
     task_type: str,
     error_type: str | None = None,
+    error_detail: str | None = None,
 ) -> None:
     """
     Record that an embedding call happened.
@@ -116,17 +131,19 @@ def log_embedding_call(
     }
     if error_type is not None:
         fields["error_type"] = error_type
+    if error_detail:
+        fields["error_detail"] = _truncate(error_detail, _MAX_ERROR_CHARS)
 
     level = logging.ERROR if outcome == "FAILED" else logging.INFO
     logger.log(level, "embedding call %s %s", operation, outcome.lower(), extra=fields)
 
 
-def _truncate(body: str) -> str:
+def _truncate(body: str, limit: int = _MAX_BODY_CHARS) -> str:
     """Shorten a long body, saying how much was left out."""
-    if len(body) <= _MAX_BODY_CHARS:
+    if len(body) <= limit:
         return body
-    dropped = len(body) - _MAX_BODY_CHARS
-    return f"{body[:_MAX_BODY_CHARS]}... [{dropped} more characters]"
+    dropped = len(body) - limit
+    return f"{body[:limit]}... [{dropped} more characters]"
 
 
 __all__ = ["log_llm_call", "log_embedding_call"]

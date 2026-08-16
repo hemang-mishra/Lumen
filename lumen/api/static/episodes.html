@@ -1,0 +1,351 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Lumen — Episodes</title>
+  <link rel="stylesheet" href="app.css">
+</head>
+<body>
+<header>
+  <h1>Lumen</h1>
+  <nav>
+    <a href="index.html">Import</a>
+    <a href="episodes.html">Episodes</a>
+    <a href="trace.html">Runs</a>
+    <a href="chat.html">Turn reader</a>
+  </nav>
+  <span class="note">test harness — not the product UI</span>
+</header>
+
+<main>
+  <section>
+    <h2>Episodes</h2>
+    <p class="lede">
+      One episode is one piece of thinking, as the pipeline split it. Open one
+      to read what was written that day and see everything that was made of it.
+    </p>
+    <div class="panel">
+      <div class="row" style="margin-bottom:12px">
+        <input type="text" id="lookup" placeholder="…or paste an episode id">
+        <button id="go">Open</button>
+      </div>
+      <div id="list"><div class="empty">Loading…</div></div>
+    </div>
+  </section>
+
+  <section id="detail"></section>
+</main>
+
+<script src="app.js"></script>
+<script>
+/*
+ * The episode page.
+ *
+ * Everything an episode produced, next to the writing it came from. The
+ * pairing is the point: the graph keeps conclusions, and a conclusion about
+ * somebody's history cannot be checked without the words underneath it.
+ *
+ * Three calls make one page — the episode's records from the graph, the
+ * original conversation from the run log, and the list to pick from. The
+ * writing lives in the operational store rather than the graph, because an
+ * episode keeps a summary and a hash of its text and never the text.
+ *
+ * Every property of every record is shown rather than a chosen few. This is
+ * a harness for looking at what the pipeline did, and the field that turns
+ * out to matter is always the one a curated view left out.
+ */
+
+document.getElementById("go").addEventListener("click", () => {
+  const value = document.getElementById("lookup").value.trim();
+  if (value) openEpisode(value);
+});
+document.getElementById("lookup").addEventListener("keydown", (event) => {
+  if (event.key === "Enter") document.getElementById("go").click();
+});
+
+/** Fields worth putting in a heading, per kind of record. */
+const HEADLINE = {
+  EpisodeNode: ["episode_summary"],
+  ObservationNode: ["content"],
+  EventNode: ["event_summary"],
+  SessionNode: ["session_summary"],
+  PatternNode: ["pattern_name", "pattern_description"],
+  BeliefNode: ["belief_statement"],
+  LessonNode: ["lesson_statement"],
+  AdoptedPrincipleNode: ["principle_name", "principle_statement"],
+  ContradictionNode: ["contradiction_summary"],
+  CausalChainNode: ["chain_summary"],
+  CausalStepNode: ["content"],
+  OpenLoopNode: ["loop_description"],
+  PersonEntityNode: ["canonical_name"],
+  DecisionAuditNode: ["action"],
+  MacroextractionReportNode: ["report_type"],
+};
+
+/** What to call each kind of record in a heading. */
+const KIND = {
+  EpisodeNode: "Episode",
+  ObservationNode: "Observations",
+  EventNode: "Events",
+  SessionNode: "Sessions",
+  PatternNode: "Patterns",
+  BeliefNode: "Beliefs",
+  LessonNode: "Lessons",
+  AdoptedPrincipleNode: "Principles",
+  ContradictionNode: "Contradictions",
+  CausalChainNode: "Causal chains",
+  CausalStepNode: "Causal steps",
+  OpenLoopNode: "Open loops",
+  PersonEntityNode: "People",
+  DecisionAuditNode: "Decisions",
+  MacroextractionReportNode: "Reports",
+};
+
+/** The list of episodes to choose from, newest first. */
+async function listEpisodes() {
+  let body;
+  try {
+    body = await api("/graph/nodes?types=EpisodeNode&limit=100&active_only=false");
+  } catch (error) {
+    fill("list", say("bad", String(error.message)));
+    return;
+  }
+
+  if (!body.nodes.length) {
+    fill("list", el("div", { class: "empty" },
+      "Nothing has been read yet. Import a conversation first."));
+    return;
+  }
+
+  fill("list", el("table", {},
+    el("thead", {}, el("tr", {},
+      el("th", {}, "Day"), el("th", {}, "What it was about"),
+      el("th", {}, "Kind"), el("th", {}, "Episode"))),
+    el("tbody", {}, body.nodes.map((node) => {
+      const it = node.properties || {};
+      return el("tr", { class: "clickable", onclick: () => openEpisode(node.node_id) },
+        el("td", { class: "dim" }, it.event_date || "—"),
+        el("td", {}, it.episode_summary || el("span", { class: "faint" }, "no summary")),
+        el("td", {}, el("span", { class: "tag queued" }, it.entry_class || "—")),
+        el("td", { class: "mono" }, node.node_id),
+      );
+    })),
+  ));
+}
+
+/** One episode: the writing it came from, then everything made of it. */
+async function openEpisode(episodeId) {
+  fill("detail", el("div", { class: "empty" }, "Loading…"));
+  history.replaceState(null, "", `?episode=${encodeURIComponent(episodeId)}`);
+
+  let detail;
+  try {
+    detail = await api(`/graph/episodes/${encodeURIComponent(episodeId)}`);
+  } catch (error) {
+    fill("detail", say("bad", String(error.message)));
+    return;
+  }
+
+  // The writing is a separate store and a separate question. A run that was
+  // tidied away, or a record written before the log existed, should cost the
+  // page its transcript and nothing else.
+  let source = null;
+  try {
+    source = await api(`/debug/episodes/${encodeURIComponent(episodeId)}/source`);
+  } catch (error) {
+    source = { error: String(error.message) };
+  }
+
+  // What was made of the episode comes first. The writing is what you check
+  // a finding against, so it belongs on the page — but a day's conversation
+  // is thousands of words, and putting it above the findings means scrolling
+  // past the whole evening to reach the four lines that are the point.
+  fill("detail",
+    el("h2", {}, "This episode"),
+    theEpisode(detail.episode, source),
+    whatCameOfIt(detail.contents, detail.episode.node_id),
+    howItLinksUp(detail.contents),
+    whatWasWritten(source),
+  );
+  window.scrollTo({ top: document.getElementById("detail").offsetTop - 70, behavior: "smooth" });
+}
+
+/** The episode's own record, in full. */
+function theEpisode(node, source) {
+  const it = node.properties || {};
+  return el("div", { class: "panel" },
+    el("h3", {}, it.episode_summary || node.node_id),
+    el("div", { class: "stage-head", style: "margin-bottom:10px" },
+      el("span", { class: "mono" }, node.node_id),
+      it.entry_class ? el("span", { class: "tag queued" }, it.entry_class) : null,
+      it.event_date ? el("span", { class: "dim" }, it.event_date) : null,
+      it.total_episodes_in_entry > 1
+        ? el("span", { class: "faint" },
+            `episode ${it.episode_index} of ${it.total_episodes_in_entry} that day`)
+        : null,
+      source && source.trace_id
+        ? el("a", { href: `trace.html?trace=${encodeURIComponent(source.trace_id)}` },
+            "see the run that read it")
+        : null,
+    ),
+    properties(it),
+  );
+}
+
+/** The conversation itself, message by message, exactly as written. */
+function whatWasWritten(source) {
+  const panel = el("div", { class: "panel" }, el("h3", {}, "What was written"));
+
+  if (!source || source.error) {
+    panel.append(el("div", { class: "empty" },
+      source && source.error
+        ? `The writing behind this episode could not be found — ${source.error}`
+        : "The writing behind this episode could not be found."));
+    return panel;
+  }
+
+  panel.append(el("div", { class: "stage-head", style: "margin-bottom:10px" },
+    el("span", { class: "dim" }, source.session_label || source.session_id),
+    el("span", { class: "faint" }, `${source.messages.length} message(s)`),
+    el("span", { class: "mono" }, source.session_id),
+  ));
+
+  if (!source.messages.length) {
+    panel.append(el("div", { class: "empty" }, "The conversation is empty."));
+    return panel;
+  }
+
+  panel.append(el("div", { class: "transcript" }, source.messages.map((message) =>
+    el("div", { class: `msg ${message.role === "USER" ? "you" : "them"}` },
+      el("div", { class: "who" },
+        el("span", {}, message.role === "USER" ? "You" : "The assistant"),
+        el("span", { class: "faint" }, when(message.timestamp)),
+      ),
+      // Kept as text, and only the line breaks honoured. These strings are
+      // somebody's journal; rendering them as markup would run whatever an
+      // export happened to contain.
+      el("div", { class: "said" }, message.content),
+    )
+  )));
+
+  return panel;
+}
+
+/**
+ * Everything the episode produced, grouped by kind.
+ *
+ * The episode's own record is left out — it is already above, and repeating
+ * it inside its own contents reads as a second thing having been found.
+ */
+function whatCameOfIt(slice, episodeId) {
+  const made = (slice.nodes || []).filter((node) => node.node_id !== episodeId);
+
+  if (!made.length) {
+    return el("div", { class: "panel" },
+      el("h3", {}, "What came of it"),
+      el("div", { class: "empty" },
+        "Nothing was written from this episode. That is what a run looks like "
+        + "when every model call failed, or when the writing was too thin to read."));
+  }
+
+  const groups = new Map();
+  for (const node of made) {
+    if (!groups.has(node.node_type)) groups.set(node.node_type, []);
+    groups.get(node.node_type).push(node);
+  }
+
+  return el("div", { class: "panel" },
+    el("h3", {}, "What came of it"),
+    counts([...groups].map(([type, nodes]) => [KIND[type] || type, nodes.length])),
+    [...groups].map(([type, nodes]) => el("div", { class: "episode" },
+      el("h3", {}, KIND[type] || type, el("span", { class: "dim" }, ` — ${nodes.length}`)),
+      nodes.map(record),
+    )),
+  );
+}
+
+/** One record: its headline, everything it holds, and the raw thing itself. */
+function record(node) {
+  const it = node.properties || {};
+  const heading = (HEADLINE[node.node_type] || [])
+    .map((field) => it[field]).filter(Boolean).join(" — ");
+
+  return el("div", { class: "record" },
+    el("div", { class: "said" }, heading || el("span", { class: "faint" }, "no summary")),
+    el("div", { class: "stage-head", style: "margin:6px 0" },
+      el("span", { class: "mono" }, node.node_id),
+      it.type ? el("span", { class: "tag queued" }, it.type) : null,
+      it.signal_strength ? el("span", { class: "tag queued" }, it.signal_strength) : null,
+      it.status ? el("span", { class: `tag ${it.status === "ACTIVE" ? "ok" : "dup"}` }, it.status) : null,
+      it.provenance ? el("span", { class: "faint" }, it.provenance) : null,
+    ),
+    el("details", {}, el("summary", {}, "Everything it holds"), properties(it)),
+  );
+}
+
+/** Every property a record carries, in a plain table. */
+function properties(it) {
+  const rows = Object.entries(it)
+    .filter(([, value]) => value !== null && value !== undefined && value !== "")
+    .filter(([, value]) => !(Array.isArray(value) && !value.length));
+
+  if (!rows.length) return el("div", { class: "empty" }, "Nothing recorded.");
+
+  return el("table", {}, el("tbody", {}, rows.map(([key, value]) =>
+    el("tr", {},
+      el("td", { class: "dim", style: "width:220px" }, key),
+      el("td", { class: typeof value === "string" && value.length > 80 ? "said" : "" },
+        readable(value)),
+    )
+  )));
+}
+
+/** A property value as something a person reads. */
+function readable(value) {
+  if (Array.isArray(value)) {
+    return value.map((item) =>
+      typeof item === "object" ? JSON.stringify(item) : String(item)).join(", ");
+  }
+  if (value && typeof value === "object") return JSON.stringify(value, null, 2);
+  if (typeof value === "boolean") return value ? "yes" : "no";
+  return String(value);
+}
+
+/** The links between everything the episode produced. */
+function howItLinksUp(slice) {
+  const edges = slice.edges || [];
+  if (!edges.length) return null;
+
+  return el("div", { class: "panel" },
+    el("h3", {}, "How it links up"),
+    el("table", {},
+      el("thead", {}, el("tr", {},
+        el("th", {}, "From"), el("th", {}, "Link"), el("th", {}, "To"))),
+      el("tbody", {}, edges.map((edge) =>
+        el("tr", {},
+          el("td", { class: "mono" }, edge.from_id),
+          el("td", {}, edge.edge_type),
+          el("td", { class: "mono" }, edge.to_id),
+        )
+      )),
+    ),
+  );
+}
+
+function counts(pairs) {
+  return el("div", { class: "counts" }, pairs.map(([label, n]) =>
+    el("div", { class: "count" }, el("span", { class: "n" }, String(n)),
+      el("span", { class: "l" }, label))));
+}
+
+listEpisodes();
+
+const asked = new URLSearchParams(location.search).get("episode");
+if (asked) {
+  document.getElementById("lookup").value = asked;
+  openEpisode(asked);
+}
+</script>
+</body>
+</html>

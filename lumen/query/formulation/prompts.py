@@ -24,14 +24,15 @@ from collections.abc import Iterable
 
 from lumen.schemas.enums import Domain
 from lumen.schemas.query import ChatTurn
+from lumen.prompt_rules import AUTHOR_NAMING
 
 SYSTEM_INSTRUCTION = (
     "You are a router for a personal-history system. You read one message "
     "from a conversation and decide whether anything in that person's "
     "recorded history is worth looking up before replying to them. You do "
     "not reply to the person and you do not give advice. You never invent "
-    "names, periods or events that are not in what you were given. Return "
-    "only the requested structure."
+    "names, periods or events that are not in what you were given. "
+    + AUTHOR_NAMING + " Return only the requested structure."
 )
 
 

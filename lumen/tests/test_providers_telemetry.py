@@ -97,6 +97,54 @@ class TestFailuresAreRecordedToo:
             FakeLLMProvider([], config=provider_config).generate_structured("q", Answer)
         assert provider_lines(captured_logs)[0]["level"] == "ERROR"
 
+    def test_what_went_wrong_is_also_said_in_words(
+        self, provider_config, captured_logs
+    ):
+        """
+        The type alone cannot tell a retired model from a malformed request.
+
+        Both arrive as one kind of provider error, and the difference is the
+        only thing that says what to do next, so the message travels with it.
+        """
+        with pytest.raises(Exception):
+            FakeLLMProvider([], config=provider_config).generate_structured("q", Answer)
+        assert "all of them have been used" in provider_lines(captured_logs)[0][
+            "error_detail"
+        ]
+
+    def test_a_very_long_failure_message_is_shortened(
+        self, provider_config, captured_logs
+    ):
+        """A rejected request can be answered with the whole schema it sent."""
+
+        def refuse(_prompt: str) -> str:
+            raise ProviderResponseError("y" * 5000)
+
+        with pytest.raises(ProviderResponseError):
+            FakeLLMProvider(refuse, config=provider_config).generate_structured(
+                "q", Answer
+            )
+        recorded = provider_lines(captured_logs)[0]["error_detail"]
+        assert len(recorded) < 5000
+        assert "more characters" in recorded
+
+    def test_an_embedding_failure_says_what_went_wrong(
+        self, provider_config, captured_logs, monkeypatch
+    ):
+        embedder = FakeEmbeddingProvider(dimensions=16, config=provider_config)
+
+        def refuse(*_args, **_kwargs):
+            raise ProviderResponseError("the embedding model is not there any more")
+
+        monkeypatch.setattr(embedder, "_embed_chunk", refuse)
+
+        with pytest.raises(ProviderResponseError):
+            embedder.embed_batch(["a"])
+        assert (
+            "not there any more"
+            in provider_lines(captured_logs, "embed_batch")[0]["error_detail"]
+        )
+
 
 class TestPromptsStayOut:
     def test_the_prompt_is_not_logged_by_default(self, provider_config, captured_logs):

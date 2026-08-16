@@ -13,6 +13,7 @@ the environment held at import time, silently ignoring its own settings.
 
 from __future__ import annotations
 
+import itertools
 import os
 from dataclasses import dataclass, field
 from typing import Any
@@ -184,6 +185,55 @@ class PipelineConfig:
 
 
 @dataclass(frozen=True)
+class IngestConfig:
+    """
+    Configuration for taking in conversations exported from elsewhere.
+
+    Environment variables:
+      LUMEN_ENABLE_INGEST    — "false" to refuse uploads entirely
+      LUMEN_IMPORT_TIMEZONE  — the zone the person's days are measured in
+
+    The time zone is the one that matters. An imported conversation is filed
+    under the day it started, and which day that is depends on where the
+    person was standing: nine in the evening in India is half past three in
+    the afternoon in UTC, and the day either has or has not turned over
+    depending on which of those you measure. Exports record an instant;
+    only the reader knows the calendar it belongs to.
+
+    Turning ingestion off is for a deployment that should be able to read
+    the graph and nothing more. The upload routes are then not mounted at
+    all, rather than mounted and refusing.
+    """
+
+    enabled: bool = _env_bool("LUMEN_ENABLE_INGEST", True)
+    timezone: str = _env("LUMEN_IMPORT_TIMEZONE", "UTC")
+
+    def tzinfo(self) -> Any:
+        """
+        The configured zone, or UTC if it cannot be resolved.
+
+        A misspelled zone name falls back rather than refusing to start.
+        Getting the day wrong by a few hours is a small, visible problem;
+        a service that will not boot over a typo in an optional setting is
+        a larger one.
+        """
+        from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+
+        try:
+            return ZoneInfo(self.timezone)
+        except (ZoneInfoNotFoundError, ValueError, ModuleNotFoundError):
+            import logging
+
+            logging.getLogger(__name__).warning(
+                "unknown time zone %r, so imported days will be measured in UTC",
+                self.timezone,
+            )
+            from datetime import UTC
+
+            return UTC
+
+
+@dataclass(frozen=True)
 class QueryConfig:
     """
     Tuning knobs for reading a live conversation.
@@ -333,6 +383,12 @@ class ProviderConfig:
     # which is useful when debugging and a privacy problem otherwise.
     log_prompts: bool = _env_bool("LUMEN_LOG_PROMPTS", False)
 
+    # How a request picks between several configured credentials. "random"
+    # holds no state and so stays even across threads and processes;
+    # "round_robin" is strictly even but only within one process. The keys
+    # themselves are not here — see gemini_api_keys.
+    key_rotation_strategy: str = _env("LUMEN_KEY_ROTATION_STRATEGY", "random")
+
     def resolve(self, role: ModelRole) -> tuple[str, str]:
         """Return the (provider, model) pair configured for a given role."""
         mapping: dict[ModelRole, tuple[str, str]] = {
@@ -369,8 +425,59 @@ class ProviderConfig:
 
         Reading it fresh each time also means a rotated key takes effect
         without a restart.
+
+        Where several keys are configured this is the first of them, which
+        keeps every caller that only ever wanted "a credential" working
+        unchanged. Anything that spreads load across keys reads
+        gemini_api_keys instead.
         """
-        return os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY")
+        keys = self.gemini_api_keys
+        return keys[0] if keys else None
+
+    @property
+    def gemini_api_keys(self) -> tuple[str, ...]:
+        """
+        Every Gemini credential this deployment has, in configured order.
+
+        Quotas are metered per key, so a deployment with several keys can do
+        several times the work in a minute — provided requests are actually
+        spread across them. This reads the whole set; lumen.providers.keyring
+        decides which one a given request uses.
+
+        Three ways of saying it, checked in this order and then merged:
+
+          GEMINI_API_KEYS=key-one,key-two,key-three   one line, comma separated
+          GEMINI_API_KEY_1=... GEMINI_API_KEY_2=...   numbered, one per line
+          GEMINI_API_KEY=... / GOOGLE_API_KEY=...     the single-key form
+
+        The numbered form is read from 1 upwards and stops at the first gap,
+        so a commented-out GEMINI_API_KEY_3 truncates the list rather than
+        leaving a hole — silently skipping a gap would make a typo'd variable
+        name look like it was working.
+
+        A property, not a field, for the reason described on gemini_api_key:
+        nothing that walks the dataclass can carry a plaintext key into a
+        config snapshot.
+        """
+        found: list[str] = []
+
+        for raw in (os.environ.get("GEMINI_API_KEYS") or "").split(","):
+            if raw.strip():
+                found.append(raw.strip())
+
+        for index in itertools.count(1):
+            value = (os.environ.get(f"GEMINI_API_KEY_{index}") or "").strip()
+            if not value:
+                break
+            found.append(value)
+
+        single = os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY")
+        if single and single.strip():
+            found.append(single.strip())
+
+        # Dropping repeats keeps the same key pasted under two names from
+        # looking like two meters when it is one.
+        return tuple(dict.fromkeys(found))
 
 
 @dataclass(frozen=True)
@@ -392,6 +499,7 @@ class AppConfig:
     observability: ObservabilityConfig = field(default_factory=ObservabilityConfig)
     pipeline: PipelineConfig = field(default_factory=PipelineConfig)
     query: QueryConfig = field(default_factory=QueryConfig)
+    ingest: IngestConfig = field(default_factory=IngestConfig)
 
     # The personal build has one user. Multi-user deployments set this per request.
     user_id: str = _env("LUMEN_USER_ID", "local")

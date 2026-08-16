@@ -1,6 +1,6 @@
 # Microextraction Schema
 
-Microextraction is the process of breaking down a single journal entry (or a conversational Session Summary from Stage 0.5) into structured elements. To capture the true complexity of human thought without oversimplifying or losing nuance, an entry shouldn't just be flattened into generic lessons.
+Microextraction is the process of breaking down a single journal entry (or a conversation rebuilt by Stage 0.5, which is the person's own turns verbatim with the assistant's condensed) into structured elements. To capture the true complexity of human thought without oversimplifying or losing nuance, an entry shouldn't just be flattened into generic lessons.
 
 ## The Segmentation Problem
 **Critical Insight:** A single journal log is rarely about *just one thing*. Furthermore, **stream-of-consciousness journaling is non-linear.** You might jump from a morning event to a late-night thought, and then back to the morning.
@@ -29,7 +29,7 @@ Things that apply to the entire entry:
 ---
 
 ### Level 2: Conceptual Episode Extraction (The Core Schema)
-The system must first cluster the input text (either a raw monologue or the Stage 0.5 Session Summary) by *Topic or Concept* into "Episodes" (e.g., Episode 1: The Workout Struggle, Episode 2: The Mentor Conflict, Episode 3: Career Realization) rather than linear time blocks.
+The system must first cluster the input text (either a raw monologue or the Stage 0.5 rebuilt conversation) by *Topic or Concept* into "Episodes" (e.g., Episode 1: The Workout Struggle, Episode 2: The Mentor Conflict, Episode 3: Career Realization) rather than linear time blocks.
 
 To combat **Schema Bloat** (having dozens of empty keys) and **Fragmentation** (AI hallucinating random category names), we do not use flat attributes. Instead, we use flexible arrays tied to a strict **Enum Dictionary**.
 

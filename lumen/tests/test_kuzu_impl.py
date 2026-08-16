@@ -281,6 +281,60 @@ class TestReadOperations:
         """get_nodes_by_ids with empty list must return empty list."""
         assert provider.get_nodes_by_ids([]) == []
 
+    def test_records_of_different_kinds_can_be_fetched_together(self, provider):
+        """
+        The everyday case: an episode's contents are never all one kind.
+
+        Asked as a single unlabelled match, a result spanning two node tables
+        comes back with its strings misread and fails to decode — so this is
+        asked one table at a time. Found by opening an episode in the UI,
+        where the failure read as a byte position rather than as anything
+        about the records involved.
+        """
+        provider.write_node("EpisodeNode", {"node_id": "ep_mixed_001"})
+        provider.write_node(
+            "ObservationNode",
+            {"node_id": "obs_mixed_001", "content": "something noticed"},
+        )
+        provider.write_node(
+            "EventNode",
+            {"node_id": "evt_mixed_001", "event_summary": "something happened"},
+        )
+
+        results = provider.get_nodes_by_ids(
+            ["ep_mixed_001", "obs_mixed_001", "evt_mixed_001"]
+        )
+
+        assert [row["node_id"] for row in results] == [
+            "ep_mixed_001",
+            "obs_mixed_001",
+            "evt_mixed_001",
+        ]
+        assert results[1]["content"] == "something noticed"
+
+    def test_the_order_asked_for_is_the_order_returned(self, provider):
+        """Search hands these over ranked; grouping them by table loses that."""
+        provider.write_node("EpisodeNode", {"node_id": "ep_order_001"})
+        provider.write_node("ObservationNode", {"node_id": "obs_order_001"})
+        provider.write_node("EpisodeNode", {"node_id": "ep_order_002"})
+
+        results = provider.get_nodes_by_ids(
+            ["obs_order_001", "ep_order_002", "ep_order_001"]
+        )
+
+        assert [row["node_id"] for row in results] == [
+            "obs_order_001",
+            "ep_order_002",
+            "ep_order_001",
+        ]
+
+    def test_ids_that_match_nothing_are_simply_absent(self, provider):
+        provider.write_node("EpisodeNode", {"node_id": "ep_present_001"})
+
+        results = provider.get_nodes_by_ids(["ep_present_001", "never_written"])
+
+        assert [row["node_id"] for row in results] == ["ep_present_001"]
+
 
 # ---------------------------------------------------------------------------
 # Context Manager

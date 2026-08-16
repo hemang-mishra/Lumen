@@ -130,9 +130,12 @@ def preprocess(
 
     transcript.warn_on_multi_date(event)
 
+    is_conversation = transcript.is_chat_buffer(event)
+
     trail.conversation = _read_conversation(event, provider=thinking)
-    trail.normalized = passes.run_normalize(
-        trail.conversation.summary,
+    trail.normalized = _normalize(
+        trail.conversation,
+        is_conversation=is_conversation,
         is_voice=transcript.is_voice(event),
         provider=lightweight,
     )
@@ -148,8 +151,13 @@ def preprocess(
         )
         return _finish(event, started, outcome)
 
-    trail.structured = passes.run_structure(
-        text, entry_id=event.session_id, provider=thinking, config=settings
+    trail.structured = _split(
+        event,
+        text=text,
+        conversation=trail.conversation,
+        is_conversation=is_conversation,
+        provider=thinking,
+        config=settings,
     )
     trail.triaged = passes.run_triage(
         [episode.text for episode in trail.structured.episodes],
@@ -158,7 +166,7 @@ def preprocess(
     )
 
     episodes = _build_episodes(
-        event, trail.structured.episodes, trail.triaged.scores, settings
+        event, trail.structured.episodes, trail.triaged, settings
     )
     return _finish(
         event,
@@ -183,8 +191,8 @@ def _read_conversation(
     event: SessionDecayEvent, *, provider: LLMProvider
 ) -> ConversationResult:
     """
-    Reduce a conversation to its conclusions, or pass a monologue straight
-    through.
+    Rebuild a conversation as something readable, or pass a monologue
+    straight through.
 
     Whether this was a conversation is decided by whether the assistant
     spoke in it, so a voice note or a pasted entry skips this entirely and
@@ -193,7 +201,78 @@ def _read_conversation(
     if transcript.is_chat_buffer(event):
         return passes.run_conversation(event.raw_buffer, provider=provider)
     spoken = transcript.user_messages(event.raw_buffer)
-    return ConversationResult(summary=transcript.render_monologue(spoken))
+    return ConversationResult(entry_text=transcript.render_monologue(spoken))
+
+
+def _normalize(
+    conversation: ConversationResult,
+    *,
+    is_conversation: bool,
+    is_voice: bool,
+    provider: LLMProvider,
+) -> NormalizeResult:
+    """
+    Clean and translate the entry — except for a conversation, which is left
+    exactly as it was written.
+
+    Cleaning asks a model to hand the whole entry back. For a paragraph that
+    is nothing; for an evening's conversation it is thousands of words of
+    output, where the reply limit truncates silently and every sentence is an
+    opportunity to smooth somebody's phrasing into the model's. The entry is
+    already made of their own messages, copied out of the buffer verbatim, so
+    there is nothing here worth that risk.
+
+    The cost is real and worth naming: a conversation written partly in
+    another language is not translated. That is a gap to close by cleaning
+    each message on its own, where the round trip is small — not by putting
+    the whole evening through one call.
+    """
+    if not is_conversation:
+        return passes.run_normalize(
+            conversation.entry_text, is_voice=is_voice, provider=provider
+        )
+
+    logger.info(
+        "conversation kept as written; cleaning skipped",
+        extra={"reason": "the person's own messages are used verbatim"},
+    )
+    return NormalizeResult(text=conversation.entry_text)
+
+
+def _split(
+    event: SessionDecayEvent,
+    *,
+    text: str,
+    conversation: ConversationResult,
+    is_conversation: bool,
+    provider: LLMProvider,
+    config: PipelineConfig,
+) -> StructureResult:
+    """
+    Split the entry into topics, by turn where there are turns to split by.
+
+    A conversation already arrives in pieces, so its topics can be named by
+    the turns that make them up and reassembled here. A monologue has no such
+    seams and has to be split by asking for the text back.
+    """
+    if not is_conversation:
+        return passes.run_structure(
+            text, entry_id=event.session_id, provider=provider, config=config
+        )
+
+    turns = transcript.assemble_entry(
+        event.raw_buffer,
+        turn_acts=conversation.turn_acts,
+        digests=conversation.assistant_digests,
+    )
+    if not turns:
+        return passes.run_structure(
+            text, entry_id=event.session_id, provider=provider, config=config
+        )
+
+    return passes.run_structure_by_turns(
+        turns, entry_id=event.session_id, provider=provider, config=config
+    )
 
 
 def _should_discard(text: str, conversation: ConversationResult) -> bool:
@@ -242,7 +321,7 @@ def _decide(episodes: list[PreprocessedEpisode]) -> QualityGateDecision:
 def _build_episodes(
     event: SessionDecayEvent,
     segments: tuple[SegmentedEpisode, ...],
-    scores: tuple[EpisodeScore, ...],
+    triaged: TriageResult,
     config: PipelineConfig,
 ) -> list[PreprocessedEpisode]:
     """
@@ -251,11 +330,21 @@ def _build_episodes(
     Each topic is judged on its own, so an entry holding one careful
     reflection and one throwaway aside produces two pieces treated
     differently, rather than one verdict stretched over both.
+
+    A topic nobody managed to score is given the close reading rather than
+    the light one. The score is still recorded as 0.0 — nothing was measured
+    — but a failed call is not evidence that somebody's writing was thin.
     """
     total = len(segments)
+    scores = triaged.scores
     built = []
     for position, segment in enumerate(segments, start=1):
         coherence = scores[position - 1].coherence_score if position <= len(scores) else 0.0
+        entry_class = (
+            _classify(coherence, config)
+            if triaged.was_scored(position)
+            else EntryClass.REFLECTION
+        )
         built.append(
             PreprocessedEpisode(
                 episode_id=make_node_id(_EPISODE_ID_PREFIX, event.event_date, position),
@@ -263,7 +352,7 @@ def _build_episodes(
                 episode_index=position,
                 total_episodes_in_entry=total,
                 cleaned_text=segment.text,
-                entry_class=_classify(coherence, config),
+                entry_class=entry_class,
                 coherence_score=coherence,
                 historical_era=segment.historical_era,
                 overarching_themes=segment.overarching_themes,

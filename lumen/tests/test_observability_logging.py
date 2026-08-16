@@ -224,6 +224,52 @@ class TestConfigureLogging:
         assert entry["trace_id"] == "legacy-trace"
 
 
+class TestTheSuiteStaysOutOfTheRealLogFile:
+    """
+    A test run must not append to the file a running Lumen writes.
+
+    This is not tidiness. Scripted failures — a stand-in raising "the model
+    went away" — land in the production log looking exactly like real ones,
+    and the log is the first place anybody goes to find out why a real import
+    failed.
+    """
+
+    def test_the_default_log_file_is_not_the_shipped_one(self):
+        assert ObservabilityConfig().log_file != "./logs/lumen.jsonl"
+
+    def test_starting_an_application_does_not_redirect_the_rest_of_the_run(
+        self, tmp_path
+    ):
+        """
+        configure_logging installs its handler on the root logger, and nothing
+        detaches it at shutdown — so one lifespan used to capture every test
+        that ran after it.
+        """
+        from fastapi.testclient import TestClient
+
+        from lumen.api.main import create_app
+        from lumen.config import AppConfig, GraphConfig, OperationalConfig
+
+        app = create_app(
+            AppConfig(
+                graph=GraphConfig(db_path=str(tmp_path / "graph")),
+                operational=OperationalConfig(db_url=f"sqlite:///{tmp_path / 'o.db'}"),
+            )
+        )
+
+        with TestClient(app):
+            # Only the handlers Lumen installed; pytest attaches its own.
+            written_to = [
+                handler.baseFilename
+                for handler in logging.getLogger().handlers
+                if getattr(handler, "_lumen_managed", False)
+                and hasattr(handler, "baseFilename")
+            ]
+
+        assert written_to, "the application installed no file handler at all"
+        assert all("lumen-test-logs" in path for path in written_to), written_to
+
+
 def _reset_logging() -> None:
     """Detach the handlers a test installed, so later tests start clean."""
     root = logging.getLogger()

@@ -13,7 +13,7 @@ import json
 from types import SimpleNamespace
 
 import pytest
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 
 from lumen.config import ProviderConfig
 from lumen.providers.errors import (
@@ -114,12 +114,64 @@ class TestCredentials:
         assert provider.provider_name == "gemini"
 
 
+class NestedAnswer(BaseModel):
+    """A shape with a nested one inside it, since that is where schemas nest."""
+
+    answers: list[Answer]
+
+
 class TestStructuredRequests:
     def test_the_shape_is_taken_from_the_model_class(self, provider_config):
         """Nobody writes a JSON schema by hand, so it cannot drift from the code."""
         provider, models = build_provider(provider_config)
         provider.generate_structured("question", Answer)
-        assert models.calls[0]["config"].response_schema is Answer
+        sent = models.calls[0]["config"].response_schema
+        assert sent["properties"].keys() == {"answer", "score"}
+
+    def test_the_key_gemini_refuses_is_left_out(self, provider_config):
+        """
+        Every contract forbids unexpected fields, which Pydantic writes as
+        `additionalProperties`. Gemini rejects a request that names it, so
+        sending it fails every structured call on every model.
+        """
+
+        class Strict(BaseModel):
+            model_config = ConfigDict(extra="forbid")
+
+            answer: str
+
+        provider, models = build_provider(provider_config)
+        provider.generate_structured("question", Strict)
+        assert "additionalProperties" not in json.dumps(
+            models.calls[0]["config"].response_schema
+        )
+
+    def test_it_is_left_out_of_nested_shapes_too(self, provider_config):
+        """The rejection names the nested field as readily as the outer one."""
+
+        class Strict(BaseModel):
+            model_config = ConfigDict(extra="forbid")
+
+            answer: str
+
+        class Wrapper(BaseModel):
+            model_config = ConfigDict(extra="forbid")
+
+            answers: list[Strict]
+
+        provider, models = build_provider(provider_config)
+        provider.generate_structured("question", Wrapper)
+        assert "additionalProperties" not in json.dumps(
+            models.calls[0]["config"].response_schema
+        )
+
+    def test_a_nested_shape_still_describes_itself(self, provider_config):
+        """Stripping one key must not flatten the schema into uselessness."""
+        provider, models = build_provider(provider_config)
+        provider.generate_structured("question", NestedAnswer)
+        sent = models.calls[0]["config"].response_schema
+        assert "Answer" in sent["$defs"]
+        assert sent["$defs"]["Answer"]["properties"].keys() == {"answer", "score"}
 
     def test_json_output_is_requested(self, provider_config):
         provider, models = build_provider(provider_config)
@@ -451,6 +503,164 @@ class TestEmbedding:
         provider, _ = self._provider(provider_config, error=error)
         with pytest.raises(ProviderRateLimitError):
             provider.embed_text("hello")
+
+
+class RecordingSdk:
+    """
+    A stand-in for the google SDK that records which key built which client.
+
+    Only Client is faked — the types and error classes are the real ones, so
+    request shaping still goes through the same code a live call would.
+    """
+
+    def __init__(self, result=None, errors=None):
+        self.result = result if result is not None else reply()
+        # One error per call, consumed in order; None means "this one works".
+        self.errors = list(errors or [])
+        self.keys_built: list[str] = []
+        self.keys_used: list[str] = []
+
+    def Client(self, *, api_key):  # noqa: N802 - matching the SDK's own name
+        self.keys_built.append(api_key)
+        sdk = self
+
+        class Models:
+            def generate_content(self, **kwargs):
+                return sdk._respond(api_key)
+
+            def embed_content(self, **kwargs):
+                return sdk._respond(api_key)
+
+        return SimpleNamespace(models=Models())
+
+    def _respond(self, api_key):
+        self.keys_used.append(api_key)
+        if self.errors:
+            error = self.errors.pop(0)
+            if error is not None:
+                raise error
+        return self.result
+
+    def install(self, monkeypatch):
+        from google.genai import errors as genai_errors
+        from google.genai import types as genai_types
+
+        monkeypatch.setattr(
+            "lumen.providers.gemini._import_sdk",
+            lambda: (self, genai_types, genai_errors),
+        )
+        return self
+
+
+class TestKeyRotation:
+    """
+    Quotas are metered per key. Several keys are several meters, and rotation
+    is the only thing that turns the second one into extra capacity.
+    """
+
+    def build(self, monkeypatch, provider_config, keys, *, errors=None, result=None):
+        monkeypatch.setenv("GEMINI_API_KEYS", ",".join(keys))
+        sdk = RecordingSdk(result=result, errors=errors).install(monkeypatch)
+        provider = GeminiLLMProvider(
+            "gemini-2.5-flash", ModelRole.LIGHTWEIGHT, provider_config, client=None
+        )
+        return provider, sdk
+
+    def test_requests_are_spread_over_every_configured_key(
+        self, monkeypatch, provider_config
+    ):
+        monkeypatch.setenv("LUMEN_KEY_ROTATION_STRATEGY", "round_robin")
+        provider, sdk = self.build(monkeypatch, ProviderConfig(), ["one", "two", "three"])
+        for _ in range(3):
+            provider.generate_text([ChatMessage(role="user", content="hi")])
+        assert sdk.keys_used == ["one", "two", "three"]
+
+    def test_a_client_is_built_once_per_key_not_once_per_request(
+        self, monkeypatch, provider_config
+    ):
+        """A client holds a connection pool; rebuilding it every call wastes it."""
+        monkeypatch.setenv("LUMEN_KEY_ROTATION_STRATEGY", "round_robin")
+        provider, sdk = self.build(monkeypatch, ProviderConfig(), ["one", "two"])
+        for _ in range(6):
+            provider.generate_text([ChatMessage(role="user", content="hi")])
+        assert sdk.keys_built == ["one", "two"]
+
+    def test_a_rate_limited_call_retries_under_a_different_key(
+        self, monkeypatch, provider_config
+    ):
+        """The whole point: the retry goes to a meter that is not empty."""
+        limit = ProviderRateLimitError("quota", provider="gemini")
+        provider, sdk = self.build(
+            monkeypatch, provider_config, ["one", "two", "three"], errors=[limit]
+        )
+        provider.generate_text([ChatMessage(role="user", content="hi")])
+        assert len(sdk.keys_used) == 2
+        assert sdk.keys_used[0] != sdk.keys_used[1]
+
+    def test_one_key_still_works_exactly_as_before(self, monkeypatch, provider_config):
+        provider, sdk = self.build(monkeypatch, provider_config, ["solo"])
+        provider.generate_text([ChatMessage(role="user", content="hi")])
+        provider.generate_text([ChatMessage(role="user", content="hi")])
+        assert sdk.keys_used == ["solo", "solo"]
+
+    def test_a_single_key_still_waits_out_a_rate_limit(self, monkeypatch):
+        """With nowhere else to go, the long quota-minute ceiling stands."""
+        monkeypatch.setenv("GEMINI_API_KEYS", "solo")
+        RecordingSdk().install(monkeypatch)
+        config = ProviderConfig(rate_limit_backoff_max_seconds=65.0, backoff_max_seconds=8.0)
+        provider = GeminiLLMProvider("gemini-2.5-flash", ModelRole.LIGHTWEIGHT, config)
+        assert provider._rate_limit_backoff_max() == 65.0
+
+    def test_several_keys_do_not_sit_out_a_quota_minute(self, monkeypatch):
+        """
+        Waiting a minute when a fresh key is available would throw away the
+        capacity the extra keys were configured for.
+        """
+        monkeypatch.setenv("GEMINI_API_KEYS", "one,two")
+        RecordingSdk().install(monkeypatch)
+        config = ProviderConfig(rate_limit_backoff_max_seconds=65.0, backoff_max_seconds=8.0)
+        provider = GeminiLLMProvider("gemini-2.5-flash", ModelRole.LIGHTWEIGHT, config)
+        assert provider._rate_limit_backoff_max() == 8.0
+
+    def test_embedding_rotates_too(self, monkeypatch, provider_config):
+        """Embeddings are the bulk of the calls, so they matter most here."""
+        monkeypatch.setenv("GEMINI_API_KEYS", "one,two")
+        monkeypatch.setenv("LUMEN_KEY_ROTATION_STRATEGY", "round_robin")
+        vectors = SimpleNamespace(embeddings=[SimpleNamespace(values=[0.1] * 768)])
+        sdk = RecordingSdk(result=vectors).install(monkeypatch)
+        provider = GeminiEmbeddingProvider("text-embedding-004", ProviderConfig())
+        provider.embed_text("hello")
+        provider.embed_text("hello")
+        assert sdk.keys_used == ["one", "two"]
+
+    def test_an_unknown_strategy_is_refused_at_construction(
+        self, monkeypatch, provider_config
+    ):
+        monkeypatch.setenv("GEMINI_API_KEYS", "one,two")
+        monkeypatch.setenv("LUMEN_KEY_ROTATION_STRATEGY", "shuffle")
+        RecordingSdk().install(monkeypatch)
+        with pytest.raises(ProviderConfigurationError, match="LUMEN_KEY_ROTATION_STRATEGY"):
+            GeminiLLMProvider("gemini-2.5-flash", ModelRole.LIGHTWEIGHT, ProviderConfig())
+
+    def test_a_supplied_client_is_used_whatever_the_keys_say(
+        self, monkeypatch, provider_config
+    ):
+        """Tests hand in a client; rotation must not build one behind its back."""
+        monkeypatch.setenv("GEMINI_API_KEYS", "one,two")
+        sdk = RecordingSdk().install(monkeypatch)
+        provider, models = build_provider(provider_config, result=reply(text="ok"))
+        provider.generate_text([ChatMessage(role="user", content="hi")])
+        assert sdk.keys_built == []
+        assert len(models.calls) == 1
+
+    def test_the_keys_never_reach_a_log_line(self, monkeypatch, provider_config, caplog):
+        monkeypatch.setenv("LUMEN_KEY_ROTATION_STRATEGY", "round_robin")
+        with caplog.at_level("DEBUG"):
+            provider, _ = self.build(monkeypatch, provider_config, ["secret-one", "secret-two"])
+            for _ in range(2):
+                provider.generate_text([ChatMessage(role="user", content="hi")])
+        assert "secret-one" not in caplog.text
+        assert "secret-two" not in caplog.text
 
 
 class TestClosing:

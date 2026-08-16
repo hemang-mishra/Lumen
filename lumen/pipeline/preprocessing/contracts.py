@@ -46,28 +46,52 @@ class TurnClassification(BaseModel):
     co_created_marker: bool = False
 
 
+class AssistantDigest(BaseModel):
+    """
+    One of the assistant's replies, reduced to its point.
+
+    The assistant is verbose in a way people are not — it restates, offers
+    three framings, and asks a closing question. Carrying all of that into
+    the entry would bury the person's own words under someone else's prose.
+    Dropping it entirely is worse: half of what they say only means anything
+    as an answer to what was just asked.
+
+    So the assistant's side is kept, condensed. Only this side is condensed;
+    what the person wrote is never touched.
+
+    Attributes:
+        message_id: Which reply this stands in for.
+        digest: What it said, in a sentence or two.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    message_id: str = Field(min_length=1)
+    digest: str = ""
+
+
 class ConversationResponse(BaseModel):
     """
     What comes back from reading a conversation.
 
     Attributes:
         turns: One verdict per message the person wrote.
-        session_summary: The conclusions the conversation actually arrived
-            at, with the exploring left out. A conversation is full of ideas
-            that were tried and dropped; recording those as though they were
-            settled would fill the history with things the person had
-            already talked themselves out of.
+        assistant_digests: One short stand-in per assistant reply.
+        session_summary: The conclusions the conversation arrived at. Kept as
+            a record of where the evening landed — it is no longer what the
+            rest of the stage reads, because a conversation's value is not
+            only its conclusions.
         co_created_spans: The assistant's own phrasings that the person took
             up as their own, quoted exactly. Knowing which message showed
-            agreement is not enough later on: the summary replaces the
-            conversation, and by then there is no way to tell whose words
-            an idea started as. The wording has to be carried out of here or
-            it is lost.
+            agreement is not enough later on: by extraction time the
+            assistant's side has been condensed, and there is no way left to
+            tell whose words an idea started as.
     """
 
     model_config = ConfigDict(extra="forbid")
 
     turns: list[TurnClassification] = Field(default_factory=list)
+    assistant_digests: list[AssistantDigest] = Field(default_factory=list)
     session_summary: str = ""
     co_created_spans: list[str] = Field(default_factory=list)
 
@@ -153,6 +177,50 @@ class StructureResponse(BaseModel):
     coreference: CoreferencePayload = Field(default_factory=CoreferencePayload)
 
 
+class SegmentedByTurns(BaseModel):
+    """
+    One topic of a conversation, named by the turns that make it up.
+
+    Attributes:
+        episode_summary: A one-line description of what this piece is about.
+        turn_numbers: The numbered turns belonging to it. They need not be
+            contiguous — a conversation returns to a subject after wandering
+            off it, and both parts are the same topic.
+        overarching_themes: Broad tags describing the subject matter.
+        historical_era: A named period of the person's past this is anchored
+            to, when they named one.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    episode_summary: str = Field(min_length=1)
+    turn_numbers: list[int] = Field(default_factory=list)
+    overarching_themes: list[str] = Field(default_factory=list)
+    historical_era: str | None = None
+
+
+class DialogueStructureResponse(BaseModel):
+    """
+    What comes back from splitting a conversation into topics.
+
+    Says which turns belong together rather than repeating them. Asking a
+    model to echo a whole evening back, divided up, costs as much output as
+    the conversation is long, runs into the reply limit, and invites it to
+    paraphrase on the way past — and paraphrasing here would replace the
+    person's words with a model's, which is the one thing this stage exists
+    to avoid. Numbers cannot be paraphrased.
+
+    Attributes:
+        episodes: The topics, named by their turns.
+        coreference: Who the conversation's pronouns and nicknames refer to.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    episodes: list[SegmentedByTurns] = Field(default_factory=list)
+    coreference: CoreferencePayload = Field(default_factory=CoreferencePayload)
+
+
 class EpisodeScore(BaseModel):
     """
     A judgement on how complete one piece of writing is.
@@ -204,12 +272,23 @@ class ReflectionPromptsResponse(BaseModel):
 
 class ConversationResult(BaseModel):
     """
-    A conversation, read and reduced to what was settled.
+    A conversation, read and rebuilt as something to work from.
 
     Attributes:
-        summary: The text the rest of the stage will work from.
+        entry_text: The text the rest of the stage will work from — every
+            expressive thing the person wrote, word for word, with the
+            assistant's replies standing between them in condensed form. This
+            used to be the summary alone, and reading fifteen thousand words
+            of thinking as two hundred words of conclusions is the difference
+            between a history that holds how somebody got somewhere and one
+            that holds only where they arrived.
+        settled_summary: What the conversation concluded, kept as a record of
+            the session rather than as its replacement.
         turn_acts: What each of the person's messages was doing, keyed by
             message id.
+        assistant_digests: The short stand-in for each assistant reply, keyed
+            by message id. Kept so the same entry can be rebuilt later in the
+            stage without asking again.
         co_created_message_ids: Messages where the person took up an idea
             from the assistant.
         co_created_spans: The assistant phrasings behind those moments, in
@@ -223,8 +302,10 @@ class ConversationResult(BaseModel):
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    summary: str
+    entry_text: str
+    settled_summary: str = ""
     turn_acts: dict[str, DialogueAct] = Field(default_factory=dict)
+    assistant_digests: dict[str, str] = Field(default_factory=dict)
     co_created_message_ids: tuple[str, ...] = ()
     co_created_spans: tuple[str, ...] = ()
     used_fallback: bool = False
@@ -281,16 +362,25 @@ class TriageResult(BaseModel):
 
     Attributes:
         scores: One score per piece, in the same order as the pieces.
-        used_fallback: True when scoring failed. Everything is then treated
-            as thin, which is the cautious direction — an unscored piece
-            must never be waved through into deep analysis on the strength
-            of a broken reply.
+        unscored: The positions, counting from 1, that nobody managed to
+            read. Kept apart from the scores because "we do not know" is not
+            "there is nothing here". Treating the two the same is what sent
+            a forty-message evening down the path meant for one-line notes
+            when a scoring call happened to fail: an unread piece is given
+            the close reading, since a broken call is not evidence about the
+            writing.
+        used_fallback: True when scoring failed outright.
     """
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     scores: tuple[EpisodeScore, ...]
+    unscored: tuple[int, ...] = ()
     used_fallback: bool = False
+
+    def was_scored(self, episode_index: int) -> bool:
+        """Say whether anybody actually managed to read this piece."""
+        return episode_index not in self.unscored
 
 
 class ReflectionPromptsResult(BaseModel):
@@ -317,11 +407,14 @@ def empty_coreference_map(entry_id: str) -> CoreferenceMap:
 
 __all__ = [
     "TurnClassification",
+    "AssistantDigest",
     "ConversationResponse",
     "NormalizeResponse",
     "SegmentedEpisode",
+    "SegmentedByTurns",
     "CoreferencePayload",
     "StructureResponse",
+    "DialogueStructureResponse",
     "EpisodeScore",
     "TriageResponse",
     "ReflectionPromptsResponse",

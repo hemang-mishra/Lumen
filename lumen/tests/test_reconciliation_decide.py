@@ -29,7 +29,7 @@ from lumen.pipeline.reconciliation.contracts import (
     ItemDecision,
     ProposedAction,
 )
-from lumen.providers.errors import ProviderError
+from lumen.providers.errors import ProviderError, ProviderRateLimitError
 from lumen.providers.fake import FakeLLMProvider
 from lumen.schemas.enums import ModelRole
 
@@ -78,17 +78,18 @@ class TestOneCallForTheWholeEntry:
         provider = light([reply((1, "MERGE", "pat_a", 0.9), (2, "BRANCH", None, 0.8))])
         items = [make_item(node_id="obs_1"), make_item(node_id="obs_2")]
 
-        response = decide.propose(items, provider=provider)
+        reading = decide.propose(items, provider=provider)
 
         assert len(provider.calls) == 1
-        assert len(response.decisions) == 2
+        assert len(reading.response.decisions) == 2
 
     def test_nothing_to_decide_costs_no_call(self, light):
         provider = light([])
 
-        response = decide.propose([], provider=provider)
+        reading = decide.propose([], provider=provider)
 
-        assert response == DecisionResponse()
+        assert reading.response == DecisionResponse()
+        assert reading.failure is None
         assert provider.calls == []
 
     def test_the_prompt_shows_each_candidate_and_how_it_was_found(
@@ -232,22 +233,46 @@ class TestWhenTheAnswerCannotBeRead:
             always_fails, role=ModelRole.LIGHTWEIGHT, model="fake-light"
         )
 
-        assert decide.propose([make_item()], provider=provider, attempts=2) is None
+        reading = decide.propose([make_item()], provider=provider, attempts=2)
+
+        assert reading.response is None
         assert len(provider.calls) == 2
+
+    def test_a_failed_call_says_what_failed(self, make_item):
+        """
+        The reason travels with the run rather than only reaching the log.
+        A rate limit and a malformed reply want different responses from
+        whoever is looking, and the stage records only that neither worked.
+        """
+
+        def always_fails(_prompt: str) -> str:
+            raise ProviderRateLimitError("slow down", provider="fake")
+
+        provider = FakeLLMProvider(
+            always_fails, role=ModelRole.LIGHTWEIGHT, model="fake-light"
+        )
+
+        reading = decide.propose([make_item()], provider=provider, attempts=1)
+
+        assert "ProviderRateLimitError" in reading.failure
 
     def test_an_unreadable_reply_is_repeated_then_given_up_on(self, make_item, light):
         provider = light(["not json at all", "still not json"])
 
-        assert decide.propose([make_item()], provider=provider, attempts=2) is None
+        reading = decide.propose([make_item()], provider=provider, attempts=2)
+
+        assert reading.response is None
+        assert "unparseable" in reading.failure
         assert len(provider.calls) == 2
 
     def test_a_second_attempt_that_works_is_used(self, make_item, light):
         provider = light(["not json at all", reply((1, "MERGE", "pat_a", 0.9))])
 
-        response = decide.propose([make_item()], provider=provider, attempts=2)
+        reading = decide.propose([make_item()], provider=provider, attempts=2)
 
-        assert response is not None
-        assert response.decisions[0].primary.action == "MERGE"
+        assert reading.response is not None
+        assert reading.failure is None
+        assert reading.response.decisions[0].primary.action == "MERGE"
 
     def test_a_failed_second_opinion_leaves_the_first_reading_alone(
         self, make_item, light
@@ -280,4 +305,7 @@ class TestARepliedShapeNobodyAskedFor:
         # it is asked for again and then given up on honestly.
         provider = light([json.dumps({"decisions": "all of them"})])
 
-        assert decide.propose([make_item()], provider=provider, attempts=1) is None
+        reading = decide.propose([make_item()], provider=provider, attempts=1)
+
+        assert reading.response is None
+        assert "shape" in reading.failure

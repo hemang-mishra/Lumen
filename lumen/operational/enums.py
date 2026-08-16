@@ -125,6 +125,34 @@ OPEN_HITL_STATUSES: frozenset[HitlItemStatus] = frozenset(
 )
 
 # Job states that cannot be left once entered.
+class ImportStatus(StrEnum):
+    """
+    What became of one conversation from one uploaded file.
+
+    QUEUED    — its messages are stored and it is waiting for the worker.
+    RUNNING   — the pipeline is working through it now.
+    COMPLETE  — the pipeline finished with it.
+    FAILED    — the pipeline could not finish; `error` says why.
+    DUPLICATE — this conversation arrived in an earlier upload and nothing
+                was run. Kept as an outcome rather than passed over in
+                silence, because "we have seen this before" is a different
+                answer from "nothing happened" and the person uploading the
+                file deserves the first one.
+    """
+
+    QUEUED = "QUEUED"
+    RUNNING = "RUNNING"
+    COMPLETE = "COMPLETE"
+    FAILED = "FAILED"
+    DUPLICATE = "DUPLICATE"
+
+
+# An import that will not change again on its own.
+TERMINAL_IMPORT_STATUSES: frozenset[ImportStatus] = frozenset(
+    {ImportStatus.COMPLETE, ImportStatus.FAILED, ImportStatus.DUPLICATE}
+)
+
+
 TERMINAL_JOB_STATUSES: frozenset[JobStatus] = frozenset(
     {JobStatus.COMPLETE, JobStatus.CANCELLED}
 )
@@ -150,8 +178,10 @@ __all__ = [
     "HitlItemStatus",
     "ErasureInitiator",
     "ErasureStatus",
+    "ImportStatus",
     "HITL_ENTRY_TYPE_RANK",
     "OPEN_HITL_STATUSES",
+    "TERMINAL_IMPORT_STATUSES",
     "TERMINAL_JOB_STATUSES",
     "ALLOWED_JOB_TRANSITIONS",
 ]

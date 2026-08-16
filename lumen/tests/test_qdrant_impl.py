@@ -11,7 +11,7 @@ import logging
 
 import pytest
 
-from lumen.vector.qdrant_impl import QdrantVectorProvider
+from lumen.vector.qdrant_impl import QdrantVectorProvider, _connection_for
 
 
 # ---------------------------------------------------------------------------
@@ -76,6 +76,41 @@ class TestCollectionInit:
         # If we upsert with wrong size, Qdrant will raise
         p.upsert("test_001", [0.1] * 384, {"node_type": "test"})
         p.close()
+
+    def test_a_collection_built_for_another_model_is_refused(self, tmp_path):
+        """
+        Changing the embedding model changes how wide its vectors are, and a
+        collection's width is fixed when it is made. Left unchecked, that
+        surfaces once per record, mid-run, as an array error naming neither
+        the model nor the setting — while records keep being saved that
+        nothing can find.
+        """
+        location = str(tmp_path / "vectors")
+
+        first = QdrantVectorProvider(location=location, vector_size=768)
+        first.init_collection()
+        first.close()
+
+        second = QdrantVectorProvider(location=location, vector_size=3072)
+        try:
+            with pytest.raises(ValueError, match="768"):
+                second.init_collection()
+        finally:
+            second.close()
+
+    def test_a_collection_of_the_right_width_is_left_alone(self, tmp_path):
+        location = str(tmp_path / "vectors")
+
+        first = QdrantVectorProvider(location=location, vector_size=768)
+        first.init_collection()
+        first.close()
+
+        second = QdrantVectorProvider(location=location, vector_size=768)
+        try:
+            second.init_collection()
+            second.upsert("obs_001", _dummy_vector(), {"node_type": "test"})
+        finally:
+            second.close()
 
 
 # ---------------------------------------------------------------------------
@@ -194,3 +229,52 @@ class TestContextManager:
             assert [hit.node_id for hit in results] == ["ctx_001"]
         # After exiting, client should be None
         assert p.client is None
+
+
+# ---------------------------------------------------------------------------
+# Where the index lives
+# ---------------------------------------------------------------------------
+
+class TestWhereTheIndexLives:
+    """
+    Tests for reading a location string.
+
+    These exist because the underlying client's `location` argument is a
+    *host*, not a path. Configured with "./lumen_vectors" — the obvious thing
+    to write for a personal, file-backed deployment, and what this project's
+    own .env.example recommends — it tried to resolve that as a server name
+    and failed with a DNS error. Which form was meant is worked out from the
+    value instead.
+    """
+
+    def test_the_in_memory_marker_is_passed_through(self):
+        assert _connection_for(":memory:") == {"location": ":memory:"}
+
+    def test_a_url_is_treated_as_a_server(self):
+        assert _connection_for("http://localhost:6333") == {"url": "http://localhost:6333"}
+        assert _connection_for("https://qdrant.example") == {"url": "https://qdrant.example"}
+
+    def test_anything_else_is_treated_as_a_folder(self):
+        assert _connection_for("./lumen_vectors") == {"path": "./lumen_vectors"}
+        assert _connection_for("/var/lib/lumen/vectors") == {"path": "/var/lib/lumen/vectors"}
+
+    def test_a_folder_actually_opens(self, tmp_path):
+        # The bug this catches raised before a single vector was written.
+        with QdrantVectorProvider(location=str(tmp_path / "vectors")) as provider:
+            provider.init_collection()
+            provider.upsert("obs_kept", _dummy_vector(), {"node_type": "test"})
+
+    def test_what_a_folder_holds_survives_the_process_that_wrote_it(self, tmp_path):
+        # The whole point. A graph on disk beside an index that empties on
+        # every restart produces records semantic search can never find, and
+        # nothing anywhere reports an error.
+        path = str(tmp_path / "vectors")
+
+        with QdrantVectorProvider(location=path) as writer:
+            writer.init_collection()
+            writer.upsert("obs_kept", _dummy_vector(), {"node_type": "test"})
+
+        with QdrantVectorProvider(location=path) as reader:
+            found = reader.hybrid_search(_dummy_vector(), limit=1)
+
+        assert [hit.node_id for hit in found] == ["obs_kept"]
