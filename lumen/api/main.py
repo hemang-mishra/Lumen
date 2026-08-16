@@ -17,12 +17,13 @@ from __future__ import annotations
 import logging
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from dataclasses import replace
 
 from fastapi import Depends, FastAPI
 
 from lumen.api.deps import get_graph, get_ops
 from lumen.api.errors import register_error_handlers
-from lumen.api.routes import debug, graph
+from lumen.api.routes import debug, graph, query
 from lumen.api.schemas import HealthView
 from lumen.config import AppConfig
 from lumen.graph.kuzu_impl import KuzuGraphProvider
@@ -30,6 +31,10 @@ from lumen.graph.provider import ReadOnlyGraph
 from lumen.observability.logging import configure_logging
 from lumen.operational.repositories import OperationalStore
 from lumen.operational.sqlalchemy_impl import build_operational_store
+from lumen.providers.errors import ProviderError
+from lumen.providers.factory import get_llm_provider
+from lumen.query import QueryFormulator
+from lumen.schemas.enums import ModelRole
 
 logger = logging.getLogger(__name__)
 
@@ -61,6 +66,7 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
     register_error_handlers(app)
     app.include_router(graph.router)
     app.include_router(debug.router)
+    app.include_router(query.router)
 
     @app.get("/health", response_model=HealthView, tags=["health"])
     def health(
@@ -103,19 +109,57 @@ def _lifespan_for(settings: AppConfig):
         provider.init_schema()
         store = build_operational_store(settings)
         store.init_schema()
+        formulator = _build_formulator(settings, provider)
 
         app.state.graph = provider
         app.state.ops = store
+        app.state.formulator = formulator
         logger.info("api ready", extra={"graph_path": settings.graph.db_path})
 
         try:
             yield
         finally:
+            if formulator is not None:
+                formulator.close()
             provider.close()
             store.close()
             logger.info("api stopped")
 
     return lifespan
+
+
+def _build_formulator(
+    settings: AppConfig, graph: ReadOnlyGraph
+) -> QueryFormulator | None:
+    """
+    The turn reader, with retries switched off for its model.
+
+    Every other model call in the system retries a few times with a growing
+    pause, which is right for work nobody is waiting on. This one has a
+    deadline measured in fractions of a second: a call that failed has
+    already missed it, and retrying only guarantees the wait is spent twice
+    over before the same answer arrives.
+
+    A model that cannot be reached is not a reason to refuse to start. Every
+    other thing this service does is a read of two local databases and works
+    perfectly without one, so the failure is recorded and confined to the one
+    surface that needs it.
+
+    The graph is handed over as a reader, so this whole side of the
+    application is incapable of changing anything.
+    """
+    no_retries = replace(settings.providers, max_attempts=1)
+    try:
+        llm = get_llm_provider(
+            ModelRole.LIGHTWEIGHT, replace(settings, providers=no_retries)
+        )
+    except ProviderError:
+        logger.warning(
+            "no model is configured, so reading conversational turns is unavailable",
+            exc_info=True,
+        )
+        return None
+    return QueryFormulator(llm=llm, graph=graph, config=settings.query)
 
 
 def _answers(probe) -> bool:

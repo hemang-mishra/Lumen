@@ -184,6 +184,45 @@ class PipelineConfig:
 
 
 @dataclass(frozen=True)
+class QueryConfig:
+    """
+    Tuning knobs for reading a live conversation.
+
+    Everything here trades recall against the rhythm of a conversation.
+    Somebody talking will forgive an answer that misses a connection; they
+    will not forgive a pause before every reply.
+
+    Environment variables:
+      LUMEN_FORMULATION_TIMEOUT_SECONDS — how long a turn may wait on the model
+      LUMEN_FORMULATION_CONTEXT_TURNS   — how much of the conversation it sees
+      LUMEN_MAX_TRIGGERS_PER_TURN       — most reasons to search kept from one turn
+      LUMEN_MAX_TRIGGER_KEYWORDS        — most keywords kept per reason
+      LUMEN_ERA_VOCABULARY_LIMIT        — most past periods offered to the model
+      LUMEN_SESSION_MAX_TURNS           — most turns a day's session holds in memory
+      LUMEN_FORMULATION_MAX_WORKERS     — threads available for timing out a call
+
+    The timeout is the number that matters most. It is deliberately shorter
+    than any other model call in the system: this one runs on every single
+    turn, and the person is waiting on it. Six hundred milliseconds is about
+    as long as a real call to a fast model takes, so the deadline catches
+    calls that have gone wrong rather than calls that are merely working.
+
+    The turn window exists because some turns cannot be read alone. "I don't
+    feel that anymore" says nothing without the sentence before it.
+    """
+
+    formulation_timeout_seconds: float = _env_float(
+        "LUMEN_FORMULATION_TIMEOUT_SECONDS", 0.6
+    )
+    formulation_context_turns: int = _env_int("LUMEN_FORMULATION_CONTEXT_TURNS", 4)
+    max_triggers_per_turn: int = _env_int("LUMEN_MAX_TRIGGERS_PER_TURN", 3)
+    max_keywords_per_trigger: int = _env_int("LUMEN_MAX_TRIGGER_KEYWORDS", 6)
+    era_vocabulary_limit: int = _env_int("LUMEN_ERA_VOCABULARY_LIMIT", 50)
+    session_max_turns: int = _env_int("LUMEN_SESSION_MAX_TURNS", 200)
+    formulation_max_workers: int = _env_int("LUMEN_FORMULATION_MAX_WORKERS", 4)
+
+
+@dataclass(frozen=True)
 class ObservabilityConfig:
     """
     Configuration for logging.
@@ -352,6 +391,7 @@ class AppConfig:
     operational: OperationalConfig = field(default_factory=OperationalConfig)
     observability: ObservabilityConfig = field(default_factory=ObservabilityConfig)
     pipeline: PipelineConfig = field(default_factory=PipelineConfig)
+    query: QueryConfig = field(default_factory=QueryConfig)
 
     # The personal build has one user. Multi-user deployments set this per request.
     user_id: str = _env("LUMEN_USER_ID", "local")

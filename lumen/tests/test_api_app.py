@@ -140,12 +140,28 @@ class TestTheApiCannotWrite:
 
         assert offenders == []
 
-    def test_nothing_but_reads_is_exposed(self, api_client):
+    def test_everything_touching_the_graph_is_a_get(self, api_client):
+        # The verb is the promise callers read first, so every path that
+        # reaches the graph or the run history keeps it.
         spec = api_client.get("/openapi.json").json()
 
         used = {
             verb.upper()
-            for operations in spec["paths"].values()
+            for path, operations in spec["paths"].items()
             for verb in operations
+            if path.startswith(("/graph", "/debug", "/health"))
         }
         assert used == {"GET"}
+
+    def test_the_one_post_sends_a_sentence_rather_than_storing_one(self, api_client):
+        # Reading a conversational turn changes nothing, but what it is given
+        # is somebody's sentence about their own life. A GET would put that
+        # in the URL, and from there into every access log it passes through.
+        spec = api_client.get("/openapi.json").json()
+
+        posts = {
+            path
+            for path, operations in spec["paths"].items()
+            if "post" in operations
+        }
+        assert posts == {"/query/formulate"}

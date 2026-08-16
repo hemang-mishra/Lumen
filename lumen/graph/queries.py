@@ -339,10 +339,30 @@ def _as_text(value: Any) -> Any:
     return value
 
 
+def era_key(name: str) -> str:
+    """
+    A comparable form of an era name.
+
+    Nothing constrains how a period of somebody's past gets written down, so
+    the same era arrives as "HIGH_SCHOOL", "high school" and "High-School"
+    depending on who wrote it. Capitalisation and punctuation are dropped so
+    that all three answer to each other.
+
+    Only ever used for comparing. Whatever is shown or looked up afterwards
+    is the spelling the graph really holds, because that is the only one a
+    lookup will match.
+    """
+    collapsed = "".join(
+        char.casefold() if char.isalnum() else " " for char in name
+    ).split()
+    return "_".join(collapsed)
+
+
 __all__ = [
     "FILTER_COLUMNS",
     "JSON_COLUMNS",
     "VALID_FROM",
+    "era_key",
     "has_start_date",
     "Filters",
     "build_filters",

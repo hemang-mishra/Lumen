@@ -183,6 +183,17 @@ class ReadOnlyGraph(Protocol):
         """Find active nodes anchored to a named period of the person's past."""
         ...
 
+    def list_era_tags(self, *, limit: int = 50) -> list[str]:
+        """
+        Every named period of the past that some record is anchored to.
+
+        The stored spelling is what comes back, most used first. Nothing
+        anywhere constrains what these names look like — they are whatever
+        was written when the record was made — so anything asking about an
+        era has to be told the real ones rather than allowed to guess.
+        """
+        ...
+
     def find_unresolved_high_signal(
         self, observation_types: list[str], *, limit: int = 10
     ) -> list[dict[str, Any]]:

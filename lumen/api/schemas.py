@@ -14,7 +14,7 @@ cannot say on its own: whether the answer was cut short.
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -274,6 +274,35 @@ class HealthView(BaseModel):
     operational: bool
 
 
+class FormulationTurn(BaseModel):
+    """One earlier message, as a caller describes it."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    role: Literal["user", "assistant"] = "user"
+    content: str = Field(min_length=1, max_length=8000)
+
+
+class FormulationRequest(BaseModel):
+    """
+    A turn to read, and enough of the conversation to read it against.
+
+    The history is supplied by the caller rather than held between requests.
+    This surface exists to look at what a sentence is made of, not to hold a
+    conversation, and remembering one between calls would make every answer
+    depend on whatever happened to be asked before it.
+
+    Attributes:
+        text: The message to read.
+        history: What was said before it, oldest first.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    text: str = Field(min_length=1, max_length=8000)
+    history: list[FormulationTurn] = Field(default_factory=list, max_length=20)
+
+
 def _text(value: Any) -> str | None:
     """A stored value as text, or nothing when it was never set."""
     return None if value is None else str(value)
@@ -290,4 +319,6 @@ __all__ = [
     "GraphStatsView",
     "ProvenanceView",
     "HealthView",
+    "FormulationTurn",
+    "FormulationRequest",
 ]

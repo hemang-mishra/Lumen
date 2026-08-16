@@ -38,8 +38,34 @@ class NotFound(Exception):
         super().__init__(f"no {kind} with id {identifier!r}")
 
 
+class Unavailable(Exception):
+    """
+    The request was fine, but something it needs is not running.
+
+    Kept apart from an unexpected failure because a caller can act on it: a
+    missing piece of configuration is fixed by configuring it, and answering
+    that with a generic apology sends people looking for a bug instead.
+    """
+
+    def __init__(self, what: str, reason: str) -> None:
+        self.what = what
+        self.reason = reason
+        super().__init__(f"{what} is unavailable: {reason}")
+
+
 def register_error_handlers(app: FastAPI) -> None:
     """Teach the application how to answer when something goes wrong."""
+
+    @app.exception_handler(Unavailable)
+    async def _unavailable(_request: Request, exc: Unavailable) -> JSONResponse:
+        return JSONResponse(
+            status_code=503,
+            content={
+                "error": "unavailable",
+                "detail": str(exc),
+                "what": exc.what,
+            },
+        )
 
     @app.exception_handler(NotFound)
     async def _not_found(_request: Request, exc: NotFound) -> JSONResponse:
@@ -72,4 +98,4 @@ def register_error_handlers(app: FastAPI) -> None:
         )
 
 
-__all__ = ["NotFound", "register_error_handlers"]
+__all__ = ["NotFound", "Unavailable", "register_error_handlers"]

@@ -32,21 +32,11 @@ from lumen.schemas.enums import (
     RelationshipToUser,
     SentimentTrend,
 )
-from lumen.schemas.ids import make_slug_node_id
+from lumen.schemas.ids import person_node_id
 from lumen.schemas.nodes import PersonEntityNode
 from lumen.schemas.pipeline import PlannedBookkeeping, PlannedEdge, PlannedNode
 
 logger = logging.getLogger(__name__)
-
-
-def person_node_id(name: str) -> str:
-    """
-    The identifier a person's record has, worked out from their name alone.
-
-    Deterministic on purpose: it means asking whether someone is already
-    known is a single lookup, with no search and no matching involved.
-    """
-    return make_slug_node_id("person", name)
 
 
 def resolve_people(

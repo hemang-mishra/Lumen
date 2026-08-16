@@ -215,6 +215,75 @@ class TestFindingByPastPeriod:
         assert len(graph.find_by_era("EXAM_PREP", node_types=["PatternNode"], limit=2)) == 2
 
 
+class TestListingThePastPeriodsInUse:
+    """
+    The names of the periods this history actually uses.
+
+    Nothing constrains how these are written down — they are whatever was
+    written when the record was made — so anything asking a model about an
+    era has to be handed the real ones rather than left to guess.
+    """
+
+    def test_an_empty_graph_uses_no_periods(self, graph):
+        assert graph.list_era_tags() == []
+
+    def test_a_period_written_on_a_pattern_is_listed(self, graph):
+        pattern(graph, "pat_1", era_tag="EXAM_PREP")
+
+        assert graph.list_era_tags() == ["EXAM_PREP"]
+
+    def test_periods_are_gathered_from_every_table_that_records_one(self, graph):
+        pattern(graph, "pat_1", era_tag="EXAM_PREP")
+        episode(graph, "ep_1", historical_era="CHILDHOOD_HOME")
+
+        assert set(graph.list_era_tags()) == {"EXAM_PREP", "CHILDHOOD_HOME"}
+
+    def test_records_with_no_period_contribute_nothing(self, graph):
+        pattern(graph, "pat_1")
+
+        assert graph.list_era_tags() == []
+
+    def test_a_superseded_record_does_not_keep_a_period_alive(self, graph):
+        pattern(graph, "pat_old", era_tag="EXAM_PREP", status="SUPERSEDED")
+
+        assert graph.list_era_tags() == []
+
+    def test_two_spellings_of_one_period_are_listed_once(self, graph):
+        pattern(graph, "pat_1", era_tag="high school")
+        pattern(graph, "pat_2", era_tag="HIGH_SCHOOL")
+
+        assert len(graph.list_era_tags()) == 1
+
+    def test_the_spelling_kept_is_the_one_most_used(self, graph):
+        # Whatever comes back has to be usable in a lookup, so it must be a
+        # spelling the graph really holds.
+        pattern(graph, "pat_1", era_tag="high school")
+        pattern(graph, "pat_2", era_tag="high school")
+        pattern(graph, "pat_3", era_tag="HIGH_SCHOOL")
+
+        assert graph.list_era_tags() == ["high school"]
+
+    def test_the_most_used_periods_come_first(self, graph):
+        # Cutting the list at a limit should keep the periods that actually
+        # carry the history rather than an arbitrary few.
+        pattern(graph, "pat_1", era_tag="RARE")
+        for index in range(3):
+            pattern(graph, f"pat_common_{index}", era_tag="COMMON")
+
+        assert graph.list_era_tags()[0] == "COMMON"
+
+    def test_the_limit_is_honoured(self, graph):
+        for index in range(4):
+            pattern(graph, f"pat_{index}", era_tag=f"ERA_{index}")
+
+        assert len(graph.list_era_tags(limit=2)) == 2
+
+    def test_asking_for_none_gives_none(self, graph):
+        pattern(graph, "pat_1", era_tag="EXAM_PREP")
+
+        assert graph.list_era_tags(limit=0) == []
+
+
 class TestFindingUnresolvedWeightyMaterial:
     WEIGHTY = [
         "INAUTHENTICITY_STATE",
