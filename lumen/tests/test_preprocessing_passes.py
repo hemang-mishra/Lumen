@@ -69,7 +69,16 @@ def messages(pairs) -> list[BufferMessage]:
 
 
 class TestConversation:
-    def test_returns_the_settled_summary_and_per_turn_verdicts(self):
+    def test_the_persons_own_words_are_what_moves_forward(self):
+        """
+        This is the whole point of the step.
+
+        It used to hand on a summary of what the conversation settled on, and
+        everything downstream read that instead of the conversation — an
+        evening of thinking arriving at extraction as a paragraph, with the
+        record keeping where somebody landed and nothing of how they got
+        there.
+        """
         provider = FakeLLMProvider(
             [
                 json.dumps(
@@ -86,6 +95,9 @@ class TestConversation:
                                 "co_created_marker": True,
                             },
                         ],
+                        "assistant_digests": [
+                            {"message_id": "m1", "digest": "asked what made it hard"}
+                        ],
                         "session_summary": "I was avoiding the tradeoff.",
                     }
                 )
@@ -96,10 +108,114 @@ class TestConversation:
             provider=provider,
         )
 
-        assert result.summary == "I was avoiding the tradeoff."
+        assert "rough day" in result.entry_text
+        assert "avoiding it" in result.entry_text
+        assert result.settled_summary == "I was avoiding the tradeoff."
         assert result.turn_acts["m0"] == DialogueAct.EXPRESSIVE
         assert result.co_created_message_ids == ("m2",)
         assert result.used_fallback is False
+
+    def test_the_assistant_is_kept_but_condensed(self):
+        """
+        Half of what a person says is an answer to what was just asked, so
+        the assistant's side has to be there — in a sentence, not in the
+        several hundred words it was written in.
+        """
+        provider = FakeLLMProvider(
+            [
+                json.dumps(
+                    {
+                        "turns": [
+                            {"message_id": "m0", "dialogue_act": "EXPRESSIVE"},
+                        ],
+                        "assistant_digests": [
+                            {"message_id": "m1", "digest": "asked what made it hard"}
+                        ],
+                        "session_summary": "",
+                    }
+                )
+            ]
+        )
+        result = passes.run_conversation(
+            messages([("USER", "rough day"), ("AI", "A" * 400)]),
+            provider=provider,
+        )
+
+        assert "asked what made it hard" in result.entry_text
+        assert "A" * 400 not in result.entry_text
+
+    def test_an_assistant_turn_nobody_condensed_is_left_out(self):
+        """Better a gap than several hundred words of someone else's prose."""
+        provider = FakeLLMProvider(
+            [
+                json.dumps(
+                    {
+                        "turns": [{"message_id": "m0", "dialogue_act": "EXPRESSIVE"}],
+                        "assistant_digests": [],
+                        "session_summary": "",
+                    }
+                )
+            ]
+        )
+        result = passes.run_conversation(
+            messages([("USER", "rough day"), ("AI", "unsummarised assistant prose")]),
+            provider=provider,
+        )
+
+        assert "unsummarised assistant prose" not in result.entry_text
+        assert "rough day" in result.entry_text
+
+    def test_a_request_for_information_is_dropped(self):
+        """Using the system is not confiding in it."""
+        provider = FakeLLMProvider(
+            [
+                json.dumps(
+                    {
+                        "turns": [
+                            {"message_id": "m0", "dialogue_act": "OPERATIONAL_REQUEST"},
+                            {"message_id": "m1", "dialogue_act": "EXPRESSIVE"},
+                        ],
+                        "session_summary": "",
+                    }
+                )
+            ]
+        )
+        result = passes.run_conversation(
+            messages(
+                [("USER", "what did I say yesterday?"), ("USER", "I felt hollow")]
+            ),
+            provider=provider,
+        )
+
+        assert "what did I say yesterday?" not in result.entry_text
+        assert "I felt hollow" in result.entry_text
+
+    def test_their_words_are_never_reworded_on_the_way_through(self):
+        """
+        The person's text is copied out of the buffer, not returned by the
+        model, so there is no path by which a model's phrasing can replace
+        theirs — however the reply is shaped.
+        """
+        written = "I just went quiet. Like I always do. And I hate that about myself."
+        provider = FakeLLMProvider(
+            [
+                json.dumps(
+                    {
+                        "turns": [{"message_id": "m0", "dialogue_act": "EXPRESSIVE"}],
+                        "assistant_digests": [
+                            {"message_id": "m0", "digest": "a tidied version"}
+                        ],
+                        "session_summary": "I withdraw under pressure.",
+                    }
+                )
+            ]
+        )
+
+        result = passes.run_conversation(
+            messages([("USER", written)]), provider=provider
+        )
+
+        assert written in result.entry_text
 
     def test_the_wording_the_person_took_up_is_carried_out(self):
         # Knowing which message showed agreement is not enough later on. The
@@ -164,7 +280,7 @@ class TestConversation:
         # even though they are never extracted from.
         assert "assistant words" in provider.calls[0].prompt
 
-    def test_an_empty_summary_is_kept_when_every_turn_was_a_request(self):
+    def test_a_session_of_nothing_but_requests_comes_back_empty(self):
         provider = FakeLLMProvider(
             [
                 json.dumps(
@@ -186,10 +302,14 @@ class TestConversation:
             provider=provider,
         )
 
-        assert result.summary == ""
+        assert result.entry_text == ""
         assert result.used_fallback is False
 
-    def test_an_empty_summary_after_real_reflection_falls_back_to_their_words(self):
+    def test_filtering_that_removes_a_real_reflection_puts_it_back(self):
+        """
+        Classifying every expressive turn as a request would empty the entry.
+        Their words go back in rather than the evening being lost.
+        """
         provider = FakeLLMProvider(
             [
                 json.dumps(
@@ -197,21 +317,28 @@ class TestConversation:
                         "turns": [
                             {
                                 "message_id": "m0",
+                                "dialogue_act": "OPERATIONAL_REQUEST",
+                                "co_created_marker": False,
+                            },
+                            {
+                                "message_id": "m1",
                                 "dialogue_act": "EXPRESSIVE",
                                 "co_created_marker": False,
-                            }
+                            },
                         ],
                         "session_summary": "   ",
                     }
                 )
             ]
         )
+        # The one expressive verdict names a message that is not in the
+        # buffer, so filtering leaves nothing behind.
         result = passes.run_conversation(
             messages([("USER", "I felt hollow all day")]),
             provider=provider,
         )
 
-        assert result.summary == "I felt hollow all day"
+        assert result.entry_text == "I felt hollow all day"
         assert result.used_fallback is True
 
     @pytest.mark.parametrize("provider", broken_providers())
@@ -221,7 +348,7 @@ class TestConversation:
             provider=provider,
         )
 
-        assert result.summary == "first thing\n\nsecond"
+        assert result.entry_text == "first thing\n\nsecond"
         assert result.used_fallback is True
 
     def test_the_fallback_is_logged(self, captured_logs):
@@ -619,3 +746,188 @@ class TestPrivacy:
         passes.run_normalize(secret, is_voice=False, provider=provider)
 
         assert not any(secret in json.dumps(line) for line in captured_logs)
+
+
+class TestSplittingAConversationByTurn:
+    """
+    Splitting a conversation by naming its turns rather than repeating them.
+
+    Asking a model to hand a whole evening back, divided up, costs as much
+    output as the evening was long — which runs into the reply limit, where
+    the failure is a quietly truncated entry — and gives it an opening to
+    reword somebody's writing on the way past. Numbers cannot be reworded.
+    """
+
+    def _turns(self, pairs):
+        return [
+            (message, message.content)
+            for message in messages(pairs)
+        ]
+
+    def _reply(self, episodes, coreference=None):
+        return json.dumps(
+            {
+                "episodes": episodes,
+                "coreference": coreference
+                or {"resolved_entities": [], "ambiguous_refs": []},
+            }
+        )
+
+    def test_the_writing_is_put_back_together_from_turn_numbers(self):
+        turns = self._turns(
+            [
+                ("USER", "the argument about the deadline"),
+                ("AI", "asked what was said"),
+                ("USER", "and separately, my brother called"),
+            ]
+        )
+        provider = FakeLLMProvider(
+            [
+                self._reply(
+                    [
+                        {"episode_summary": "Work", "turn_numbers": [1, 2]},
+                        {"episode_summary": "Family", "turn_numbers": [3]},
+                    ]
+                )
+            ]
+        )
+
+        result = passes.run_structure_by_turns(
+            turns, entry_id="s1", provider=provider, config=CONFIG
+        )
+
+        assert [episode.episode_summary for episode in result.episodes] == [
+            "Work",
+            "Family",
+        ]
+        assert "deadline" in result.episodes[0].text
+        assert "brother" in result.episodes[1].text
+        assert "brother" not in result.episodes[0].text
+
+    def test_the_conversation_is_never_sent_back_for_repeating(self):
+        turns = self._turns([("USER", "something"), ("USER", "something else")])
+        provider = FakeLLMProvider(
+            [self._reply([{"episode_summary": "One", "turn_numbers": [1, 2]}])]
+        )
+
+        passes.run_structure_by_turns(
+            turns, entry_id="s1", provider=provider, config=CONFIG
+        )
+
+        assert "turn_numbers" not in provider.calls[0].prompt
+        assert "[1] ME:" in provider.calls[0].prompt
+
+    def test_a_topic_returned_to_later_keeps_both_halves(self):
+        """People wander off a subject and come back to it."""
+        turns = self._turns(
+            [
+                ("USER", "about the deadline"),
+                ("USER", "unrelated aside"),
+                ("USER", "back to the deadline"),
+            ]
+        )
+        provider = FakeLLMProvider(
+            [
+                self._reply(
+                    [
+                        {"episode_summary": "Deadline", "turn_numbers": [1, 3]},
+                        {"episode_summary": "Aside", "turn_numbers": [2]},
+                    ]
+                )
+            ]
+        )
+
+        result = passes.run_structure_by_turns(
+            turns, entry_id="s1", provider=provider, config=CONFIG
+        )
+
+        assert "about the deadline" in result.episodes[0].text
+        assert "back to the deadline" in result.episodes[0].text
+
+    def test_a_turn_nobody_placed_is_kept_rather_than_dropped(self):
+        """Losing part of an entry is the one outcome this must never have."""
+        turns = self._turns([("USER", "placed"), ("USER", "forgotten entirely")])
+        provider = FakeLLMProvider(
+            [self._reply([{"episode_summary": "One", "turn_numbers": [1]}])]
+        )
+
+        result = passes.run_structure_by_turns(
+            turns, entry_id="s1", provider=provider, config=CONFIG
+        )
+
+        written = " ".join(episode.text for episode in result.episodes)
+        assert "forgotten entirely" in written
+
+    def test_a_turn_claimed_twice_lands_in_one_topic_only(self):
+        """Duplicating the writing would double-count it everywhere after."""
+        turns = self._turns([("USER", "said once")])
+        provider = FakeLLMProvider(
+            [
+                self._reply(
+                    [
+                        {"episode_summary": "First", "turn_numbers": [1]},
+                        {"episode_summary": "Second", "turn_numbers": [1]},
+                    ]
+                )
+            ]
+        )
+
+        result = passes.run_structure_by_turns(
+            turns, entry_id="s1", provider=provider, config=CONFIG
+        )
+
+        written = [episode.text for episode in result.episodes]
+        assert sum("said once" in text for text in written) == 1
+
+    def test_a_number_naming_no_turn_is_ignored(self):
+        turns = self._turns([("USER", "the only turn")])
+        provider = FakeLLMProvider(
+            [self._reply([{"episode_summary": "One", "turn_numbers": [1, 47]}])]
+        )
+
+        result = passes.run_structure_by_turns(
+            turns, entry_id="s1", provider=provider, config=CONFIG
+        )
+
+        assert len(result.episodes) == 1
+        assert result.episodes[0].text.endswith("the only turn")
+
+    @pytest.mark.parametrize("provider", broken_providers())
+    def test_a_broken_reply_keeps_the_conversation_whole(self, provider):
+        turns = self._turns([("USER", "first"), ("USER", "second")])
+
+        result = passes.run_structure_by_turns(
+            turns, entry_id="s1", provider=provider, config=CONFIG
+        )
+
+        assert len(result.episodes) == 1
+        assert "first" in result.episodes[0].text
+        assert "second" in result.episodes[0].text
+        assert result.used_fallback is True
+
+    def test_the_references_come_back_too(self):
+        turns = self._turns([("USER", "Jordan pushed back, then he left")])
+        provider = FakeLLMProvider(
+            [
+                self._reply(
+                    [{"episode_summary": "One", "turn_numbers": [1]}],
+                    {
+                        "resolved_entities": [
+                            {
+                                "span": "he",
+                                "resolved_to": "Jordan",
+                                "confidence": 0.9,
+                                "resolution_basis": "most_recent_named_antecedent",
+                            }
+                        ],
+                        "ambiguous_refs": [],
+                    },
+                )
+            ]
+        )
+
+        result = passes.run_structure_by_turns(
+            turns, entry_id="s1", provider=provider, config=CONFIG
+        )
+
+        assert result.coreference_map.resolved_entities[0].resolved_to == "Jordan"

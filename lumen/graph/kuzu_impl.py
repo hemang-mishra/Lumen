@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 import logging
+import threading
 from collections.abc import Iterator
 from contextlib import contextmanager
 from datetime import date, datetime
@@ -490,7 +491,38 @@ class KuzuGraphProvider(GraphProvider):
         self.db = kuzu.Database(db_path)
         self.conn = kuzu.Connection(self.db)
         self._in_transaction = False
+
+        # Every statement goes through this lock, and a transaction holds it
+        # for its whole length.
+        #
+        # This is not defensive habit — it is what makes one shared provider
+        # correct. Kuzu is embedded and takes a file lock, so a process can
+        # only hold one of these open at a time; a web server that both reads
+        # the graph and runs the pipeline in the background therefore has to
+        # share this object between threads. A transaction belongs to the
+        # connection, not to the caller who opened it, so without the lock a
+        # read arriving mid-import would run *inside* the importer's open
+        # transaction and see half of an episode that has not been committed
+        # and might yet be rolled back.
+        #
+        # Re-entrant, because the writes inside a transaction come through
+        # the same door as everything else and would otherwise deadlock
+        # against the block that opened it.
+        self._lock = threading.RLock()
+
         logger.info("KuzuGraphProvider initialized at %s", db_path)
+
+    def _execute(self, query: str, params: dict[str, Any] | None = None) -> Any:
+        """
+        Run one statement, with the connection held for its duration.
+
+        The single door every query goes through. See the note on the lock
+        in __init__ for why there is one.
+        """
+        with self._lock:
+            if params is None:
+                return self.conn.execute(query)
+            return self.conn.execute(query, params)
 
     def __enter__(self) -> KuzuGraphProvider:
         return self
@@ -523,7 +555,7 @@ class KuzuGraphProvider(GraphProvider):
         for table_name, ddl in NODE_TABLES.items():
             if table_name not in existing_tables:
                 logger.debug("Creating node table: %s", table_name)
-                self.conn.execute(ddl)
+                self._execute(ddl)
 
         # Create Edge Tables
         for from_table, to_table, edge_name in EDGE_REGISTRY:
@@ -536,7 +568,7 @@ class KuzuGraphProvider(GraphProvider):
                     f"{_extra_edge_columns(edge_name)})"
                 )
                 logger.debug("Creating edge table: %s (%s → %s)", edge_name, from_table, to_table)
-                self.conn.execute(ddl)
+                self._execute(ddl)
 
         logger.info(
             "Schema initialized: %d node tables, %d edge tables",
@@ -547,7 +579,7 @@ class KuzuGraphProvider(GraphProvider):
         """Query Kuzu for all existing table names."""
         existing: set[str] = set()
         try:
-            res = self.conn.execute("CALL show_tables() RETURN name;")
+            res = self._execute("CALL show_tables() RETURN name;")
             while res.has_next():
                 existing.add(res.get_next()[0])
         except RuntimeError as e:
@@ -573,24 +605,39 @@ class KuzuGraphProvider(GraphProvider):
         to be protected on its own, and the database cannot give them that
         — silently handing back a wider group would be the wrong answer to
         a question they were entitled to ask.
+
+        Another *thread* asking for one waits instead of being refused. That
+        is a different question with a different right answer: it is not
+        asking for a smaller group inside this one, it is asking for its own
+        group, and it can have it as soon as this one finishes. Everything
+        else on this object waits alongside it, which is what keeps a read
+        from landing inside somebody else's uncommitted writes.
         """
+        # Taken before the check, not after. A thread that tested the flag
+        # first would see another thread's open transaction and refuse,
+        # when what it should do is wait its turn.
+        self._lock.acquire()
         if self._in_transaction:
+            self._lock.release()
             raise RuntimeError(
                 "a graph transaction is already open; nested transactions "
                 "are not supported"
             )
 
-        self.conn.execute("BEGIN TRANSACTION")
-        self._in_transaction = True
         try:
-            yield
-        except BaseException:
-            self._rollback()
-            logger.warning("graph transaction rolled back")
-            raise
-        self.conn.execute("COMMIT")
-        self._in_transaction = False
-        logger.debug("graph transaction committed")
+            self.conn.execute("BEGIN TRANSACTION")
+            self._in_transaction = True
+            try:
+                yield
+            except BaseException:
+                self._rollback()
+                logger.warning("graph transaction rolled back")
+                raise
+            self.conn.execute("COMMIT")
+            self._in_transaction = False
+            logger.debug("graph transaction committed")
+        finally:
+            self._lock.release()
 
     def _rollback(self) -> None:
         """
@@ -645,7 +692,7 @@ class KuzuGraphProvider(GraphProvider):
         set_clause = ", ".join(f"{k}: ${k}" for k in keys)
         query = f"CREATE (n:{node_type} {{{set_clause}}})"
 
-        self.conn.execute(query, processed_props)
+        self._execute(query, processed_props)
         logger.debug("Wrote node %s (type=%s)", node_id, node_type)
         return node_id
 
@@ -686,7 +733,7 @@ class KuzuGraphProvider(GraphProvider):
         params: dict[str, Any] = {"from_id": from_id, "to_id": to_id}
         params.update(properties)
 
-        self.conn.execute(query, params)
+        self._execute(query, params)
         logger.debug("Wrote edge %s: %s → %s", edge_type, from_id, to_id)
 
     # ------------------------------------------------------------------
@@ -695,7 +742,7 @@ class KuzuGraphProvider(GraphProvider):
 
     def get_node(self, node_id: str) -> dict[str, Any] | None:
         """Retrieve a node's properties by its ID. Returns None if not found."""
-        res = self.conn.execute(
+        res = self._execute(
             "MATCH (n) WHERE n.node_id = $node_id RETURN n",
             {"node_id": node_id},
         )
@@ -705,23 +752,35 @@ class KuzuGraphProvider(GraphProvider):
 
     def get_nodes_by_ids(self, node_ids: list[str]) -> list[dict[str, Any]]:
         """
-        Retrieve multiple nodes by their IDs.
+        Retrieve several records by id, in the order they were asked for.
 
-        Used by the HLD read path (Section 4.2):
-            candidate_ids = vector_store.hybrid_search(...)
-            candidates = graph_store.get_nodes_by_ids(candidate_ids)
+        Asked one table at a time rather than with a single unlabelled match,
+        which is the obvious way to write it and is not safe here: a result
+        set spanning two different node tables comes back with its strings
+        misread, and reading a record fails with a decoding error naming a
+        byte position rather than anything about the record. Asking each
+        table separately keeps every result set to one shape. It is one query
+        per kind of record, all of them indexed on the primary key.
         """
         if not node_ids:
             return []
 
-        res = self.conn.execute(
-            "MATCH (n) WHERE n.node_id IN $node_ids RETURN n",
-            {"node_ids": node_ids},
-        )
-        nodes: list[dict[str, Any]] = []
-        while res.has_next():
-            nodes.append(res.get_next()[0])
-        return nodes
+        wanted = list(dict.fromkeys(node_ids))
+        found: dict[str, dict[str, Any]] = {}
+
+        for table in NODE_TABLES:
+            res = self._execute(
+                f"MATCH (n:{table}) WHERE n.node_id IN $node_ids RETURN n",
+                {"node_ids": wanted},
+            )
+            while res.has_next():
+                row = res.get_next()[0]
+                found[str(row.get("node_id"))] = row
+
+        # The caller's order is the useful one — a search hands these over
+        # ranked, and returning them grouped by table would silently throw
+        # that ranking away.
+        return [found[node_id] for node_id in wanted if node_id in found]
 
     # ------------------------------------------------------------------
     # Traversal
@@ -783,7 +842,7 @@ class KuzuGraphProvider(GraphProvider):
         """How many records of each kind exist, including retired ones."""
         counts: dict[str, int] = {}
         for table in NODE_TABLES:
-            res = self.conn.execute(f"MATCH (n:{table}) RETURN count(n)")
+            res = self._execute(f"MATCH (n:{table}) RETURN count(n)")
             counts[table] = int(res.get_next()[0]) if res.has_next() else 0
         return counts
 
@@ -999,7 +1058,7 @@ class KuzuGraphProvider(GraphProvider):
 
     def _edges(self, query: str, params: dict[str, Any]) -> list[EdgeRow]:
         """Run a query returning links and gather them, dropping duplicates."""
-        res = self.conn.execute(query, params)
+        res = self._execute(query, params)
         found: dict[tuple[str, str, str], EdgeRow] = {}
         while res.has_next():
             from_id, table, to_id, row = res.get_next()
@@ -1179,7 +1238,7 @@ class KuzuGraphProvider(GraphProvider):
 
     def _era_values(self, table: str, column: str) -> list[str]:
         """Every era name written on the live records of one table."""
-        res = self.conn.execute(
+        res = self._execute(
             f"MATCH (n:{table}) "
             f"WHERE n.{column} IS NOT NULL AND {_active_clause(table)} "
             f"RETURN n.{column}",
@@ -1230,7 +1289,7 @@ class KuzuGraphProvider(GraphProvider):
         if not actions:
             return 0
 
-        res = self.conn.execute(
+        res = self._execute(
             "MATCH (d:DecisionAuditNode) "
             "WHERE d.target_node_id = $target AND d.action IN $actions "
             "AND d.status <> 'ROLLED_BACK' "
@@ -1248,7 +1307,7 @@ class KuzuGraphProvider(GraphProvider):
     def mark_superseded(self, node_id: str, *, at: datetime) -> None:
         """Record that a newer version of this belief or pattern now exists."""
         table = self._table_for(node_id, operation="mark_superseded")
-        self.conn.execute(
+        self._execute(
             f"MATCH (n:{table}) WHERE n.node_id = $node_id "
             "SET n.status = 'SUPERSEDED'",
             {"node_id": node_id},
@@ -1258,7 +1317,7 @@ class KuzuGraphProvider(GraphProvider):
     def record_reinforcement(self, node_id: str, *, at: datetime) -> None:
         """Add one to a belief or pattern's evidence, and note when."""
         table = self._table_for(node_id, operation="record_reinforcement")
-        self.conn.execute(
+        self._execute(
             f"MATCH (n:{table}) WHERE n.node_id = $node_id "
             "SET n.evidence_count = n.evidence_count + 1, "
             "n.last_reinforced_at = $at",
@@ -1269,7 +1328,7 @@ class KuzuGraphProvider(GraphProvider):
     def touch_person(self, node_id: str, *, at: datetime) -> None:
         """Note that a person was mentioned again, and when."""
         table = self._table_for(node_id, operation="touch_person")
-        self.conn.execute(
+        self._execute(
             f"MATCH (n:{table}) WHERE n.node_id = $node_id "
             "SET n.mention_count = n.mention_count + 1, "
             "n.last_mentioned_at = $at",
@@ -1301,7 +1360,7 @@ class KuzuGraphProvider(GraphProvider):
 
     def _collect(self, query: str, params: dict[str, Any]) -> list[dict[str, Any]]:
         """Run a query that returns single nodes and gather them into a list."""
-        res = self.conn.execute(query, params)
+        res = self._execute(query, params)
         rows: list[dict[str, Any]] = []
         while res.has_next():
             rows.append(res.get_next()[0])

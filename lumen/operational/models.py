@@ -38,6 +38,7 @@ from lumen.operational.enums import (
     BufferStatus,
     ErasureStatus,
     HitlItemStatus,
+    ImportStatus,
     JobStatus,
     StageStatus,
 )
@@ -429,6 +430,72 @@ class DataErasureAudit(Base):
     )
 
 
+class ImportedConversation(Base):
+    """
+    One conversation from one uploaded file.
+
+    Three jobs, which is why it exists as a table rather than being derived
+    from the buffers it produced.
+
+    It is the history of what has been uploaded — a buffer alone cannot say
+    which file it came from, when it arrived, or that it arrived alongside
+    thirty others.
+
+    It is how a re-upload is recognised. The unique rule on
+    (user_id, source_conversation_id) is what makes uploading the same
+    export twice land on the same row instead of running someone's history
+    through the pipeline a second time.
+
+    And it is the join from an upload to the run it caused. A buffer knows
+    nothing about trace ids; without this row, watching an upload finish
+    would mean guessing which of the recent runs was yours.
+    """
+
+    __tablename__ = "imports"
+
+    import_id: Mapped[str] = mapped_column(String(128), primary_key=True)
+
+    # Every conversation from one uploaded file shares a batch, so the file
+    # can be followed as a whole while each conversation still succeeds or
+    # fails on its own.
+    batch_id: Mapped[str] = mapped_column(String(128), nullable=False, index=True)
+    user_id: Mapped[str] = mapped_column(String(128), nullable=False, index=True)
+
+    source_conversation_id: Mapped[str] = mapped_column(String(256), nullable=False)
+    title: Mapped[str] = mapped_column(String(256), nullable=False, default="")
+    filename: Mapped[str] = mapped_column(String(256), nullable=False, default="")
+    event_date: Mapped[date] = mapped_column(Date, nullable=False)
+    message_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+
+    # Nullable because a duplicate never gets a buffer of its own, and a run
+    # that fails before it starts never gets a job.
+    session_id: Mapped[str | None] = mapped_column(String(128))
+    job_id: Mapped[str | None] = mapped_column(String(128))
+    trace_id: Mapped[str | None] = mapped_column(String(64), index=True)
+
+    status: Mapped[str] = mapped_column(
+        String(32), nullable=False, default=ImportStatus.QUEUED.value
+    )
+    error: Mapped[str | None] = mapped_column(Text)
+
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, nullable=False
+    )
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+    __table_args__ = (
+        # The dedupe rule. Scoped to the user rather than global, because two
+        # people importing from the same application can legitimately hold
+        # the same conversation identifier.
+        UniqueConstraint(
+            "user_id", "source_conversation_id", name="uq_import_user_conversation"
+        ),
+        # Supports the history view, which is always "this user's imports,
+        # newest first".
+        Index("ix_import_user_created", "user_id", "created_at"),
+    )
+
+
 __all__ = [
     "Base",
     "utcnow",
@@ -440,4 +507,5 @@ __all__ = [
     "HitlQueueItem",
     "UserSetting",
     "DataErasureAudit",
+    "ImportedConversation",
 ]

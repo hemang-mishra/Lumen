@@ -25,9 +25,10 @@ Stage 0: Preprocessing
       coreference map, episode segmentation
         │
         ▼
-Stage 0.5: Session-Level Rollups (Conversational only)
-  └── Summarizes final settled conclusions from multi-turn dialogue,
-      discards exploratory scaffolding, outputs Session Summary
+Stage 0.5: Session Rebuild (Conversational only)
+  └── Keeps every expressive turn verbatim, condenses the assistant's
+      replies, drops operational requests; also records a Session Summary
+      of what was settled (kept as a record, not read downstream)
         │
         ▼
 Stage 1: Microextraction  (blind — no history)

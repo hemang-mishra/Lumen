@@ -351,6 +351,46 @@ def ops_store(ops_config, ops_engine) -> SQLAlchemyOperationalStore:
     store.close()
 
 
+@pytest.fixture(scope="session")
+def test_log_dir(tmp_path_factory):
+    """One throwaway directory for anything the suite logs to a file."""
+    return tmp_path_factory.mktemp("lumen-test-logs")
+
+
+@pytest.fixture(autouse=True)
+def logging_stays_inside_the_test(test_log_dir, monkeypatch):
+    """
+    Keep the suite out of the log file the real service writes.
+
+    Two things leak without this. A test that builds an AppConfig without
+    naming a log file gets the shipped default — ./logs/lumen.jsonl, the same
+    file a running Lumen appends to — so scripted failures land in the
+    production log looking exactly like real ones. And configure_logging
+    attaches its handler to the *root* logger, which nothing detaches at
+    shutdown, so one test entering an application's lifespan redirects every
+    test that runs after it for the rest of the session.
+
+    So the default is pointed somewhere disposable, and the root logger is put
+    back the way it was found.
+    """
+    monkeypatch.setenv("LUMEN_LOG_FILE", str(test_log_dir / "lumen.jsonl"))
+
+    root = logging.getLogger()
+    handlers_before = list(root.handlers)
+    level_before = root.level
+    try:
+        yield
+    finally:
+        for handler in list(root.handlers):
+            if handler not in handlers_before:
+                root.removeHandler(handler)
+                handler.close()
+        for handler in handlers_before:
+            if handler not in root.handlers:
+                root.addHandler(handler)
+        root.setLevel(level_before)
+
+
 @pytest.fixture
 def bound_trace():
     """Run a test inside a known trace id, so assertions can name it."""
@@ -400,6 +440,11 @@ PROMPT_KEYS = {
     "conversation": "CONVERSATION:",
     "normalize_voice": "TRANSCRIPT:",
     "normalize_text": "Below is a journal entry someone typed",
+    # A conversation is split by naming turns and a monologue by returning
+    # text, and both prompts say SPLITTING. The dialogue one is listed first
+    # and keyed on a phrase only it contains, so scripting one never answers
+    # the other with a reply of the wrong shape.
+    "structure_by_turn": "Give each episode the numbers of the turns",
     "structure": "SPLITTING",
     "triage": "EPISODES:",
     "reflection": "too short to analyse properly",

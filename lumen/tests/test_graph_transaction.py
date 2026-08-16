@@ -8,6 +8,8 @@ worth checking — everything else in the pipeline's saving relies on it.
 
 from __future__ import annotations
 
+import threading
+
 import pytest
 
 
@@ -123,6 +125,67 @@ class TestNesting:
                 graph_store.write_node("ObservationNode", _observation("obs_taken"))
 
         assert graph_store.get_node("obs_taken") is not None
+
+    def test_another_thread_waits_for_its_turn_rather_than_being_refused(
+        self, graph_store
+    ):
+        # A second thread is not asking for a smaller group of writes inside
+        # this one — it is asking for its own, and it can have it once this
+        # one finishes. Refusing it would be answering a question it did not
+        # ask. This is what lets a web server share one provider between the
+        # routes that read and the background thread that imports.
+        outcome: list[str] = []
+        inside = threading.Event()
+        release = threading.Event()
+
+        def second_writer() -> None:
+            with graph_store.transaction():
+                graph_store.write_node("ObservationNode", _observation("obs_second"))
+            outcome.append("committed")
+
+        with graph_store.transaction():
+            graph_store.write_node("ObservationNode", _observation("obs_first"))
+            thread = threading.Thread(target=second_writer)
+            thread.start()
+            inside.set()
+            # The other thread is now blocked on the lock. Nothing it wrote
+            # can have landed yet, because it has not been allowed to start.
+            release.wait(timeout=0.2)
+            assert outcome == []
+
+        thread.join(timeout=10)
+        assert outcome == ["committed"]
+        assert graph_store.get_node("obs_first") is not None
+        assert graph_store.get_node("obs_second") is not None
+
+    def test_a_read_cannot_land_inside_someone_elses_open_transaction(
+        self, graph_store
+    ):
+        # The failure this prevents: a read arriving mid-import runs on the
+        # same connection, so without the lock it would join the importer's
+        # transaction and report an episode that has not been committed and
+        # might still be rolled back.
+        seen: list[object] = []
+
+        def reader() -> None:
+            seen.append(graph_store.get_node("obs_uncommitted"))
+
+        thread = threading.Thread(target=reader)
+        try:
+            with graph_store.transaction():
+                graph_store.write_node(
+                    "ObservationNode", _observation("obs_uncommitted")
+                )
+                thread.start()
+                thread.join(timeout=0.2)
+                # Still blocked: it has not been allowed to look yet.
+                assert seen == []
+                raise RuntimeError("the import failed after all")
+        except RuntimeError:
+            pass
+
+        thread.join(timeout=10)
+        assert seen == [None]
 
     def test_a_rollback_problem_that_is_not_about_state_is_not_swallowed(
         self, graph_store, monkeypatch

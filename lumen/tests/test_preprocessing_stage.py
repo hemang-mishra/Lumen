@@ -95,12 +95,18 @@ class TestCallCost:
         )
         light, thinking = scripted_providers(script)
         preprocess(
-            make_event([("USER", "rough day"), ("AI", "why?"), ("USER", "no idea")]),
+            # Long enough on the person's own side, since the length that
+            # decides how much attention an entry earns is now measured on
+            # what they actually wrote rather than on a summary of it.
+            make_event([("USER", LONG_ENOUGH), ("AI", "why?"), ("USER", LONG_ENOUGH)]),
             lightweight=light,
             thinking=thinking,
         )
 
-        assert len(light.calls) == 2
+        # Cleaning is skipped for a conversation: it is already made of the
+        # person's own messages, and asking a model to hand a whole evening
+        # back is thousands of words of output for no gain.
+        assert len(light.calls) == 1  # scoring only
         assert len(thinking.calls) == 2  # untangling, then splitting
 
     def test_a_monologue_never_asks_about_a_conversation(
@@ -304,8 +310,138 @@ class TestVoiceHandling:
         assert "TRANSCRIPT:" not in light.calls[0].prompt
 
 
+class TestAConversationKeepsItsWords:
+    """
+    The change this stage exists to make, checked end to end.
+
+    A conversation used to reach extraction as a summary of its conclusions.
+    Fifteen thousand words of thinking arrived as two hundred, so extraction
+    had nothing to find and the record held where somebody arrived with no
+    trace of how they got there.
+    """
+
+    def _conversation_reply(self, digests=None, acts=None):
+        return json.dumps(
+            {
+                "turns": [
+                    {"message_id": message_id, "dialogue_act": act}
+                    for message_id, act in (acts or {}).items()
+                ],
+                "assistant_digests": [
+                    {"message_id": message_id, "digest": digest}
+                    for message_id, digest in (digests or {}).items()
+                ],
+                "session_summary": "I was avoiding the tradeoff.",
+            }
+        )
+
+    def _split_reply(self, *groups):
+        return json.dumps(
+            {
+                "episodes": [
+                    {
+                        "episode_summary": f"topic {index}",
+                        "turn_numbers": list(numbers),
+                    }
+                    for index, numbers in enumerate(groups, start=1)
+                ],
+                "coreference": {"resolved_entities": [], "ambiguous_refs": []},
+            }
+        )
+
+    def test_every_word_the_person_wrote_survives_to_an_episode(
+        self, make_event, scripted_providers
+    ):
+        first = "I kept second-guessing the architecture call all afternoon. " * 3
+        second = "And then my brother rang and I could not be present for it. " * 3
+
+        light, thinking = scripted_providers(
+            {
+                "conversation": self._conversation_reply(
+                    acts={"m0": "EXPRESSIVE", "m2": "EXPRESSIVE"},
+                    digests={"m1": "asked what made it feel unresolved"},
+                ),
+                "structure_by_turn": self._split_reply([1, 2], [3]),
+                "triage": triage_reply(0.9, 0.9),
+            }
+        )
+
+        result = preprocess(
+            make_event(
+                [("USER", first), ("AI", "A" * 500), ("USER", second)]
+            ),
+            lightweight=light,
+            thinking=thinking,
+        )
+
+        written = " ".join(episode.cleaned_text for episode in result.episodes)
+        assert first.strip() in written
+        assert second.strip() in written
+
+    def test_the_conversation_is_split_into_several_episodes(
+        self, make_event, scripted_providers
+    ):
+        """One evening is several things thought about, not one."""
+        first = "The deadline argument went badly and I said nothing. " * 3
+        second = "Separately, I have been sleeping badly for a fortnight. " * 3
+
+        light, thinking = scripted_providers(
+            {
+                "conversation": self._conversation_reply(
+                    acts={"m0": "EXPRESSIVE", "m1": "EXPRESSIVE"}
+                ),
+                "structure_by_turn": self._split_reply([1], [2]),
+                "triage": triage_reply(0.9, 0.8),
+            }
+        )
+
+        result = preprocess(
+            make_event([("USER", first), ("USER", second), ("AI", "mm")]),
+            lightweight=light,
+            thinking=thinking,
+        )
+
+        assert len(result.episodes) == 2
+        assert result.episodes[0].cleaned_text != result.episodes[1].cleaned_text
+
+    def test_the_conversation_is_never_sent_to_be_cleaned(
+        self, make_event, scripted_providers
+    ):
+        """
+        Cleaning asks for the whole entry back. On an evening's writing that
+        is thousands of words of output, where the reply limit truncates
+        silently and every sentence is a chance to smooth their phrasing into
+        the model's — and the text is already their own messages verbatim.
+        """
+        written = "I kept second-guessing the architecture call. " * 4
+        light, thinking = scripted_providers(
+            {
+                "conversation": self._conversation_reply(acts={"m0": "EXPRESSIVE"}),
+                "structure_by_turn": self._split_reply([1]),
+                "triage": triage_reply(0.9),
+            }
+        )
+
+        preprocess(
+            make_event([("USER", written), ("AI", "why?")]),
+            lightweight=light,
+            thinking=thinking,
+        )
+
+        assert all("journal entry someone typed" not in call.prompt for call in light.calls)
+
+
 class TestConversationHandling:
-    def test_only_settled_conclusions_move_forward(self, make_event, scripted_providers):
+    def test_the_thinking_moves_forward_and_not_just_the_conclusion(
+        self, make_event, scripted_providers
+    ):
+        """
+        A theory somebody talked themselves out of is part of how they got
+        where they got, and used to be discarded here — the summary kept the
+        conclusion and dropped the route to it. Whether it becomes a lasting
+        belief is decided much later, by reconciliation, which is where that
+        judgement belongs.
+        """
         settled = "I was avoiding the tradeoff rather than making it. " * 6
         script = full_script(settled)
         script["conversation"] = json.dumps(
@@ -333,15 +469,25 @@ class TestConversationHandling:
             thinking=thinking,
         )
 
-        # The discarded theory does not survive into the episodes.
-        assert "just bad at this" not in result.episodes[0].cleaned_text
+        written = " ".join(episode.cleaned_text for episode in result.episodes)
+        assert "just bad at this" in written
+        assert "avoiding the tradeoff" in written
 
-    def test_the_assistants_words_never_reach_an_episode(
+    def test_the_assistants_own_prose_never_reaches_an_episode(
         self, make_event, scripted_providers
     ):
+        """
+        The assistant's side is present as a condensed line, so the person's
+        answers still make sense — but never in its own words, which would
+        put someone else's phrasing into their history at full length.
+        """
         script = full_script()
         script["conversation"] = json.dumps(
-            {"turns": [], "session_summary": LONG_ENOUGH}
+            {
+                "turns": [],
+                "assistant_digests": [{"message_id": "m1", "digest": "asked why"}],
+                "session_summary": LONG_ENOUGH,
+            }
         )
         light, thinking = scripted_providers(script)
         result = preprocess(
@@ -356,9 +502,9 @@ class TestConversationHandling:
             thinking=thinking,
         )
 
-        assert all(
-            "catastrophising" not in episode.cleaned_text for episode in result.episodes
-        )
+        written = " ".join(episode.cleaned_text for episode in result.episodes)
+        assert "catastrophising" not in written
+        assert "asked why" in written
 
     def test_wording_the_person_adopted_reaches_the_result(
         self, make_event, scripted_providers
@@ -436,8 +582,10 @@ class TestDegradedRuns:
 
         assert len(result.episodes) == 1
         assert result.episodes[0].cleaned_text == LONG_ENOUGH
-        assert result.episodes[0].entry_class == EntryClass.RAW_CAPTURE
-        assert result.quality_gate_decision == QualityGateDecision.RAW_CAPTURE
+        # Nobody managed to read it, which says nothing about the writing —
+        # so it gets the close reading rather than being written off.
+        assert result.episodes[0].entry_class == EntryClass.REFLECTION
+        assert result.quality_gate_decision == QualityGateDecision.REFLECTION
 
     def test_a_failed_split_still_produces_a_usable_episode(
         self, make_event, scripted_providers
@@ -456,9 +604,15 @@ class TestDegradedRuns:
         assert result.episodes[0].episode_summary
         assert result.episodes[0].entry_class == EntryClass.REFLECTION
 
-    def test_a_failed_scoring_never_promotes_an_entry(
+    def test_a_failed_scoring_gives_the_close_reading(
         self, make_event, scripted_providers
     ):
+        """
+        An outage in the scoring step must not decide that somebody's evening
+        was a passing note. A forty-message conversation went down the light
+        path — which extracts a context sentence and a feeling — because one
+        scoring call got a 503.
+        """
         light, thinking = scripted_providers(
             {
                 "normalize_text": normalize_reply(LONG_ENOUGH),
@@ -469,8 +623,20 @@ class TestDegradedRuns:
             make_event([("USER", LONG_ENOUGH)]), lightweight=light, thinking=thinking
         )
 
+        assert result.episodes[0].entry_class == EntryClass.REFLECTION
+        assert result.quality_gate_decision == QualityGateDecision.REFLECTION
+
+    def test_a_topic_scored_as_thin_is_still_treated_as_thin(
+        self, make_event, scripted_providers
+    ):
+        """The change is about unread topics, not about scored ones."""
+        light, thinking = scripted_providers(full_script(scores=(0.1,)))
+
+        result = preprocess(
+            make_event([("USER", LONG_ENOUGH)]), lightweight=light, thinking=thinking
+        )
+
         assert result.episodes[0].entry_class == EntryClass.RAW_CAPTURE
-        assert result.quality_gate_decision == QualityGateDecision.RAW_CAPTURE
 
 
 class TestNoDatabaseDependency:

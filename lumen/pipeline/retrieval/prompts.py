@@ -18,12 +18,14 @@ facts.
 """
 
 from __future__ import annotations
+from lumen.prompt_rules import AUTHOR_NAMING
 
 SYSTEM_INSTRUCTION = (
     "You help search a personal history. You write short, plausible "
     "versions of what an earlier record might have said, purely so they can "
     "be compared against real ones. You never add facts, names, dates or "
-    "events that were not given to you. Return only the requested structure."
+    "events that were not given to you. " + AUTHOR_NAMING + " Return only "
+    "the requested structure."
 )
 
 

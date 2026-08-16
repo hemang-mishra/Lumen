@@ -34,6 +34,29 @@ class TestBuildingTheApplication:
 
         assert first.state.config.graph.db_path != second.state.config.graph.db_path
 
+    def test_building_it_reads_no_files_of_its_own(self, tmp_path, monkeypatch):
+        # create_app has no side effects on purpose. A .env read here would
+        # mean a test could be pointed at a real database by a file sitting
+        # in somebody's checkout, and the variables would outlive the test.
+        read: list[object] = []
+        monkeypatch.setattr("lumen.env.load_env", lambda *a, **k: read.append(1))
+
+        create_app(AppConfig(graph=GraphConfig(db_path=str(tmp_path / "a"))))
+
+        assert read == []
+
+    def test_the_configured_entry_point_reads_one(self, monkeypatch):
+        # And the entry point meant for actually running it does, because
+        # otherwise nothing would.
+        read: list[object] = []
+        monkeypatch.setattr("lumen.api.main.load_env", lambda *a, **k: read.append(1))
+
+        from lumen.api.main import create_configured_app
+
+        create_configured_app()
+
+        assert read == [1]
+
     def test_every_route_is_documented(self, api_client):
         # The documentation is generated from the routes themselves, so it
         # cannot drift from what the service actually does.
@@ -41,6 +64,47 @@ class TestBuildingTheApplication:
 
         assert "/graph/nodes" in spec["paths"]
         assert "/debug/traces/{trace_id}" in spec["paths"]
+
+
+class TestTheTestPages:
+    def test_they_are_served(self, api_client):
+        response = api_client.get("/ui/")
+
+        assert response.status_code == 200
+        assert "Lumen" in response.text
+
+    def test_all_three_are_there(self, api_client):
+        for page in ("index.html", "trace.html", "chat.html"):
+            assert api_client.get(f"/ui/{page}").status_code == 200, page
+
+    def test_they_say_what_they_are(self, api_client):
+        # These exist to make the pipeline visible while it is being built.
+        # Somebody landing on one should not mistake it for the product.
+        assert "not the product UI" in api_client.get("/ui/index.html").text
+
+    def test_nothing_from_the_server_is_inserted_as_markup(self):
+        # The strings on these pages are somebody's journal. A page that
+        # rendered them as HTML would run whatever an export happened to
+        # contain.
+        static = Path(__file__).resolve().parents[1] / "api" / "static"
+        offenders = [
+            path.name
+            for path in static.glob("*.js")
+            if "innerHTML" in path.read_text()
+        ]
+
+        assert offenders == []
+
+    def test_a_service_with_no_pages_still_starts(self, tmp_path, monkeypatch):
+        # The service is an API first and works perfectly without a page.
+        import lumen.api.main as module
+
+        monkeypatch.setattr(
+            module.Path, "is_dir", lambda self: False
+        )
+        app = create_app(AppConfig(graph=GraphConfig(db_path=str(tmp_path / "g"))))
+
+        assert not [route for route in app.routes if getattr(route, "name", "") == "ui"]
 
 
 class TestStartingAndStopping:
@@ -153,10 +217,19 @@ class TestTheApiCannotWrite:
         }
         assert used == {"GET"}
 
-    def test_the_one_post_sends_a_sentence_rather_than_storing_one(self, api_client):
-        # Reading a conversational turn changes nothing, but what it is given
-        # is somebody's sentence about their own life. A GET would put that
-        # in the URL, and from there into every access log it passes through.
+    def test_every_post_is_one_of_the_three_that_have_earned_it(self, api_client):
+        # An allow-list rather than a count, so that adding a fourth is a
+        # deliberate act with a reason written next to it.
+        #
+        #   /query/formulate — changes nothing, but what it is given is
+        #     somebody's sentence about their own life. A GET would put that
+        #     in the URL, and from there into every access log it passes
+        #     through.
+        #
+        #   /ingest/file, /ingest/json — the one way in. Both hand what they
+        #     receive to the importer and put an identifier on a queue;
+        #     neither can reach the graph, which is what the two tests above
+        #     check by type and by name.
         spec = api_client.get("/openapi.json").json()
 
         posts = {
@@ -164,4 +237,17 @@ class TestTheApiCannotWrite:
             for path, operations in spec["paths"].items()
             if "post" in operations
         }
-        assert posts == {"/query/formulate"}
+        assert posts == {"/query/formulate", "/ingest/file", "/ingest/json"}
+
+    def test_the_upload_routes_cannot_reach_the_graph_themselves(self):
+        # The importer is the only thing in the process that writes, and the
+        # routes that hold it can do exactly one thing with it: queue an
+        # identifier. If this file ever names the graph, the separation the
+        # whole arrangement depends on has quietly gone.
+        source = (
+            Path(__file__).resolve().parents[1] / "api" / "routes" / "ingest.py"
+        ).read_text()
+
+        assert "get_graph" not in source
+        assert "vectors" not in source
+        assert "run_pipeline" not in source

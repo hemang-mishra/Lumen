@@ -53,8 +53,31 @@ class Unavailable(Exception):
         super().__init__(f"{what} is unavailable: {reason}")
 
 
+class BadRequest(Exception):
+    """
+    What was sent cannot be worked with, and no amount of retrying helps.
+
+    Separate from an unexpected failure because the reason is safe to
+    repeat back. A file that is not an export is not a leak of anything —
+    it is the one piece of information that lets somebody fix their upload,
+    and answering it with a generic apology sends them hunting for a bug in
+    the service instead.
+    """
+
+    def __init__(self, reason: str) -> None:
+        self.reason = reason
+        super().__init__(reason)
+
+
 def register_error_handlers(app: FastAPI) -> None:
     """Teach the application how to answer when something goes wrong."""
+
+    @app.exception_handler(BadRequest)
+    async def _bad_request(_request: Request, exc: BadRequest) -> JSONResponse:
+        return JSONResponse(
+            status_code=400,
+            content={"error": "bad_request", "detail": exc.reason},
+        )
 
     @app.exception_handler(Unavailable)
     async def _unavailable(_request: Request, exc: Unavailable) -> JSONResponse:
@@ -98,4 +121,4 @@ def register_error_handlers(app: FastAPI) -> None:
         )
 
 
-__all__ = ["NotFound", "Unavailable", "register_error_handlers"]
+__all__ = ["NotFound", "Unavailable", "BadRequest", "register_error_handlers"]

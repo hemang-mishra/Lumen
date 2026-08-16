@@ -30,6 +30,7 @@ from lumen.config import PipelineConfig
 from lumen.pipeline.preprocessing.contracts import (
     ConversationResponse,
     ConversationResult,
+    DialogueStructureResponse,
     EpisodeScore,
     NormalizeResponse,
     NormalizeResult,
@@ -45,6 +46,7 @@ from lumen.pipeline.preprocessing.contracts import (
 from lumen.pipeline.preprocessing.fillers import strip_standalone_fillers
 from lumen.pipeline.preprocessing.prompts import (
     CONVERSATION_PROMPT,
+    DIALOGUE_STRUCTURE_PROMPT,
     NORMALIZE_TEXT_PROMPT,
     NORMALIZE_VOICE_PROMPT,
     REFLECTION_PROMPTS_PROMPT,
@@ -55,8 +57,12 @@ from lumen.pipeline.preprocessing.prompts import (
 )
 from lumen.pipeline.preprocessing.transcript import (
     all_turns_operational,
+    assemble_entry,
+    numbered_turns,
     render_dialogue,
+    render_entry,
     render_monologue,
+    render_numbered_dialogue,
     user_messages,
 )
 from lumen.providers.errors import ProviderError
@@ -150,17 +156,24 @@ def run_conversation(
     messages: list[BufferMessage], *, provider: LLMProvider
 ) -> ConversationResult:
     """
-    Reduce a back-and-forth conversation to what it settled on.
+    Rebuild a back-and-forth conversation as something worth reading.
 
-    Talking something through is not the same as concluding it. A
-    conversation contains ideas raised and dropped, questions, and the
-    assistant's suggestions — recording all of that as though the person
-    believed it would fill their history with things they had already
-    talked themselves out of.
+    What the person wrote is kept word for word. What the assistant wrote is
+    kept in condensed form, because the shape of the exchange carries meaning
+    — half of what somebody says is an answer to a question — while the
+    assistant's full prose would bury them under someone else's words. Only
+    the person's requests for information are dropped: those are them using
+    the system, not confiding in it.
+
+    This step used to hand back a summary of the conclusions instead, and
+    everything downstream read that. It meant an evening of thinking reached
+    extraction as a paragraph, and the record kept where somebody arrived
+    with no trace of how. The summary is still written, and still worth
+    having; it is no longer what gets read.
 
     If this fails, the person's own messages are strung together unchanged.
-    That loses the tidying, but it keeps every word they wrote, which is the
-    part that cannot be recovered later.
+    That loses the assistant's half and the filtering, but it keeps every
+    word they wrote, which is the part that cannot be recovered later.
     """
     spoken_by_person = user_messages(messages)
     response = _request(
@@ -171,21 +184,28 @@ def run_conversation(
     )
     if response is None:
         return ConversationResult(
-            summary=render_monologue(spoken_by_person), used_fallback=True
+            entry_text=render_monologue(spoken_by_person), used_fallback=True
         )
 
     turn_acts = {turn.message_id: turn.dialogue_act for turn in response.turns}
     co_created = tuple(turn.message_id for turn in response.turns if turn.co_created_marker)
     spans = tuple(span.strip() for span in response.co_created_spans if span.strip())
-    summary = response.session_summary.strip()
+    digests = {
+        digest.message_id: digest.digest for digest in response.assistant_digests
+    }
 
-    # An empty summary is the right answer when every message was a request
-    # for information. It is a lost conversation when it was not, so the
-    # person's words are kept instead.
-    if not summary and not all_turns_operational(turn_acts):
-        _log_fallback("conversation", "summary_lost_expressive_turns")
+    entry_text = render_entry(
+        assemble_entry(messages, turn_acts=turn_acts, digests=digests)
+    )
+
+    # Nothing left means the classification decided every message the person
+    # wrote was a request for information. That is the right answer sometimes
+    # and a lost conversation otherwise, so their words go back in.
+    if not entry_text.strip() and not all_turns_operational(turn_acts):
+        _log_fallback("conversation", "filtering_removed_every_expressive_turn")
         return ConversationResult(
-            summary=render_monologue(spoken_by_person),
+            entry_text=render_monologue(spoken_by_person),
+            settled_summary=response.session_summary.strip(),
             turn_acts=turn_acts,
             co_created_message_ids=co_created,
             co_created_spans=spans,
@@ -193,8 +213,10 @@ def run_conversation(
         )
 
     return ConversationResult(
-        summary=summary,
+        entry_text=entry_text,
+        settled_summary=response.session_summary.strip(),
         turn_acts=turn_acts,
+        assistant_digests=digests,
         co_created_message_ids=co_created,
         co_created_spans=spans,
     )
@@ -313,6 +335,126 @@ def run_structure(
     )
 
 
+def run_structure_by_turns(
+    turns: list[tuple[BufferMessage, str]],
+    *,
+    entry_id: str,
+    provider: LLMProvider,
+    config: PipelineConfig,
+) -> StructureResult:
+    """
+    Split a conversation by asking which turns belong together.
+
+    The same job as run_structure, done without the text making a round trip
+    through the model. A long evening asked for as text costs as much output
+    as it did input, runs into the reply limit — where the failure is a
+    truncated entry rather than an error — and gives the model an opening to
+    tidy the person's words on the way past. Turn numbers cost a few dozen
+    integers and cannot be reworded.
+
+    Anything the split forgot is kept: unassigned turns become a final topic
+    of their own rather than being dropped, because losing part of an entry
+    is the one outcome this stage must never produce.
+
+    If this fails, the conversation is kept whole as a single topic with no
+    references resolved.
+    """
+    text = render_entry(turns)
+    response = _request(
+        provider=provider,
+        prompt=DIALOGUE_STRUCTURE_PROMPT.format(
+            dialogue=_number_for_splitting(turns)
+        ),
+        response_model=DialogueStructureResponse,
+        pass_name="structure",
+    )
+    if response is None or not response.episodes:
+        if response is not None:
+            _log_fallback("structure", "no_episodes_returned")
+        return StructureResult(
+            episodes=(whole_text_episode(text),),
+            coreference_map=empty_coreference_map(entry_id),
+            used_fallback=True,
+        )
+
+    episodes = _episodes_from_turns(turns, response.episodes)
+    if not episodes:
+        _log_fallback("structure", "no_turn_numbers_matched")
+        return StructureResult(
+            episodes=(whole_text_episode(text),),
+            coreference_map=empty_coreference_map(entry_id),
+            used_fallback=True,
+        )
+
+    capped, overflow_merged = _cap_episodes(episodes, config.max_episodes_per_session)
+    return StructureResult(
+        episodes=capped,
+        coreference_map=CoreferenceMap(
+            entry_id=entry_id,
+            resolved_entities=response.coreference.resolved_entities,
+            ambiguous_refs=response.coreference.ambiguous_refs,
+        ),
+        overflow_merged=overflow_merged,
+    )
+
+
+def _number_for_splitting(turns: list[tuple[BufferMessage, str]]) -> str:
+    """Lay the rebuilt turns out numbered, in the form the split is asked for."""
+    lines = []
+    for number, (message, text) in enumerate(turns, start=1):
+        speaker = "ME" if message.role == "USER" else "ASSISTANT"
+        lines.append(f"[{number}] {speaker}: {text}")
+    return "\n\n".join(lines)
+
+
+def _episodes_from_turns(
+    turns: list[tuple[BufferMessage, str]],
+    segments: list,
+) -> tuple[SegmentedEpisode, ...]:
+    """
+    Put the writing back together from the turn numbers it was split by.
+
+    A number naming no turn is ignored, and a turn claimed twice belongs to
+    the first topic that claimed it — a topic cannot be in two places, and
+    duplicating the writing would double-count it everywhere downstream.
+    """
+    built: list[SegmentedEpisode] = []
+    taken: set[int] = set()
+
+    for segment in segments:
+        wanted = [
+            number
+            for number in dict.fromkeys(segment.turn_numbers)
+            if 1 <= number <= len(turns) and number not in taken
+        ]
+        if not wanted:
+            continue
+        taken.update(wanted)
+        built.append(
+            SegmentedEpisode(
+                episode_summary=segment.episode_summary,
+                text=render_entry([turns[number - 1] for number in sorted(wanted)]),
+                overarching_themes=segment.overarching_themes,
+                historical_era=segment.historical_era,
+            )
+        )
+
+    leftover = [number for number in range(1, len(turns) + 1) if number not in taken]
+    if leftover:
+        logger.warning(
+            "some turns were left out of every topic and are kept together",
+            extra={"turns": len(turns), "unassigned_turns": len(leftover)},
+        )
+        built.append(
+            SegmentedEpisode(
+                episode_summary="Parts of the conversation the split did not place",
+                text=render_entry([turns[number - 1] for number in leftover]),
+            )
+        )
+
+    return tuple(built)
+
+
 def _cap_episodes(
     episodes: tuple[SegmentedEpisode, ...], cap: int
 ) -> tuple[tuple[SegmentedEpisode, ...], bool]:
@@ -369,9 +511,11 @@ def run_triage(
     by position. A topic the model forgot to score is treated as unscored
     rather than inheriting its neighbour's verdict.
 
-    If the whole request fails, everything is treated as thin. That is the
-    cautious direction: a piece of writing nobody managed to read must not
-    be waved through into deep analysis on the strength of a broken reply.
+    Unscored is not the same as scored zero, and the difference decides how
+    much attention a piece of writing gets. A failed call says nothing about
+    the writing, so the writing gets the close reading — the cost is a deeper
+    look at some thin entries, against the cost of an outage deciding that
+    somebody's evening was a passing note, which is what used to happen.
     """
     if not texts:
         return TriageResult(scores=())
@@ -387,13 +531,21 @@ def run_triage(
         pass_name="triage",
     )
     if response is None:
-        return TriageResult(scores=_unscored(len(texts)), used_fallback=True)
+        return TriageResult(
+            scores=_unscored(len(texts)),
+            unscored=tuple(range(1, len(texts) + 1)),
+            used_fallback=True,
+        )
 
     by_index = {score.episode_index: score for score in response.scores}
     matched = [index for index in range(1, len(texts) + 1) if index in by_index]
     if not matched:
         _log_fallback("triage", "no_scores_matched_episodes")
-        return TriageResult(scores=_unscored(len(texts)), used_fallback=True)
+        return TriageResult(
+            scores=_unscored(len(texts)),
+            unscored=tuple(range(1, len(texts) + 1)),
+            used_fallback=True,
+        )
 
     if len(matched) < len(texts):
         logger.warning(
@@ -404,7 +556,12 @@ def run_triage(
     scores = tuple(
         by_index.get(index, _unscored_at(index)) for index in range(1, len(texts) + 1)
     )
-    return TriageResult(scores=_trim_prompts(scores, config.reflection_prompt_count))
+    return TriageResult(
+        scores=_trim_prompts(scores, config.reflection_prompt_count),
+        unscored=tuple(
+            index for index in range(1, len(texts) + 1) if index not in by_index
+        ),
+    )
 
 
 def _unscored(count: int) -> tuple[EpisodeScore, ...]:

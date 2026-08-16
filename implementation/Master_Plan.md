@@ -564,6 +564,82 @@ This document outlines the systematic, stage-by-stage implementation plan for th
     `lumen/query/`, `lumen/api/`, `lumen/schemas/query.py` and `lumen/graph/queries.py`.
   - *Plan:* [`implementation/Goal_13_Plan.md`](file:///Users/hemangmishra/Projects/Lumen/implementation/Goal_13_Plan.md)
 
+- [x] **Goal 13b: Import & Inspection Surfaces** ✅
+  - An insert, in the manner of Goal 3b, and the reason is that Goals 14–16 tune retrieval
+    against a graph that until now could **only** be populated by `lumen/simulation/`'s
+    hand-written corpus — four days composed specifically to exercise the stages. Tuning
+    retrieval against that is tuning it against itself.
+  - **`lumen/ingest/`**: `parse_export()` is a pure function (decoded JSON in, DTOs out,
+    no DB, no clock, no config); `stage_conversations()` writes only through the
+    repository methods a live conversation already uses; `IngestWorker` runs the shipped
+    `run_pipeline` on one background thread and is the only thing that can write.
+  - **One logical date per conversation, taken from its first message** (per explicit user
+    decision) — a reflection running past midnight belongs wholly to the day it started,
+    because splitting it would make reconciliation compare an evening against its own
+    earlier conclusions. `LUMEN_IMPORT_TIMEZONE` decides which calendar that day is in;
+    an export records an instant, and only the reader knows the calendar.
+  - **The format is not the official OpenAI export** — one conversation per file, flat
+    message list, no branch walking. Assistant turns are kept, because `co_created_spans`
+    can only be found while the dialogue is still turn-by-turn.
+  - **The read-only guarantee is narrowed, not dropped.** No route can reach a graph write;
+    the upload routes hold the worker and can only queue an identifier. Pinned by three
+    tests including an allow-list of the three POSTs with a written reason each.
+    `LUMEN_ENABLE_INGEST=false` removes the routes entirely rather than answering 503.
+  - **An upload is refused before anything is written** if no model is reachable — 503,
+    not a failure discovered four minutes later that reads as a bad export.
+  - *Amends Goal 1:* **`KuzuGraphProvider` is now safe for one writer plus readers.** Kuzu
+    takes a file lock, so a server that both reads and imports *must* share one provider —
+    and a transaction belongs to the connection, so without a lock a read arriving
+    mid-import would run inside the importer's uncommitted transaction. Every statement now
+    goes through a guarded `_execute`; `transaction()` holds a re-entrant lock for its
+    length. Same-thread nesting still raises; another thread now waits.
+  - *Amends Goal 1:* **`LUMEN_VECTOR_LOCATION` never actually accepted a path.** The
+    client's `location` is a *host*, so `./lumen_vectors` was resolved as a DNS name and
+    failed. Found by running the service, not by the suite — nothing had ever configured a
+    persistent vector store.
+  - *Amends Goal 3b:* `extra={"filename": ...}` raises `KeyError` from inside the logging
+    call and **never fires under pytest**, which leaves logging at WARNING. One shipped in
+    this goal and would have failed every upload. A syntax-tree guard now covers every log
+    line in the package; it found two pre-existing `extra={"trace_id": ...}` lines in
+    `orchestration/embed.py` that `TraceIdFilter` was silently overwriting.
+  - *Amends Goal 11:* `GET /debug/traces` — every other debug endpoint is keyed by a trace
+    id and nothing handed one out. Plus `PipelineJobRepository.list_recent()`.
+  - *New:* `imports` table (migration `0003`), `.env.example`, `lumen/env.py`,
+    `python -m lumen`, and a deliberately plain test UI at `/ui` — vanilla HTML, no build
+    step, meant to be deleted when the real front end is designed.
+  - *New:* an **episode page** — one piece of writing next to everything made of it, with
+    every property of every record rather than a chosen few. The writing itself needed
+    `GET /debug/episodes/{id}/source`: an episode keeps a summary and a hash of its text
+    and never the text, so this walks node → run → conversation and reads it from the
+    operational store.
+  - *Amends Goal 4:* **Gemini refused every structured call.** The contracts set
+    `extra="forbid"`, Pydantic writes that as `additionalProperties`, and the API rejects
+    a request naming a field it does not have — so each stage fell back to its safe answer
+    and the run reported COMPLETE having extracted nothing. The schema is now sanitised at
+    the provider boundary; the reply is still validated against the real class.
+  - *Amends Goal 4:* **a failed model call now says why in words.** `error_type` alone
+    cannot tell a retired model from a malformed request, which are different problems
+    with different fixes; diagnosing the above needed a live probe rather than the log.
+  - *Amends Goal 1:* **a vector collection built for a different model is refused at
+    startup.** Changing the embedding model changes its width, and the mismatch used to
+    surface once per record, mid-run, while the graph kept saving records nothing could
+    find.
+  - *Amends Goal 1:* **`get_nodes_by_ids` could not read two kinds of record at once.** An
+    unlabelled match spanning two node tables comes back with its strings misread and
+    fails to decode; it now asks one table at a time, preserving the caller's order. This
+    was waiting for Goal 14 — fetching mixed candidates by id is the method's whole job.
+  - *Amends Goal 3b:* **the suite was writing into the log the service uses.**
+    `configure_logging` attaches to the root logger and nothing detaches it, so one test
+    entering an app lifespan redirected the rest of the session into `logs/lumen.jsonl` —
+    scripted failures sitting in the production log looking real.
+  - *Test:* 592 new tests. The worker's happy path is a real run against real Kuzu and
+    Qdrant with stand-ins only where a model would be. Driven by hand end to end: uploaded,
+    processed, 9 records and 8 links written, readable on the trace page, re-upload
+    deduped — which is how both real bugs above were found.
+  - *Result:* 2822 tests passing (2230 from Goals 1–13 + 592 new), **100% coverage** on
+    `lumen/ingest/`, `lumen/api/` and `lumen/env.py`.
+  - *Plan:* [`implementation/Goal_13b_Plan.md`](file:///Users/hemangmishra/Projects/Lumen/implementation/Goal_13b_Plan.md)
+
 - [ ] **Goal 14: Parallel Retrieval Passes (A, B, C)**
   - Pass A: Qdrant hybrid search (HyDE expansion).
   - Pass B: Kuzu structural anchor lookup (named entities, historical eras).

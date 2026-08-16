@@ -201,7 +201,7 @@ def repair_index(
     """
     trace = ops.jobs.get_trace(trace_id)
     if trace is None:
-        logger.warning("no run found to repair", extra={"trace_id": trace_id})
+        logger.warning("no run found to repair", extra={"repairing_run": trace_id})
         return []
 
     written = [
@@ -248,7 +248,7 @@ def repair_index(
 
     logger.info(
         "repaired missing search entries",
-        extra={"trace_id": trace_id, "repaired": len(repaired)},
+        extra={"repairing_run": trace_id, "repaired": len(repaired)},
     )
     return repaired
 

@@ -117,6 +117,18 @@ class BaseLLMProvider(ABC):
         self.model_role = role
         self._config = config
 
+    def _rate_limit_backoff_max(self) -> float:
+        """
+        The longest this provider is willing to wait out a rate limit.
+
+        Overridable because the right answer depends on what a retry can do
+        differently. A provider with one credential can only wait for the
+        quota minute to roll over, so it waits a long time. One that can send
+        the retry under a different credential has somewhere fresh to go and
+        should not sit out a minute first.
+        """
+        return self._config.rate_limit_backoff_max_seconds
+
     # ----- the interface callers use -----
 
     def generate_structured(
@@ -274,7 +286,7 @@ class BaseLLMProvider(ABC):
                 max_attempts=self._config.max_attempts,
                 base_delay=self._config.backoff_base_seconds,
                 max_delay=self._config.backoff_max_seconds,
-                rate_limit_max_delay=self._config.rate_limit_backoff_max_seconds,
+                rate_limit_max_delay=self._rate_limit_backoff_max(),
             )
             raw = outcome.value  # type: ignore[assignment]
             return raw, outcome
@@ -294,6 +306,7 @@ class BaseLLMProvider(ABC):
                 usage=raw.usage if raw else None,
                 finish_reason=raw.finish_reason if raw else None,
                 error_type=type(failure).__name__ if failure else None,
+                error_detail=str(failure) if failure else None,
                 prompt=prompt_text,
                 completion=raw.text if raw else None,
                 log_prompts=self._config.log_prompts,
@@ -318,6 +331,10 @@ class BaseEmbeddingProvider(ABC):
         self.model_name = model
         self.dimensions = dimensions
         self._config = config
+
+    def _rate_limit_backoff_max(self) -> float:
+        """As on BaseLLMProvider: how long to wait out a rate limit."""
+        return self._config.rate_limit_backoff_max_seconds
 
     # ----- the interface callers use -----
 
@@ -376,6 +393,7 @@ class BaseEmbeddingProvider(ABC):
                 text_count=len(texts),
                 task_type=task_type.value,
                 error_type=type(failure).__name__ if failure else None,
+                error_detail=str(failure) if failure else None,
             )
 
     def close(self) -> None:
@@ -448,7 +466,7 @@ class BaseEmbeddingProvider(ABC):
             max_attempts=self._config.max_attempts,
             base_delay=self._config.backoff_base_seconds,
             max_delay=self._config.backoff_max_seconds,
-            rate_limit_max_delay=self._config.rate_limit_backoff_max_seconds,
+            rate_limit_max_delay=self._rate_limit_backoff_max(),
         )
         return outcome.value  # type: ignore[return-value]
 

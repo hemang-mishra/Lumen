@@ -21,13 +21,15 @@ from __future__ import annotations
 from lumen.pipeline.reconciliation.contracts import DecisionItem
 from lumen.schemas.enums import CandidateRetrievalSource
 from lumen.schemas.pipeline import CandidateNode
+from lumen.prompt_rules import AUTHOR_NAMING
 
 SYSTEM_INSTRUCTION = (
     "You compare what someone noticed today against what they have recorded "
     "before, and say how the two relate. You never invent history, never "
     "claim a person has changed on the strength of a single day, and never "
     "guess at a match you cannot see evidence for. Preferring the cautious "
-    "answer is correct. Return only the requested structure."
+    "answer is correct. " + AUTHOR_NAMING + " Return only the requested "
+    "structure."
 )
 
 

@@ -80,6 +80,89 @@ def render_dialogue(messages: list[BufferMessage]) -> str:
     return "\n".join(lines)
 
 
+def render_numbered_dialogue(messages: list[BufferMessage]) -> str:
+    """
+    Lay a conversation out as a numbered script.
+
+    The numbers are how a topic gets named without repeating it. Splitting a
+    long conversation by asking for its text back costs as much output as the
+    conversation is long and invites paraphrase; asking which numbered turns
+    belong together costs a list of integers and cannot lose a word.
+    """
+    lines = []
+    for number, message in enumerate(numbered_turns(messages), start=1):
+        speaker = "ME" if message.role == USER_ROLE else "ASSISTANT"
+        lines.append(f"[{number}] {speaker}: {message.content.strip()}")
+    return "\n\n".join(lines)
+
+
+def numbered_turns(messages: list[BufferMessage]) -> list[BufferMessage]:
+    """
+    The turns that get a number, in order.
+
+    Blank messages are dropped, so numbering is over what a reader actually
+    sees. Everything else keeps its place — including the assistant's turns,
+    because a topic boundary usually falls on a question it asked.
+    """
+    return [message for message in messages if message.content.strip()]
+
+
+def assemble_entry(
+    messages: list[BufferMessage],
+    *,
+    turn_acts: dict[str, DialogueAct],
+    digests: dict[str, str],
+) -> list[tuple[BufferMessage, str]]:
+    """
+    Rebuild a conversation as something worth reading, turn by turn.
+
+    The person's own words are copied out of the buffer untouched — not
+    returned by a model, not cleaned, not shortened. That is the whole point:
+    a model asked to hand back somebody's writing will improve it, and what
+    reaches the graph would be its phrasing rather than theirs.
+
+    The assistant's side is replaced by its digest, so the shape of the
+    exchange survives — half of what a person says is only meaningful as an
+    answer to what was just asked — without burying them under it.
+
+    Dropped on the way past: the person's operational requests, which are
+    them using the system rather than confiding in it, and any assistant turn
+    nobody managed to condense, since the alternative is pasting several
+    hundred words of someone else's prose into their history.
+
+    Returns each surviving turn with the text to use for it, so the caller can
+    both render it and keep the mapping from turn to message.
+    """
+    kept: list[tuple[BufferMessage, str]] = []
+    for message in numbered_turns(messages):
+        if message.role == USER_ROLE:
+            if turn_acts.get(message.message_id) is DialogueAct.OPERATIONAL_REQUEST:
+                continue
+            kept.append((message, message.content.strip()))
+            continue
+
+        digest = digests.get(message.message_id, "").strip()
+        if digest:
+            kept.append((message, digest))
+    return kept
+
+
+def render_entry(turns: list[tuple[BufferMessage, str]]) -> str:
+    """
+    Write the rebuilt conversation out as text for the model to read.
+
+    Whose words are whose is marked, because extraction has to be able to
+    tell them apart: something the assistant suggested and the person never
+    took up is recorded as the assistant's, and carries less weight when the
+    history is searched later.
+    """
+    lines = []
+    for message, text in turns:
+        speaker = "ME" if message.role == USER_ROLE else "THE ASSISTANT (condensed)"
+        lines.append(f"{speaker}: {text}")
+    return "\n\n".join(lines)
+
+
 def word_count(text: str) -> int:
     """
     Count the words in a piece of text.
@@ -160,6 +243,10 @@ __all__ = [
     "user_messages",
     "render_monologue",
     "render_dialogue",
+    "render_numbered_dialogue",
+    "numbered_turns",
+    "assemble_entry",
+    "render_entry",
     "word_count",
     "text_hash",
     "all_turns_operational",

@@ -14,6 +14,7 @@ running everything locally has no reason to install a cloud SDK.
 from __future__ import annotations
 
 import logging
+import threading
 from typing import Any
 
 from pydantic import BaseModel
@@ -25,6 +26,7 @@ from lumen.providers.base import (
     RawResponse,
     resolve_dimensions,
 )
+from lumen.providers.keyring import ApiKeyPool
 from lumen.providers.errors import (
     ProviderConfigurationError,
     ProviderContentBlockedError,
@@ -66,6 +68,35 @@ def _import_sdk() -> tuple[Any, Any, Any]:
             provider="gemini",
         ) from exc
     return genai, genai_types, genai_errors
+
+
+def _response_schema(response_model: type[BaseModel]) -> dict[str, Any]:
+    """
+    Turn a model class into a schema the API will accept.
+
+    Every contract in the pipeline forbids unexpected fields, which is what
+    makes a malformed reply fail here rather than three stages downstream.
+    Pydantic writes that as `additionalProperties: false`, the SDK passes it
+    through as `additional_properties`, and Gemini rejects the whole request
+    for naming a field it does not have — so every structured call fails, on
+    every model, with a message about JSON rather than about the entry.
+
+    Dropping the key costs nothing: it is a constraint on what the *model* may
+    return, and the reply is validated against the real class on the way back
+    in, where a stray field is still refused.
+    """
+    def without_the_rejected_key(node: Any) -> Any:
+        if isinstance(node, dict):
+            return {
+                key: without_the_rejected_key(value)
+                for key, value in node.items()
+                if key != "additionalProperties"
+            }
+        if isinstance(node, list):
+            return [without_the_rejected_key(item) for item in node]
+        return node
+
+    return without_the_rejected_key(response_model.model_json_schema())
 
 
 def _permissive_safety_settings(genai_types: Any) -> list[Any]:
@@ -159,12 +190,147 @@ def _retry_after(exc: BaseException) -> float | None:
         return None
 
 
+class _ClientSource:
+    """
+    Where a request gets its SDK client from.
+
+    Both Gemini providers need the same thing: either the client a test handed
+    them, or one of several clients built from the configured keys, chosen
+    fresh for every request. That choice is here rather than in each provider,
+    so the two cannot drift apart.
+
+    One client is built per key and then kept. Building is cheap but not free,
+    and a client holds a connection pool worth reusing; with ten keys this
+    means ten long-lived clients rather than one per request.
+    """
+
+    def __init__(
+        self,
+        *,
+        pool: ApiKeyPool | None,
+        client: Any | None,
+        genai: Any | None,
+        model: str,
+        role: ModelRole,
+    ) -> None:
+        self._pool = pool
+        self._fixed = client
+        self._genai = genai
+        self._model = model
+        self._role = role
+        self._clients: dict[str, Any] = {}
+        self._last_key: str | None = None
+        # Embedding batches can run several at a time, so two threads can ask
+        # for the same not-yet-built client at once.
+        self._lock = threading.Lock()
+
+    @property
+    def size(self) -> int:
+        """How many distinct credentials requests can be spread over."""
+        return len(self._pool) if self._pool is not None else 1
+
+    def acquire(self) -> Any:
+        """
+        A client to send the next request with.
+
+        Whatever the last attempt used is passed as the key to avoid. On a
+        retry that is the key that just failed, which is the case rotation
+        exists for: a call that died on a rate limit goes back out under a
+        different meter rather than pushing on the empty one. On an ordinary
+        request it simply keeps two calls in a row off the same meter, which
+        is the same thing one step earlier.
+        """
+        if self._pool is None:
+            return self._fixed
+
+        with self._lock:
+            key = self._pool.select(exclude=self._last_key)
+            rotated = self._last_key is not None and key != self._last_key
+            self._last_key = key
+
+            client = self._clients.get(key)
+            if client is None:
+                client = self._genai.Client(api_key=key)
+                self._clients[key] = client
+
+        if rotated:
+            logger.info(
+                "rotated to a different API key",
+                extra={
+                    "provider": "gemini",
+                    "model": self._model,
+                    "model_role": self._role.value,
+                    "api_key_slot": self._pool.label_for(key),
+                },
+            )
+        return client
+
+
+def _client_source(
+    config: ProviderConfig,
+    *,
+    model: str,
+    role: ModelRole,
+    client: Any | None,
+) -> tuple[_ClientSource, Any]:
+    """
+    Work out how this provider will get clients, and load the SDK types.
+
+    A client passed in wins outright — that is how tests exercise request
+    shaping and reply unpacking with no key and no network. Otherwise every
+    configured key becomes a rotation slot; a deployment with one key gets a
+    pool of one and behaves exactly as it did before rotation existed.
+    """
+    genai, types, _ = _import_sdk()
+
+    if client is not None:
+        source = _ClientSource(pool=None, client=client, genai=None, model=model, role=role)
+        return source, types
+
+    keys = config.gemini_api_keys
+    if not keys:
+        raise ProviderConfigurationError(
+            "no Gemini credential found; set GEMINI_API_KEY (or GOOGLE_API_KEY), "
+            "or GEMINI_API_KEYS / GEMINI_API_KEY_1..N to rotate over several",
+            provider="gemini",
+            model=model,
+            role=role,
+        )
+
+    try:
+        pool = ApiKeyPool(keys, strategy=config.key_rotation_strategy)
+    except ValueError as exc:
+        raise ProviderConfigurationError(
+            f"{exc}. Check LUMEN_KEY_ROTATION_STRATEGY.",
+            provider="gemini",
+            model=model,
+            role=role,
+            cause=exc,
+        ) from exc
+
+    logger.info(
+        "gemini credentials loaded",
+        extra={
+            "provider": "gemini",
+            "model": model,
+            "model_role": role.value,
+            "api_key_count": len(pool),
+            "key_rotation_strategy": pool.strategy,
+        },
+    )
+    source = _ClientSource(pool=pool, client=None, genai=genai, model=model, role=role)
+    return source, types
+
+
 class GeminiLLMProvider(BaseLLMProvider):
     """
     Text generation through Gemini.
 
     A client can be handed in instead of being built, which is what lets tests
     exercise the request shaping and reply unpacking without a network or a key.
+
+    Where the deployment configured several keys, each request picks one of
+    them — see _ClientSource.
     """
 
     provider_name = "gemini"
@@ -177,22 +343,9 @@ class GeminiLLMProvider(BaseLLMProvider):
         client: Any | None = None,
     ) -> None:
         super().__init__(model, role, config)
-
-        if client is not None:
-            self._client = client
-            _, self._types, _ = _import_sdk()
-            return
-
-        if not config.gemini_api_key:
-            raise ProviderConfigurationError(
-                "no Gemini credential found; set GEMINI_API_KEY (or GOOGLE_API_KEY)",
-                provider="gemini",
-                model=model,
-                role=role,
-            )
-
-        genai, self._types, _ = _import_sdk()
-        self._client = genai.Client(api_key=config.gemini_api_key)
+        self._clients, self._types = _client_source(
+            config, model=model, role=role, client=client
+        )
 
     def _request_structured(
         self,
@@ -205,13 +358,13 @@ class GeminiLLMProvider(BaseLLMProvider):
         """
         Ask for JSON in the shape of a model class.
 
-        The class is handed to the SDK directly, which builds the schema from
-        it. Nobody writes a schema by hand, so it cannot drift away from the
-        code it is supposed to describe.
+        The schema is derived from the class rather than written by hand, so
+        it cannot drift away from the code it describes. One key is removed on
+        the way past — see _response_schema.
         """
         config = self._types.GenerateContentConfig(
             response_mime_type="application/json",
-            response_schema=response_model,
+            response_schema=_response_schema(response_model),
             temperature=temperature,
             system_instruction=system_instruction,
             safety_settings=_permissive_safety_settings(self._types),
@@ -235,10 +388,22 @@ class GeminiLLMProvider(BaseLLMProvider):
         )
         return self._call(contents=self._to_contents(messages), config=config)
 
+    def _rate_limit_backoff_max(self) -> float:
+        """
+        Wait out a rate limit only when there is nothing else to try.
+
+        With one key a 429 means the quota minute has to pass, so the long
+        ceiling stands. With several, the retry goes out under a different key
+        and a minute of waiting would throw away the point of having them.
+        """
+        if self._clients.size > 1:
+            return self._config.backoff_max_seconds
+        return self._config.rate_limit_backoff_max_seconds
+
     def _call(self, *, contents: Any, config: Any) -> Any:
         """Send one request, translating any SDK failure on the way out."""
         try:
-            return self._client.models.generate_content(
+            return self._clients.acquire().models.generate_content(
                 model=self.model_name,
                 contents=contents,
                 config=config,
@@ -341,21 +506,15 @@ class GeminiEmbeddingProvider(BaseEmbeddingProvider):
             else resolve_dimensions(model, config.embedding_dimensions),
         )
 
-        if client is not None:
-            self._client = client
-            _, self._types, _ = _import_sdk()
-            return
+        self._clients, self._types = _client_source(
+            config, model=model, role=ModelRole.EMBEDDING, client=client
+        )
 
-        if not config.gemini_api_key:
-            raise ProviderConfigurationError(
-                "no Gemini credential found; set GEMINI_API_KEY (or GOOGLE_API_KEY)",
-                provider="gemini",
-                model=model,
-                role=ModelRole.EMBEDDING,
-            )
-
-        genai, self._types, _ = _import_sdk()
-        self._client = genai.Client(api_key=config.gemini_api_key)
+    def _rate_limit_backoff_max(self) -> float:
+        """As on the text provider: only wait out a limit with nowhere to go."""
+        if self._clients.size > 1:
+            return self._config.backoff_max_seconds
+        return self._config.rate_limit_backoff_max_seconds
 
     def _embed_chunk(
         self,
@@ -364,7 +523,7 @@ class GeminiEmbeddingProvider(BaseEmbeddingProvider):
     ) -> list[list[float]]:
         """Embed a batch, telling the API what the text will be used for."""
         try:
-            reply = self._client.models.embed_content(
+            reply = self._clients.acquire().models.embed_content(
                 model=self.model_name,
                 contents=texts,
                 config=self._types.EmbedContentConfig(task_type=_TASK_TYPES[task_type]),

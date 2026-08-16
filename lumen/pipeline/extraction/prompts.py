@@ -18,6 +18,7 @@ from lumen.pipeline.extraction.catalog import EXCLUDED_TYPES
 from lumen.pipeline.extraction.contracts import DropRule, RejectedItem
 from lumen.schemas.enums import HIGH_SIGNAL_REQUIRED_TYPES
 from lumen.schemas.pipeline import CoreferenceMap
+from lumen.prompt_rules import AUTHOR_NAMING
 
 SYSTEM_INSTRUCTION = (
     "You read personal journal entries and record what is actually in them. "
@@ -25,7 +26,8 @@ SYSTEM_INSTRUCTION = (
     "imagine any. Record only what this entry supports, in their own terms, "
     "including anything unflattering, distressing or unresolved. Never "
     "diagnose, advise, soften or conclude on their behalf. If something is "
-    "not there, leave it out. Return only the requested structure."
+    "not there, leave it out. " + AUTHOR_NAMING + " Return only the "
+    "requested structure."
 )
 
 
@@ -34,6 +36,28 @@ Below is one episode from a journal entry — a single topic, already \
 separated out from the rest. Read it closely and record what is in it.
 
 Return three things: findings, events, and cause-and-effect sequences.
+
+HOW MUCH TO RECORD
+
+Record everything the episode supports, not a summary of it. Someone who \
+wrote at length about one evening has said many separate things, and a \
+handful of findings from a long piece of writing means most of what they \
+said was thrown away.
+
+Work through the episode in order rather than stepping back and summarising \
+it. Each distinct thing they noticed, felt, realised, feared, resented, \
+noticed themselves doing, or decided is its own finding, even when several \
+sit in one sentence. Do not merge two points because they are related — "I \
+felt behind" and "I compared myself to Alex" are two findings, not one \
+tidier one about comparison.
+
+Prefer the specific to the general. "The comparing is what hurts, not the \
+gap" is worth recording; "he has some difficult feelings" is not, because it \
+could be said of anybody.
+
+This is not licence to invent. Every finding still needs its quote, and \
+something not in the episode is still left out. Being thorough means \
+noticing more of what is there, never reading more into it.
 
 FINDINGS (observations)
 
@@ -90,6 +114,16 @@ Number the steps from 1 in the order they happened. If one action led to two \
 different outcomes, give the parallel paths different branch_id values. Set \
 is_anticipatory to true when the sequence is something they fear or imagine \
 rather than something that happened.
+
+Record a sequence wherever the episode contains one, not just the clearest \
+one. An evening's writing usually holds more than a single thread — what set \
+something off, what they felt, what they did about it, how it left them — and \
+each of those threads is its own sequence.
+
+Follow a feeling as it changes. "I felt X, then after that Y, and by the end \
+Z" is one sequence with three INTERNAL_STATE steps, and recording only the \
+last one keeps the destination and loses the journey, which is the part that \
+explains them to themselves later.
 
 Only record a sequence when the episode actually connects the steps. Do not \
 assemble one out of separate points that happen to sit near each other. A \

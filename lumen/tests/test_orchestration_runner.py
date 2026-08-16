@@ -238,6 +238,49 @@ class TestAThinEntry:
         assert report.episodes[0].status is EpisodeRunStatus.COMPLETE
 
 
+class TestAnEpisodeNobodyCouldDecideAbout:
+    """
+    Deciding can fail on its own, with everything before it having worked.
+
+    The stage still reports COMPLETE, because it ran and produced a coherent
+    outcome: nothing decided, nothing written, everything waiting for a
+    person. What was missing was any way to see *why* without knowing the
+    trace id and grepping a log file — the run recorded only that it had
+    happened.
+    """
+
+    def test_the_reason_is_recorded_on_the_run(
+        self, run, decayed_session, ops_store
+    ):
+        report = run(
+            decayed_session(),
+            overrides={"decision": "not json at all"},
+        )
+
+        stage = next(
+            record
+            for record in ops_store.jobs.get_stage_runs(report.job_id)
+            if record.stage is PipelineStage.STAGE_3_RECONCILIATION
+        )
+
+        assert stage.validation_passed is False
+        assert "unparseable" in stage.output_payload["no_decision_because"]
+
+    def test_a_run_that_decided_normally_records_no_reason(
+        self, run, decayed_session, ops_store
+    ):
+        report = run(decayed_session())
+
+        stage = next(
+            record
+            for record in ops_store.jobs.get_stage_runs(report.job_id)
+            if record.stage is PipelineStage.STAGE_3_RECONCILIATION
+        )
+
+        assert stage.validation_passed is True
+        assert "no_decision_because" not in stage.output_payload
+
+
 class TestAnEpisodeThatCouldNotBeRead:
     def test_it_is_saved_and_marked_as_needing_attention(
         self, run, decayed_session, graph_store

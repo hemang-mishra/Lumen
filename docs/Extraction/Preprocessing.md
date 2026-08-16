@@ -73,14 +73,55 @@ Instead, Lumen uses **Session-Level Extraction (Delayed Stage 1)**. Inputs from 
 
    When the classification pass fails, the span list is empty and everything downstream reads as `USER_GENERATED`. That is the safe direction — `CO_CREATED` content carries a 0.5 trust weight, so wrongly marking a person's own words as assistant-derived would quietly demote their own history in retrieval.
 
-**Stage 0.5: Session-Level Rollups (Conversational Chat Only):**
-Do not stream raw dialogue directly to Microextraction. Because conversational interfaces involve active hypothesis generation, testing, and eventual realizations, streaming raw dialogue leads to intra-session graph fragmentation and Epistemic Churn (e.g., extracting a discarded hypothesis as a concrete belief node).
+**Stage 0.5: Session Rebuild (Conversational Chat Only):**
 
-Stage 0.5 introduces a "Session Summary" pass that:
+> **This section was rewritten after the first real imports.** It previously specified a
+> "Session Summary" rollup that isolated the settled conclusions and discarded the
+> exploratory scaffolding, and that summary — not the conversation — was what Stage 1
+> read. Two exported conversations of roughly 15,000 words each reached Microextraction
+> as **199 and 209 words**, and produced four observations and one causal chain between
+> them. The rollup was doing exactly what it was specified to do, and what it was
+> specified to do was wrong: the thing Lumen exists to hold is how somebody arrived
+> somewhere, and a summary of conclusions is precisely the part that survives without it.
+
+Do not stream raw dialogue directly to Microextraction, and do not summarise it either.
+Stage 0.5 **rebuilds** the session:
+
 1. Intercepts the classified dialogue buffer.
-2. Isolates the final settled conclusions (`REALIZATION`s) of the conversation.
-3. Discards the exploratory conversational scaffolding (intermediate hypotheses, `OPERATIONAL_REQUEST` questions, and the AI's leading prompts).
-4. Outputs a cohesive **Session Summary** containing only the settled reflections, tagged with any `CO_CREATED` provenance markers, which is then passed to Stage 1 (Microextraction).
+2. Keeps every `EXPRESSIVE` turn the person wrote **verbatim**, copied from the buffer
+   rather than returned by a model. A model asked to hand somebody's writing back will
+   improve it, and what reaches the graph would then be its phrasing rather than theirs.
+3. Replaces each assistant turn with a one-or-two-sentence **digest**, keeping any
+   question it asked. The assistant's side has to be present — half of what a person
+   says is only meaningful as an answer to what was just asked — but never at its own
+   length, which would bury them under someone else's prose. An assistant turn nobody
+   managed to condense is dropped rather than included whole.
+4. Drops `OPERATIONAL_REQUEST` turns: those are somebody using the system, not confiding
+   in it.
+5. Still writes the **Session Summary** of what was settled, and keeps it as a record of
+   the session. It is no longer what Stage 1 reads.
+
+**What happened to Epistemic Churn.** The risk named above is real: a hypothesis raised
+and abandoned mid-conversation must not become a `BeliefNode`. That protection moves to
+where it belongs — Stage 3 decides what becomes a lasting record, with the graph's
+confidence gates and the `DecisionAuditNode` trail behind it. An abandoned theory
+extracted from an episode is an observation with a quote attached, scoped to that
+episode, which is an accurate account of the evening. Deciding at Stage 0 that it never
+happened is not.
+
+**Splitting follows from this.** A rebuilt conversation is split into episodes by naming
+the **turn numbers** that make up each one, and the text is reassembled from the buffer.
+Asking a model to return the episodes as text costs as much output as the conversation
+was long, meets the reply limit — where the failure mode is a silently truncated entry —
+and invites paraphrase. Turn numbers cannot be paraphrased, and every turn is accounted
+for: any the split fails to place is kept as a final episode rather than lost.
+
+**Cleaning is skipped for a conversation.** ASR post-processing and translation ask a
+model to hand the whole entry back, for the same cost and the same truncation risk, on
+text that is already the person's own messages. The known gap: a conversation written
+partly in another language is not translated. Closing it means cleaning each message
+individually, where the round trip is small — not putting the whole evening through one
+call.
 
 ---
 
@@ -200,6 +241,17 @@ Entry: {cleaned_entry_text}
 |---|---|---|
 | ≥ 0.4 | `REFLECTION` | Proceed to full Microextraction pipeline |
 | < 0.4 | `RAW_CAPTURE` | Minimal extraction + reflection prompts |
+| *not scored* | `REFLECTION` | The scoring call failed; see below |
+
+**An unscored episode is not a zero.** When the coherence call fails — a timeout, a 503,
+a reply that does not parse — the episodes it could not read are given the close reading
+rather than the light one. This was the opposite way round, and the cost was found in
+the first real import: one 503 on the scoring call sent a 40-message conversation down
+the `RAW_CAPTURE` path, whose prompt asks for exactly two things (a context sentence and
+a named feeling), and three episodes of a long evening yielded three observations
+between them. A failed call is evidence about the call, not about the writing. The cost
+of this direction is a deep read on some genuinely thin entries; the cost of the other
+is losing a real one, and only one of those is recoverable by running again.
 
 ---
 

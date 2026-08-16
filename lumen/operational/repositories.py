@@ -17,6 +17,7 @@ from lumen.operational.enums import (
     BufferSource,
     BufferStatus,
     HitlItemStatus,
+    ImportStatus,
     JobStatus,
     PipelineStage,
     StageStatus,
@@ -27,6 +28,8 @@ from lumen.operational.schemas import (
     CoreferenceRecord,
     ErasureAuditRecord,
     HitlQueueItemRecord,
+    ImportBatch,
+    ImportRecord,
     PipelineJobRecord,
     PipelineTrace,
     SessionBufferRecord,
@@ -220,6 +223,15 @@ class PipelineJobRepository(Protocol):
         """
         ...
 
+    def list_recent(self, user_id: str, limit: int = 50) -> list[PipelineJobRecord]:
+        """
+        Recent runs, newest first.
+
+        Fetching a run by its trace id is only useful to somebody who
+        already has one. This is how anybody else finds one to look at.
+        """
+        ...
+
 
 @runtime_checkable
 class CoreferenceMapRepository(Protocol):
@@ -329,6 +341,67 @@ class DataErasureAuditRepository(Protocol):
 
 
 @runtime_checkable
+class ImportRepository(Protocol):
+    """
+    Records what has been uploaded and what became of it.
+
+    Every method here is about one of three questions: has this conversation
+    been seen before, what is this upload doing right now, and what has been
+    uploaded in the past.
+    """
+
+    def find_by_conversation(
+        self, user_id: str, source_conversation_id: str
+    ) -> ImportRecord | None:
+        """
+        Find an earlier import of the same conversation, if there is one.
+
+        This is the dedupe check. It runs before anything is staged, so a
+        second upload of the same export never reaches a model.
+        """
+        ...
+
+    def record(self, entry: ImportRecord) -> str:
+        """Store a new import row and return its id."""
+        ...
+
+    def get(self, import_id: str) -> ImportRecord | None:
+        """Fetch one import, or None if there is no such row."""
+        ...
+
+    def update_status(
+        self,
+        import_id: str,
+        status: ImportStatus,
+        *,
+        job_id: str | None = None,
+        trace_id: str | None = None,
+        error: str | None = None,
+    ) -> ImportRecord:
+        """
+        Move an import to a new state, filling in what is now known.
+
+        The job and trace arrive later than the row does — the row is written
+        when the messages are stored, and the run that processes them starts
+        afterwards — so they are set here rather than at creation.
+        """
+        ...
+
+    def get_batch(self, batch_id: str) -> ImportBatch | None:
+        """
+        Everything one uploaded file turned into.
+
+        Assembled from its rows rather than stored, so it cannot disagree
+        with them.
+        """
+        ...
+
+    def list_recent(self, user_id: str, limit: int = 50) -> list[ImportRecord]:
+        """Past imports, newest first. This is the history view."""
+        ...
+
+
+@runtime_checkable
 class OperationalStore(Protocol):
     """
     One way in to all operational data.
@@ -343,6 +416,7 @@ class OperationalStore(Protocol):
     hitl: HitlQueueRepository
     settings: UserSettingsRepository
     erasure: DataErasureAuditRepository
+    imports: ImportRepository
 
     def init_schema(self) -> None:
         """Make sure the tables exist. Safe to call more than once."""
@@ -373,5 +447,6 @@ __all__ = [
     "HitlQueueRepository",
     "UserSettingsRepository",
     "DataErasureAuditRepository",
+    "ImportRepository",
     "OperationalStore",
 ]

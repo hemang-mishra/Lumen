@@ -92,11 +92,12 @@ def reconcile(
 
     history = _hydrate_candidates(items, graph=graph)
     decidable = [item for item in items if not item.search_failed]
-    response = decide.propose(
+    reading = decide.propose(
         decidable,
         provider=lightweight,
         attempts=settings.pipeline.max_decision_attempts,
     )
+    response = reading.response
     settled, model_used = _settle_all(
         items,
         decidable,
@@ -120,6 +121,7 @@ def reconcile(
         episode_index=episode.episode.episode_index if episode else 1,
         model_used=model_used,
         decision_failed=response is None,
+        decision_failure=reading.failure if response is None else None,
     )
     outcome = outcome.model_copy(
         update={"decision_time_ms": int((time.perf_counter() - started) * 1000)}
@@ -387,6 +389,7 @@ def _assemble(
     episode_index: int,
     model_used: str,
     decision_failed: bool,
+    decision_failure: str | None = None,
 ) -> ReconciliationOutcome:
     """
     Build the decisions, their notes, the plan, and the list of what is
@@ -447,6 +450,7 @@ def _assemble(
         ),
         decision_model=model_used,
         decision_failed=decision_failed,
+        decision_failure=decision_failure,
     )
 
 

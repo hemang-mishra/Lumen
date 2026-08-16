@@ -759,6 +759,11 @@ class ReconciliationOutcome(PipelineDTO):
             because an entry nobody could decide about looks exactly like an
             entry with nothing in it, and treating the first as the second
             files a lifelong pattern as a brand-new thought.
+        decision_failure: Why it could not be read, in a few words. Carried
+            rather than only logged: "rate limited" and "the reply was the
+            wrong shape" want different responses from whoever is looking,
+            and telling them apart used to mean knowing the trace id and
+            grepping a log file.
     """
 
     episode_id: str = Field(min_length=1)
@@ -770,6 +775,7 @@ class ReconciliationOutcome(PipelineDTO):
     decision_model: str = Field(min_length=1)
     decision_time_ms: int = Field(default=0, ge=0)
     decision_failed: bool = False
+    decision_failure: str | None = None
 
 
 class EpisodeOutcome(BaseModel):

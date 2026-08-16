@@ -13,13 +13,14 @@ into someone's history that they never wrote.
 """
 
 from __future__ import annotations
+from lumen.prompt_rules import AUTHOR_NAMING
 
 SYSTEM_INSTRUCTION = (
     "You prepare personal journal entries for analysis. Your job is to make "
     "what the person said legible, never to improve it, interpret it, or add "
     "to it. Preserve their meaning exactly, including anything unflattering, "
     "distressing or unresolved. Never soften, censor or conclude on their "
-    "behalf. Return only the requested structure."
+    "behalf. " + AUTHOR_NAMING + " Return only the requested structure."
 )
 
 
@@ -48,16 +49,70 @@ or sentence carrying the idea, not the whole message. Leave the list empty if \
 the person took up nothing. Do not add the person's own words to this list — \
 only the assistant's.
 
-Second, write a session summary containing only what the conversation \
-actually settled on. A conversation is full of ideas that were raised, tested \
-and abandoned. Include only the conclusions the person arrived at and still \
-held by the end. Leave out the assistant's suggestions, the questions, the \
-discarded theories, and anything classified OPERATIONAL_REQUEST.
+Second, condense every message written by the assistant (role AI) into one \
+or two sentences saying what it actually said, in assistant_digests, keyed by \
+that message's id. Keep any question it asked, because the person's next \
+message is usually an answer to it and reads as nonsense without it. Drop the \
+restating, the encouragement, and the offers of further help. Do not condense \
+the person's messages — those are kept exactly as written and are not your \
+concern here.
 
-Write the summary in the person's own voice and first person, as though they \
-had written it themselves. If nothing was settled, return an empty summary.
+Third, write a session summary of what the conversation settled on: the \
+conclusions the person arrived at and still held by the end. This is a record \
+of where the evening landed, not a replacement for it — everything they wrote \
+is kept regardless, so do not worry about leaving something out of the \
+summary. Write it in their voice, first person. If nothing was settled, \
+return an empty summary.
 
 CONVERSATION:
+{dialogue}
+"""
+
+
+DIALOGUE_STRUCTURE_PROMPT = """\
+Below is a conversation, one numbered turn at a time. Split it into \
+conceptual episodes and resolve who its pronouns refer to.
+
+SPLITTING
+
+Give each episode the numbers of the turns that belong to it. Do not repeat \
+the text — the numbers are enough, and they are how the writing is put back \
+together afterwards.
+
+Split by subject matter, not by time. A conversation wanders off a subject \
+and returns to it; both parts are the same episode even with other turns \
+between them. Turn numbers therefore need not be contiguous.
+
+Split finely. An evening spent on work stress, a friend leaving, and an old \
+memory that surfaced is three episodes, not one — and if the work stress \
+covers both a specific argument and a longer-standing worry about the job, \
+that is two. Each episode should be one thing that could be thought about on \
+its own. A conversation of this length usually holds several; returning one \
+episode for the whole of it is almost always wrong.
+
+Every numbered turn must appear in exactly one episode. Give every episode a \
+one-line summary of what it is about, and any broad themes it covers, such as \
+"Work Satisfaction" or "Social Dynamics".
+
+If the person anchors an episode to a named period of their past — "back \
+during my exam prep years", "when I was living alone" — record that as \
+historical_era. Leave it null otherwise. Do not invent one.
+
+REFERENCES
+
+Resolve pronouns and nicknames to the person they refer to, within this \
+conversation only.
+  - A pronoun resolves to the most recent clearly named person.
+  - A nickname or role resolves to a name established earlier here: "J" to \
+"Jordan", "my manager" to "Neha" if that was stated.
+  - If a reference could plausibly be two different people, do not choose. \
+Put it in ambiguous_refs with both candidates and why it is unclear. A wrong \
+confident answer here attaches someone's words to the wrong person.
+
+Only resolve references you can settle from this conversation alone. You have \
+no knowledge of any other entry, and you must not assume one.
+
+THE CONVERSATION, TURN BY TURN:
 {dialogue}
 """
 
@@ -213,6 +268,7 @@ def render_episodes_for_triage(texts: list[str]) -> str:
 __all__ = [
     "SYSTEM_INSTRUCTION",
     "CONVERSATION_PROMPT",
+    "DIALOGUE_STRUCTURE_PROMPT",
     "NORMALIZE_VOICE_PROMPT",
     "NORMALIZE_TEXT_PROMPT",
     "STRUCTURE_PROMPT",

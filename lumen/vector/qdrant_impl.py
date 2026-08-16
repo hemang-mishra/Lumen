@@ -20,6 +20,34 @@ from lumen.vector.provider import ScoredHit, VectorProvider
 
 logger = logging.getLogger(__name__)
 
+# Held in memory and gone when the process exits. Right for tests, and the
+# wrong default for anything that also keeps a graph on disk.
+IN_MEMORY = ":memory:"
+
+
+def _connection_for(location: str) -> dict[str, str]:
+    """
+    Work out what a location string was meant to say.
+
+    This exists because the underlying client's `location` argument is a
+    *host*, not a path: handed "./lumen_vectors" it tries to resolve that as
+    a server name and fails with a DNS error, which is a spectacularly
+    unhelpful way to be told you wanted a folder. A path is the most likely
+    thing somebody configuring a personal, file-backed deployment means, so
+    it is recognised and passed as one.
+
+    Args:
+        location: ":memory:", a URL, or a folder path.
+
+    Returns:
+        The keyword argument the client actually wants.
+    """
+    if location == IN_MEMORY:
+        return {"location": IN_MEMORY}
+    if location.startswith(("http://", "https://")):
+        return {"url": location}
+    return {"path": location}
+
 
 class QdrantVectorProvider(VectorProvider):
     """
@@ -47,14 +75,20 @@ class QdrantVectorProvider(VectorProvider):
         Initialize the Qdrant client.
 
         Args:
-            location: ":memory:" for testing, or a path like "./lumen_vectors" for persistence.
+            location: Where the index lives. Three forms are understood, and
+                which one was meant is worked out from the value itself:
+
+                  ":memory:"                — held in memory, lost on exit
+                  "http://host:6333"        — a running Qdrant server
+                  anything else             — a folder on disk
+
             collection_name: Name of the Qdrant collection.
             vector_size: Dimensionality of dense vectors (768 for text-embedding-004).
         """
         self.location = location
         self.collection_name = collection_name
         self.vector_size = vector_size
-        self.client = qdrant_client.QdrantClient(location=location)
+        self.client = qdrant_client.QdrantClient(**_connection_for(location))
         logger.info(
             "QdrantVectorProvider initialized (location=%s, collection=%s, dim=%d)",
             location, collection_name, vector_size,
@@ -110,7 +144,34 @@ class QdrantVectorProvider(VectorProvider):
                     # Local Qdrant warns but doesn't support payload indexes
                     pass
         else:
+            self._refuse_a_collection_of_the_wrong_width()
             logger.debug("Collection '%s' already exists, skipping creation", self.collection_name)
+
+    def _refuse_a_collection_of_the_wrong_width(self) -> None:
+        """
+        Stop if the existing collection was built for a different model.
+
+        Changing the embedding model changes how wide its vectors are, and a
+        collection's width is fixed when it is created. Without this check the
+        mismatch surfaces once per record, deep inside a run, as an array
+        error that names neither the model nor the setting — while the graph
+        keeps saving records that nothing will ever find. Better to refuse
+        here, where the message can say which two numbers disagree.
+        """
+        existing = self.client.get_collection(self.collection_name)
+        params = existing.config.params.vectors
+        size = getattr(params, "size", None)
+        if size is None or size == self.vector_size:
+            return
+
+        raise ValueError(
+            f"the collection {self.collection_name!r} holds vectors of width "
+            f"{size} and this deployment is configured for {self.vector_size}. "
+            "That happens when the embedding model changes. Either put "
+            f"LUMEN_VECTOR_SIZE back to {size} with the model that produced "
+            "it, or delete the collection and let it be rebuilt — which means "
+            "re-embedding everything already saved."
+        )
 
     # ------------------------------------------------------------------
     # Write Operations

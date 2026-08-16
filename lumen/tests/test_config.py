@@ -280,3 +280,77 @@ class TestCredentialsCannotLeak:
         cfg = ProviderConfig()
         monkeypatch.setenv("GEMINI_API_KEY", "new-key")
         assert cfg.gemini_api_key == "new-key"
+
+    def test_a_whole_set_of_keys_cannot_leak_either(self, monkeypatch):
+        """The plural form has to keep the same promise as the singular one."""
+        monkeypatch.setenv("GEMINI_API_KEYS", f"{self.SECRET},{self.SECRET}-two")
+        assert self.SECRET not in str(dataclasses.asdict(AppConfig()))
+        assert self.SECRET not in repr(AppConfig())
+        names = {f.name for f in dataclasses.fields(ProviderConfig())}
+        assert "gemini_api_keys" not in names
+
+
+class TestSeveralCredentials:
+    """
+    Quotas are metered per key, so a deployment with several keys can do
+    several times the work in a minute — provided the keys are all found.
+    """
+
+    def test_no_keys_reads_as_an_empty_set(self):
+        assert ProviderConfig().gemini_api_keys == ()
+
+    def test_the_single_key_form_still_works(self, monkeypatch):
+        monkeypatch.setenv("GEMINI_API_KEY", "solo")
+        assert ProviderConfig().gemini_api_keys == ("solo",)
+
+    def test_a_comma_separated_list_is_read_in_order(self, monkeypatch):
+        monkeypatch.setenv("GEMINI_API_KEYS", "one,two,three")
+        assert ProviderConfig().gemini_api_keys == ("one", "two", "three")
+
+    def test_spacing_around_a_comma_is_forgiven(self, monkeypatch):
+        monkeypatch.setenv("GEMINI_API_KEYS", " one , two ,, three ")
+        assert ProviderConfig().gemini_api_keys == ("one", "two", "three")
+
+    def test_numbered_variables_are_read_from_one_upwards(self, monkeypatch):
+        for index, value in enumerate(["one", "two", "three"], start=1):
+            monkeypatch.setenv(f"GEMINI_API_KEY_{index}", value)
+        assert ProviderConfig().gemini_api_keys == ("one", "two", "three")
+
+    def test_a_gap_in_the_numbering_ends_the_list(self, monkeypatch):
+        """
+        Silently jumping the gap would make GEMINI_API_KEY_4, sitting above a
+        commented-out third, look like it was being used when it was not.
+        """
+        monkeypatch.setenv("GEMINI_API_KEY_1", "one")
+        monkeypatch.setenv("GEMINI_API_KEY_2", "two")
+        monkeypatch.setenv("GEMINI_API_KEY_4", "four")
+        assert ProviderConfig().gemini_api_keys == ("one", "two")
+
+    def test_the_forms_combine(self, monkeypatch):
+        monkeypatch.setenv("GEMINI_API_KEYS", "one,two")
+        monkeypatch.setenv("GEMINI_API_KEY_1", "three")
+        monkeypatch.setenv("GEMINI_API_KEY", "four")
+        assert ProviderConfig().gemini_api_keys == ("one", "two", "three", "four")
+
+    def test_the_same_key_named_twice_counts_once(self, monkeypatch):
+        monkeypatch.setenv("GEMINI_API_KEYS", "one,two")
+        monkeypatch.setenv("GEMINI_API_KEY", "one")
+        assert ProviderConfig().gemini_api_keys == ("one", "two")
+
+    def test_the_singular_reads_the_first_of_several(self, monkeypatch):
+        """Callers that only ever wanted "a credential" keep working."""
+        monkeypatch.setenv("GEMINI_API_KEYS", "one,two")
+        assert ProviderConfig().gemini_api_key == "one"
+
+    def test_added_keys_take_effect_without_rebuilding_config(self, monkeypatch):
+        monkeypatch.setenv("GEMINI_API_KEYS", "one")
+        cfg = ProviderConfig()
+        monkeypatch.setenv("GEMINI_API_KEYS", "one,two")
+        assert cfg.gemini_api_keys == ("one", "two")
+
+    def test_the_rotation_strategy_defaults_to_random(self):
+        assert ProviderConfig().key_rotation_strategy == "random"
+
+    def test_the_rotation_strategy_is_configurable(self, monkeypatch):
+        monkeypatch.setenv("LUMEN_KEY_ROTATION_STRATEGY", "round_robin")
+        assert ProviderConfig().key_rotation_strategy == "round_robin"

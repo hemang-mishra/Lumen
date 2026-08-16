@@ -242,3 +242,6 @@ logs/
 # IDEs
 .vscode/
 .idea/
+
+# Claude Code local settings (launch.json is shared; settings.local.json is not)
+.claude/settings.local.json

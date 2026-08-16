@@ -22,6 +22,7 @@ wrong finding does not fail: it confidently merges two unrelated things.
 from __future__ import annotations
 
 import logging
+from dataclasses import dataclass
 from typing import TypeVar
 
 from pydantic import BaseModel, ValidationError
@@ -51,21 +52,41 @@ logger = logging.getLogger(__name__)
 _ResponseT = TypeVar("_ResponseT", bound=BaseModel)
 
 
+@dataclass(frozen=True)
+class Reading:
+    """
+    What came of asking the model one question.
+
+    The reason is carried rather than only logged. "No decision came back"
+    and "the model is rate-limited" are the same event to the pipeline and
+    completely different to somebody looking at why an evening's writing was
+    left undecided, and until this existed the only way to tell them apart
+    was to know the trace id and grep a log file.
+
+    Attributes:
+        response: The answer, or None when none was readable.
+        failure: Why not, short enough to sit next to the stage on a page.
+    """
+
+    response: _ResponseT | None = None
+    failure: str | None = None
+
+
 def propose(
     items: list[DecisionItem],
     *,
     provider: LLMProvider,
     attempts: int = 2,
-) -> DecisionResponse | None:
+) -> Reading:
     """
     Ask once for a reading of every finding in the entry.
 
-    Returns nothing if no readable answer came back after the attempts
-    allowed. Nothing is invented to fill the gap — an entry nobody could
-    decide about is handed to a person, which is slower but true.
+    Comes back holding nothing if no readable answer arrived after the
+    attempts allowed. Nothing is invented to fill the gap — an entry nobody
+    could decide about is handed to a person, which is slower but true.
     """
     if not items:
-        return DecisionResponse()
+        return Reading(response=DecisionResponse())
 
     prompt = DECISION_PROMPT.format(
         action_guide=ACTION_GUIDE,
@@ -103,17 +124,17 @@ def confirm(
         action_guide=ACTION_GUIDE,
         items=_render_escalated(items, proposals),
     )
-    response = _ask(
+    reading = _ask(
         provider=provider,
         prompt=prompt,
         response_model=EscalationResponse,
         step="escalation",
         attempts=attempts,
     )
-    if response is None:
+    if reading.response is None:
         return {}
 
-    return {verdict.item_index: verdict for verdict in response.verdicts}
+    return {verdict.item_index: verdict for verdict in reading.response.verdicts}
 
 
 def needs_confirming(decision: ItemDecision) -> bool:
@@ -181,7 +202,7 @@ def _ask(
     response_model: type[_ResponseT],
     step: str,
     attempts: int,
-) -> _ResponseT | None:
+) -> Reading:
     """
     Ask for a readable answer, repeating the same request if none comes.
 
@@ -190,31 +211,42 @@ def _ask(
     shape asked for, not a wrong judgement. Nothing about the entry is
     logged — only which step failed and why.
     """
+    failure = "no attempt was made"
     for attempt in range(1, max(attempts, 1) + 1):
         try:
             result = provider.generate_structured(
                 prompt, response_model, system_instruction=SYSTEM_INSTRUCTION
             )
         except ProviderError as exc:
-            _log_failure(step, "provider_error", type(exc).__name__, attempt)
+            failure = _log_failure(step, "provider_error", type(exc).__name__, attempt)
             continue
 
         if result.data is None:
-            _log_failure(step, "unparseable_response", result.parse_error, attempt)
+            failure = _log_failure(
+                step, "unparseable_response", result.parse_error, attempt
+            )
             continue
 
         try:
-            return response_model.model_validate(result.data)
+            return Reading(response=response_model.model_validate(result.data))
         except ValidationError as exc:
-            _log_failure(
+            failure = _log_failure(
                 step, "unexpected_shape", f"{exc.error_count()} field errors", attempt
             )
 
-    return None
+    # The last reason, not the first: an attempt that failed differently the
+    # second time is describing a different problem, and the later one is the
+    # state things were actually left in.
+    return Reading(failure=failure)
 
 
-def _log_failure(step: str, reason: str, detail: str | None, attempt: int) -> None:
-    """Record that a call failed, without recording what was being decided."""
+def _log_failure(step: str, reason: str, detail: str | None, attempt: int) -> str:
+    """
+    Record that a call failed, without recording what was being decided.
+
+    Hands the reason back as well as logging it, so the same words can travel
+    with the run and be read without the log file.
+    """
     logger.warning(
         "reconciliation could not read the model's answer",
         extra={
@@ -224,6 +256,7 @@ def _log_failure(step: str, reason: str, detail: str | None, attempt: int) -> No
             "attempt": attempt,
         },
     )
+    return f"{reason}: {detail}" if detail else reason
 
 
-__all__ = ["propose", "confirm", "needs_confirming", "align"]
+__all__ = ["Reading", "propose", "confirm", "needs_confirming", "align"]

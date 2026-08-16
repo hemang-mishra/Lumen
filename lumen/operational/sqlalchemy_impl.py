@@ -32,11 +32,13 @@ from lumen.operational.enums import (
     ALLOWED_JOB_TRANSITIONS,
     HITL_ENTRY_TYPE_RANK,
     OPEN_HITL_STATUSES,
+    TERMINAL_IMPORT_STATUSES,
     BufferSource,
     BufferStatus,
     ErasureStatus,
     HitlEntryType,
     HitlItemStatus,
+    ImportStatus,
     JobStatus,
     PipelineStage,
     StageStatus,
@@ -52,6 +54,8 @@ from lumen.operational.schemas import (
     CoreferenceRecord,
     ErasureAuditRecord,
     HitlQueueItemRecord,
+    ImportBatch,
+    ImportRecord,
     PipelineJobRecord,
     PipelineTrace,
     SessionBufferRecord,
@@ -566,6 +570,16 @@ class SqlAlchemyPipelineJobRepository:
             job = db.get(models.PipelineJob, write.job_id)
             return _to_job_record(job) if job else None
 
+    def list_recent(self, user_id: str, limit: int = 50) -> list[PipelineJobRecord]:
+        with self._sessions.session() as db:
+            rows = db.scalars(
+                select(models.PipelineJob)
+                .where(models.PipelineJob.user_id == user_id)
+                .order_by(models.PipelineJob.created_at.desc())
+                .limit(limit)
+            ).all()
+            return [_to_job_record(row) for row in rows]
+
     def _require_job(self, db: Session, job_id: str) -> models.PipelineJob:
         row = db.get(models.PipelineJob, job_id)
         if row is None:
@@ -856,6 +870,120 @@ class SqlAlchemyDataErasureAuditRepository:
             return [_to_erasure_record(row) for row in rows]
 
 
+class SqlAlchemyImportRepository:
+    """Records what has been uploaded and what became of it."""
+
+    def __init__(self, sessions: _SessionManager) -> None:
+        self._sessions = sessions
+
+    def find_by_conversation(
+        self, user_id: str, source_conversation_id: str
+    ) -> ImportRecord | None:
+        with self._sessions.session() as db:
+            row = db.scalar(
+                select(models.ImportedConversation).where(
+                    models.ImportedConversation.user_id == user_id,
+                    models.ImportedConversation.source_conversation_id
+                    == source_conversation_id,
+                )
+            )
+            return _to_import_record(row) if row else None
+
+    def record(self, entry: ImportRecord) -> str:
+        with self._sessions.session() as db:
+            db.add(
+                models.ImportedConversation(
+                    import_id=entry.import_id,
+                    batch_id=entry.batch_id,
+                    user_id=entry.user_id,
+                    source_conversation_id=entry.source_conversation_id,
+                    title=entry.title,
+                    filename=entry.filename,
+                    event_date=entry.event_date,
+                    message_count=entry.message_count,
+                    session_id=entry.session_id,
+                    job_id=entry.job_id,
+                    trace_id=entry.trace_id,
+                    status=entry.status.value,
+                    error=entry.error,
+                    created_at=entry.created_at or _utcnow(),
+                    finished_at=entry.finished_at,
+                )
+            )
+            db.flush()
+
+        logger.info(
+            "import recorded",
+            extra={
+                "import_id": entry.import_id,
+                "batch_id": entry.batch_id,
+                "event_date": str(entry.event_date),
+                "status": entry.status.value,
+            },
+        )
+        return entry.import_id
+
+    def get(self, import_id: str) -> ImportRecord | None:
+        with self._sessions.session() as db:
+            row = db.get(models.ImportedConversation, import_id)
+            return _to_import_record(row) if row else None
+
+    def update_status(
+        self,
+        import_id: str,
+        status: ImportStatus,
+        *,
+        job_id: str | None = None,
+        trace_id: str | None = None,
+        error: str | None = None,
+    ) -> ImportRecord:
+        with self._sessions.session() as db:
+            row = db.get(models.ImportedConversation, import_id)
+            if row is None:
+                raise RecordNotFoundError(f"no import with id {import_id!r}")
+
+            row.status = status.value
+            # Only ever filled in, never cleared. A retry that could not
+            # reach a model should not erase the trace of the attempt that
+            # did.
+            if job_id is not None:
+                row.job_id = job_id
+            if trace_id is not None:
+                row.trace_id = trace_id
+            if error is not None:
+                row.error = error
+            if status in TERMINAL_IMPORT_STATUSES and row.finished_at is None:
+                row.finished_at = _utcnow()
+
+            db.flush()
+            return _to_import_record(row)
+
+    def get_batch(self, batch_id: str) -> ImportBatch | None:
+        with self._sessions.session() as db:
+            rows = db.scalars(
+                select(models.ImportedConversation)
+                .where(models.ImportedConversation.batch_id == batch_id)
+                .order_by(models.ImportedConversation.created_at)
+            ).all()
+            if not rows:
+                return None
+            return ImportBatch(
+                batch_id=batch_id,
+                filename=rows[0].filename,
+                imports=[_to_import_record(row) for row in rows],
+            )
+
+    def list_recent(self, user_id: str, limit: int = 50) -> list[ImportRecord]:
+        with self._sessions.session() as db:
+            rows = db.scalars(
+                select(models.ImportedConversation)
+                .where(models.ImportedConversation.user_id == user_id)
+                .order_by(models.ImportedConversation.created_at.desc())
+                .limit(limit)
+            ).all()
+            return [_to_import_record(row) for row in rows]
+
+
 class SQLAlchemyOperationalStore:
     """
     One way in to all operational data.
@@ -881,6 +1009,7 @@ class SQLAlchemyOperationalStore:
         self.hitl = SqlAlchemyHitlQueueRepository(self._sessions)
         self.settings = SqlAlchemyUserSettingsRepository(self._sessions)
         self.erasure = SqlAlchemyDataErasureAuditRepository(self._sessions)
+        self.imports = SqlAlchemyImportRepository(self._sessions)
 
     @property
     def engine(self) -> Engine:
@@ -1093,6 +1222,26 @@ def _to_hitl_record(row: models.HitlQueueItem) -> HitlQueueItemRecord:
     )
 
 
+def _to_import_record(row: models.ImportedConversation) -> ImportRecord:
+    return ImportRecord(
+        import_id=row.import_id,
+        batch_id=row.batch_id,
+        user_id=row.user_id,
+        source_conversation_id=row.source_conversation_id,
+        title=row.title,
+        filename=row.filename,
+        event_date=row.event_date,
+        message_count=row.message_count,
+        session_id=row.session_id,
+        job_id=row.job_id,
+        trace_id=row.trace_id,
+        status=ImportStatus(row.status),
+        error=row.error,
+        created_at=_aware(row.created_at),
+        finished_at=_aware(row.finished_at),
+    )
+
+
 def _to_erasure_record(row: models.DataErasureAudit) -> StoredErasureAudit:
     return StoredErasureAudit(
         id=row.id,
@@ -1115,5 +1264,6 @@ __all__ = [
     "SqlAlchemyHitlQueueRepository",
     "SqlAlchemyUserSettingsRepository",
     "SqlAlchemyDataErasureAuditRepository",
+    "SqlAlchemyImportRepository",
     "build_operational_store",
 ]
