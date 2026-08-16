@@ -93,6 +93,15 @@ Stage 4: Graph Write
 
 - **Pass B — Structural Retrieval:** A deterministic, graph-keyed lookup that bypasses embedding entirely. It runs whenever any of the following anchors are present in the current episode:
   1. **Named persons** from the coreference map — retrieves all active `BeliefNode`, `PatternNode`, and `ObservationNode` instances linked to that `PersonEntityNode`.
+
+     > **Two hops, not one.** Only observations, events and sessions carry a `mentions`
+     > edge to a person. A belief or pattern is *about* someone because a finding about
+     > them turned into it, so those are reached through whichever `branches_to`,
+     > `reinforces` or `same_as` edge a decision created. Withdrawn links are not
+     > followed, and a record reachable by two routes is offered once — a duplicate wastes
+     > one of at most eight candidate places. Without the second hop, someone named again
+     > months later surfaces only individual notes, and the standing pattern those notes
+     > produced is invisible unless the wording happens to match.
   2. **`historical_era` tags** — retrieves all nodes tagged with that era (e.g., `a major entrance exam_PREP`).
   3. **High-sensitivity open nodes** — retrieves any `INAUTHENTICITY_STATE`, `IDENTITY_FUSION_STATE`, `EXISTENTIAL_REFLECTION`, or `SUPPRESSED_EMOTION_SURFACING` observations **belonging to an episode whose `reconciliation_status` is `PENDING_RERECONCILIATION`**.
 

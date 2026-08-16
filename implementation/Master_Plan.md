@@ -448,10 +448,48 @@ This document outlines the systematic, stage-by-stage implementation plan for th
     `lumen/api/` and `lumen/graph/queries.py`, 99% on `lumen/graph/`.
   - *Plan:* [`implementation/Goal_11_Plan.md`](file:///Users/hemangmishra/Projects/Lumen/implementation/Goal_11_Plan.md)
 
-- [ ] **Goal 12: Multi-Session Integrity Test**
-  - Feed 3–5 consecutive days of simulated journal logs.
-  - Verify: patterns accumulate `evidence_count`, version chains link correctly, `follows_from` edges order episodes.
-  - *Test:* Traverse Kuzu graph to ensure patterns aren't fragmented across sessions.
+- [x] **Goal 12: Multi-Session Integrity** ✅
+  - Implemented `lumen/simulation/` (`corpus`, `themes`, `runner`, `__main__`) — five
+    consecutive days written as a journal with an arc, a stand-in embedder that clusters
+    by theme, and one call that feeds the days through the real pipeline in order.
+  - **The corpus ships in the package, not the test folder.** Phase 3's objective is to
+    "manually inspect the graph" and there was no way to fill one; `python -m
+    lumen.simulation` now does it in one command. Same precedent as Goal 4's fakes.
+  - **A themed stand-in embedder was necessary, not convenient.** The existing one hashes
+    text, so two entries about one struggle land as far apart as two unrelated ones —
+    under it the pipeline *must* fragment, and the test would have failed for a reason
+    that has nothing to do with the pipeline. The new one is *told* the theme rather than
+    inferring it, and says so.
+  - **The four integrity properties hold:** one theme across five days is one pattern with
+    `evidence_count` 3; a belief created on day 4 and evolved on day 5 forms a linked
+    version chain with exactly one current version and the older kept; every record traces
+    to its entry, run and decision; the two episodes of one day are ordered. Running the
+    same week twice produces the same graph.
+  - **Assertions read through Goal 11's API** where possible, so the test exercises what a
+    person would actually use.
+  - *Amends Goal 9 — two real bugs, both unreachable from a single entry:*
+    **a person mentioned again on a later day crashed the whole episode** (they are found
+    rather than created, so nothing in the plan created them and the link to them looked
+    like it pointed at nothing — `_known_ids` now counts every bookkeeping target as an
+    existing record); and **a standing record could not report its own decision history**,
+    because `decided_by` was written only from the finding, leaving three of the six link
+    tables unreachable and "why does the system believe this?" unanswerable from the
+    record itself.
+  - *Amends Goal 8/11:* retrieval's `PERSON_LINKED_TYPES` gains `PatternNode` and
+    `BeliefNode`. Goal 11 built the second hop and nothing called it, so a person named
+    again surfaced only individual notes and never the pattern they produced.
+  - *Corpus changed after the fact, recorded in Section C:* day 4's observation type
+    (the deciding model's `new_node.kind` is asked for and never read — what a finding
+    becomes is decided by its type), day 5's action (a version chain needs an EVOLVE and
+    nothing evolved), and day 5's wording (it claimed a theme its words no longer
+    contained — caught by a corpus test).
+  - *Test:* 60 new tests. The five days run against real Kuzu and Qdrant; an opt-in live
+    variant runs the same corpus against real models and is deselected by default,
+    because whether a real model recognises Wednesday from Monday is a question about
+    prompts that can change without this repository changing.
+  - *Result:* 2010 tests passing (1937 from Goals 1–11 + 73 new), **100% coverage** on
+    `lumen/simulation/` and `lumen/pipeline/reconciliation/`.
+  - *Plan:* [`implementation/Goal_12_Plan.md`](file:///Users/hemangmishra/Projects/Lumen/implementation/Goal_12_Plan.md)
 
 ## Phase 4: Query Layer (Goals 13-16)
 **Objective:** Build the real-time, invisible RAG injection system per [`docs/Query/Conversational_RAG_Mode.md`](file:///Users/hemangmishra/Projects/Lumen/docs/Query/Conversational_RAG_Mode.md).

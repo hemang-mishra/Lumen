@@ -481,7 +481,11 @@ class TestEveryDecisionIsRecorded:
 
         assert audit.status is DecisionStatus.BELOW_THRESHOLD
         assert [node.node_type for node in fragment.nodes] == ["DecisionAuditNode"]
-        assert tables(fragment) == ["decided_by_obs"]
+        # The note is linked from both records it concerns: the finding, and
+        # the pattern that was nearly changed. A decision held back is still
+        # something that was considered about that pattern, and reading it
+        # only from the finding would hide it from the record it was about.
+        assert tables(fragment) == ["decided_by_obs", "decided_by_pat"]
 
     def test_a_tie_is_recorded_as_waiting_for_a_person(self, make_settled):
         decision = make_settled(ReconciliationAction.AMBIGUOUS).refuse(GateRule.TIE)
@@ -788,7 +792,7 @@ class TestEveryActionHasABuilder:
         fragment, _ = plan.plan_for(decision, context(), sequence=1)
 
         assert [node.node_type for node in fragment.nodes] == ["DecisionAuditNode"]
-        assert tables(fragment) == ["decided_by_obs"]
+        assert tables(fragment) == ["decided_by_obs", "decided_by_pat"]
 
 
 class TestHowAWaitingDecisionIsRecorded:

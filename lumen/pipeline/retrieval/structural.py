@@ -29,10 +29,26 @@ from lumen.schemas.pipeline import CandidateNode
 
 logger = logging.getLogger(__name__)
 
-# The node kinds a person can be linked to directly. Beliefs and patterns
-# are reached only through the observation that produced them, which is a
-# second hop nothing needs yet.
-PERSON_LINKED_TYPES = ["ObservationNode", "EventNode", "SessionNode"]
+# The node kinds worth asking about when a person is named.
+#
+# The first three name a person directly. Beliefs and patterns never do —
+# they are about someone because a finding about that person turned into
+# them — so those are reached one step further on, through whichever
+# finding branched into or reinforced them.
+#
+# Both halves are asked for because "what do I know about Alex" means the
+# same thing whether the answer is a note from Tuesday or the standing
+# pattern that grew out of it. Without the standing records, a person named
+# again months later surfaces only the individual notes, and the pattern
+# they produced — the thing actually worth reconciling against — is
+# invisible unless the wording happens to match.
+PERSON_LINKED_TYPES = [
+    "ObservationNode",
+    "EventNode",
+    "SessionNode",
+    "PatternNode",
+    "BeliefNode",
+]
 
 # The node kinds that record which period of the person's life they belong
 # to.

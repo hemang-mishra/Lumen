@@ -55,6 +55,7 @@ from lumen.schemas.pipeline import (
     GraphWritePlan,
     HitlEscalation,
     MicroextractionInput,
+    PlannedBookkeeping,
     ReconciliationOutcome,
     ReconciliationResult,
     RetrievalResult,
@@ -425,11 +426,12 @@ def _assemble(
         at=at,
     )
 
+    bookkeeping = [*fragment.bookkeeping, *person_updates]
     write_plan = GraphWritePlan(
         nodes=[*person_nodes, *fragment.nodes],
         edges=[*fragment.edges, *person_edges],
-        bookkeeping=[*fragment.bookkeeping, *person_updates],
-        existing_node_ids=_known_ids(settled, extraction),
+        bookkeeping=bookkeeping,
+        existing_node_ids=_known_ids(settled, extraction, bookkeeping),
     )
 
     return ReconciliationOutcome(
@@ -546,15 +548,23 @@ def _anchor_type(extraction: ExtractionResult) -> str | None:
 
 
 def _known_ids(
-    settled: list[SettledDecision], extraction: ExtractionResult
+    settled: list[SettledDecision],
+    extraction: ExtractionResult,
+    bookkeeping: list[PlannedBookkeeping],
 ) -> frozenset[str]:
     """
     Everything a link may point at without this plan creating it.
 
-    Two kinds. Records already in the graph, which the candidates came from.
-    And everything this same run extracted, which is saved just before the
+    Three kinds. Records already in the graph, which the candidates came
+    from. Everything this same run extracted, which is saved just before the
     plan runs — an ordering the plan depends on and states out loud rather
     than assuming.
+
+    And every record a small update touches. Those operations exist only for
+    records that already exist, so being about to update one is proof it is
+    there. Without this, somebody named a second time on a later day breaks
+    the whole entry: they are found rather than created, so nothing in the
+    plan creates them, and the link to them looks like it points at nothing.
     """
     from_graph = {
         candidate.node_id
@@ -569,7 +579,8 @@ def _known_ids(
             *extraction.sessions,
         )
     } | {extraction.episode_id}
-    return frozenset(from_graph | from_this_run)
+    already_there = {operation.node_id for operation in bookkeeping}
+    return frozenset(from_graph | from_this_run | already_there)
 
 
 def _empty_outcome(
