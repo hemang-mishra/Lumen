@@ -209,7 +209,9 @@ The personal version runs all services as Python modules in a single process. Th
 | **Query Service** | Step 5 (GraphRAG + Conversational RAG Mode) | Module in BFF | Separate FastAPI service |
 | **HITL Service** | Review queue management, one-tap decisions | Module in BFF | Separate FastAPI service |
 | **Scheduler** | Trigger Macroextraction jobs on schedule | APScheduler in BFF | Kubernetes CronJob |
-| **Formulation Service** | Query Formulation Layer (Conversational RAG) — classifies turn, emits RetrievalSignal | Async function in Query Service | Sidecar in Query Service |
+| **Formulation Service** | Query Formulation Layer (Conversational RAG) — classifies turn, emits RetrievalSignal | `lumen/query/formulation/`, a synchronous call in the Query Service | Sidecar in Query Service |
+
+**Note on `lumen/query/`.** The query layer is a top-level package, not a member of `lumen/pipeline/`. Two rules that protect the pipeline do not apply to it and would read as violations if it lived there: it reads and never writes, and it holds per-conversation state for the length of a session. The pipeline's stages may do neither.
 
 ### 3.2 Personal Project Topology
 
@@ -458,7 +460,9 @@ The Query Service contains the Conversational RAG Mode (from `Query/Conversation
 User turn arrives (WebSocket message)
         │
         ▼
-  FormulationService.classify(turn)        ← gemini-2.5-flash, <100ms
+  QueryFormulator.formulate(turn, session) ← LIGHTWEIGHT role, 600ms hard deadline
+        │   crisis floor and acknowledgement list run first, in code, with no model call
+        │   surviving triggers are grounded against the graph before they leave
         │
         ├─ NO_TRIGGER → pass to AI immediately (no wait)
         │
@@ -479,6 +483,10 @@ User turn arrives (WebSocket message)
 ```
 
 The `SessionContextBuffer` lives in memory per-session (Zustand on frontend, Python dict in Query Service). It is NOT persisted to the graph — it is ephemeral per calendar day.
+
+That ephemeral day-state is `lumen.query.session.ChatSession`, held by a `SessionRegistry` keyed on `(user_id, session_label)`. Asking for a session on a date the held one does not cover replaces it — that is the entire midnight rule, with no timer and no sweep. It currently holds the recent turns and the sensitive domains the user has opened themselves; Goal 14 adds the retrieval buffer to the same object. Its identity `(user_id, event_date, session_label)` matches the operational `session_buffers` key, so a live conversation and the buffer that will later be ingested are recognisably the same thing.
+
+The formulation model is resolved through the `LIGHTWEIGHT` role but built with `max_attempts=1`. Every other call in the system retries with backoff, which is correct for work nobody is waiting on; this one has a sub-second deadline that a retry has already missed.
 
 ---
 

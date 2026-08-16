@@ -494,10 +494,75 @@ This document outlines the systematic, stage-by-stage implementation plan for th
 ## Phase 4: Query Layer (Goals 13-16)
 **Objective:** Build the real-time, invisible RAG injection system per [`docs/Query/Conversational_RAG_Mode.md`](file:///Users/hemangmishra/Projects/Lumen/docs/Query/Conversational_RAG_Mode.md).
 
-- [ ] **Goal 13: Query Formulation Layer**
-  - Implement the lightweight query classifier (gemini-2.5-flash, <100ms).
-  - Outputs: `NO_TRIGGER` (skip retrieval) or `RetrievalSignal` with trigger type.
-  - *Test:* Verify `NO_TRIGGER` for small talk, `PATTERN_MENTION` for pattern-related questions.
+- [x] **Goal 13: Query Formulation Layer** ✅
+  - Implemented `lumen/query/` as a new **top-level** package (`session`, plus
+    `formulation/{stage,contracts,prompts,triage,safety,grounding,deadline}`) rather than
+    a module under `lumen/pipeline/`. Two rules that protect the pipeline do not apply
+    here and would read as violations if it lived there: this layer only reads, and it
+    holds state for as long as a conversation lasts. `QueryFormulator` is the only
+    public name.
+  - Input: `ChatTurn` + `ChatSession` → Output: `RetrievalSignal`. Built as an object
+    rather than a pure function because it owns a thread pool with a lifetime; the
+    model, the graph and the configuration are all injected.
+  - **The crisis judgement is not left to the model alone** (per explicit user decision).
+    A frozen list of unambiguous distress phrases sits underneath it in plain code. The
+    model may *escalate* a turn to `CRISIS`; it can never lower one the floor set, and a
+    floor hit makes no model call at all. Being wrong in the permitted direction costs
+    one skipped lookup — the cheapest possible way to be wrong about the one thing that
+    matters most.
+  - **Triggers are grounded against the graph before they leave** (per explicit user
+    decision). This exists because of a schema fact: era columns are **free text with no
+    controlled vocabulary**, so a model confidently answering `HIGH_SCHOOL` against a
+    graph storing `high school years` retrieves nothing, silently, forever. The fix is
+    to hand the model the user's real era names and reject anything outside them. A
+    person with no record and an `OPEN_LOOP_MATCH` with no open loops are dropped the
+    same way — an ungrounded trigger spends Goal 14's whole 3-second budget proving it.
+  - **Pure acknowledgements skip the model** (per explicit user decision) on a frozen
+    exact-match list, deliberately **not** a length rule: the shortest turns in this kind
+    of conversation are frequently the heaviest, and "I can't anymore" is four words.
+  - **The day-session lives here** (per explicit user decision). `ChatSession` /
+    `SessionRegistry` hold the recent turns and the sensitive domains the user opened
+    themselves; asking for a session on a new date replaces the old one, which is the
+    entire midnight rule with no timer and no sweep. Goal 14 attaches its buffer to the
+    same object.
+  - **The `<100ms` budget was not reachable and is corrected** (per explicit user
+    decision). A real hosted call takes 300–800ms, so the shipped form is a configurable
+    600ms hard deadline; the call is abandoned past it and the turn proceeds with no
+    retrieval. Enforced from outside via a bounded thread pool, since no provider has a
+    per-call timeout — with the trace context copied across by hand, and the abandoned
+    call logged when it eventually lands, because a thread cannot be cancelled.
+  - **Retries are switched off for this one model** — every other call in the system
+    retries with backoff, which is right for work nobody is waiting on; a classifier that
+    retries has already lost its deadline twice over.
+  - *Amends Goal 11:* `list_era_tags()` added to `ReadOnlyGraph` — a named read, not a
+    general query, existing because era tags are uncontrolled free text. `era_key()` in
+    `graph/queries.py` is the shared comparison rule, so the store and its callers cannot
+    disagree about whether two spellings are one period. **The API gained its first POST**
+    (`/query/formulate`): it changes nothing, but a GET would put somebody's sentence
+    about their own life into every access log between here and the server. Goal 11's
+    "every verb is GET" assertion is narrowed to the routers it was about, and a second
+    test pins the one exception.
+  - *Amends Goal 9:* `person_node_id()` moved to `schemas/ids.py` with the rest of the
+    id policy — the pipeline derives it when recording somebody named in an entry, and
+    this layer derives it when checking a name just spoken. Two copies that drifted
+    would mean the second never finds what the first wrote.
+  - *Fixed while wiring:* a missing model credential made the whole read API refuse to
+    start. Every other thing it does reads two local databases and needs no model, so the
+    failure is now confined to the one surface that needs one, which answers 503 saying
+    exactly that.
+  - *Docs amended:* `Conversational_RAG_Mode.md` (the latency correction and why
+    carry-forward does not apply to it, the crisis floor as a code-level guarantee, era
+    grounding, and an example `domain` that was not one of the eleven real ones),
+    `Technical_HLD.md` §3.1 and §6, `Schema.md` (a new section stating that era tags are
+    uncontrolled free text and what follows from it).
+  - *Test:* 220 new tests, plus 10 more that are deselected by default. Grounding runs
+    against real embedded Kuzu, since every
+    question it asks is a query and a stand-in agrees with whatever it is told. An opt-in
+    live suite asks a real model whether it reads the spec's own sentences the way the
+    design assumes — deselected by default, because that is a question about prompts.
+  - *Result:* 2230 tests passing (2010 from Goals 1–12 + 220 new), **100% coverage** on
+    `lumen/query/`, `lumen/api/`, `lumen/schemas/query.py` and `lumen/graph/queries.py`.
+  - *Plan:* [`implementation/Goal_13_Plan.md`](file:///Users/hemangmishra/Projects/Lumen/implementation/Goal_13_Plan.md)
 
 - [ ] **Goal 14: Parallel Retrieval Passes (A, B, C)**
   - Pass A: Qdrant hybrid search (HyDE expansion).

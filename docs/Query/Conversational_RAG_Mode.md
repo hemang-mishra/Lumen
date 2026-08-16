@@ -76,7 +76,17 @@ User turn arrives
 
 ## Stage 1: Query Formulation Layer
 
-The Query Formulation Layer is the component that **translates a conversational turn into a structured retrieval signal**. It is a fast, lightweight LLM call (Gemini Flash, <100ms target) that takes the current user turn and outputs a structured `RetrievalSignal`.
+The Query Formulation Layer is the component that **translates a conversational turn into a structured retrieval signal**. It is a fast, lightweight LLM call that takes the current user turn and outputs a structured `RetrievalSignal`.
+
+Three things run around that call, and each is there because the call alone is not enough:
+
+1. **A deterministic crisis floor runs first.** A short, fixed list of unambiguous distress phrases lives in code. If one appears, the turn is `CRISIS` regardless of what the model would have said, and no model call is made. The model may still *escalate* an ordinary-looking turn to `CRISIS`; it can never lower one the floor set. The asymmetry is deliberate — being wrong in the permitted direction costs one skipped lookup.
+2. **Pure acknowledgements skip the call entirely.** An exact-match list of complete turns (`yeah`, `go on`, `thanks`, …) is answered `NO_TRIGGER` without a model. This is explicitly **not** a length rule: the shortest turns in a therapeutic conversation are often the heaviest.
+3. **Triggers are grounded against the graph before they leave.** A `NAMED_PERSON` whose name has no `PersonEntityNode`, a `HISTORICAL_ERA` naming a period this history does not use, or an `OPEN_LOOP_MATCH` with no open loops in existence is dropped rather than passed to retrieval. An ungrounded trigger consumes the whole 3-second budget and returns nothing — indistinguishable, downstream, from a person who genuinely has no history on the subject.
+
+Era grounding deserves its own note. `historical_era` / `era_tag` are **free-text columns with no controlled vocabulary** — they hold whatever was written when the record was made. A model left to answer freely returns `HIGH_SCHOOL` against a graph storing `high school years`, which matches nothing, silently, forever. So the prompt is given the user's real era names (via `ReadOnlyGraph.list_era_tags()`), and any era outside that list is rejected. The spelling that reaches the trigger is always the graph's own, since only that one will match.
+
+The turn is classified against a small window of preceding turns (default 4). Several trigger types cannot be recognised from a sentence in isolation: "I don't feel that anymore" is a `PROGRESS_CLAIM` only if you can see what "that" was.
 
 ### RetrievalSignal Schema
 
@@ -87,12 +97,13 @@ The Query Formulation Layer is the component that **translates a conversational 
   "retrieval_triggers": [
     {
       "trigger_type": "PATTERN_MENTION",
-      "domain": "avoidance_resistance",
+      "domain": "BEHAVIORAL",
       "keywords": ["going out alone", "fear", "resistance", "childhood"]
     },
     {
       "trigger_type": "HISTORICAL_ERA",
       "era": "CHILDHOOD_HOME"
+      // ^ only ever a spelling this user's graph actually holds
     }
   ],
   "named_entities_mentioned": [],
@@ -247,12 +258,18 @@ RAG retrieval is allowed to take up to **3 seconds** before the carry-forward po
 
 | Stage | Target | Notes |
 |---|---|---|
-| Query Formulation | <100ms | Must complete before retrieval starts |
+| Query Formulation | **600ms hard deadline** (configurable) | Must complete before retrieval starts. See correction below. |
 | Pass A (Semantic) | <800ms | Can use full window if needed |
 | Pass B (Structural) | <200ms (graph lookup, no embedding) | Faster — no vector math |
 | Pass C (Buffer) | <20ms (in-memory) | Always succeeds |
 | Assembly + Compression | <200ms | |
-| **Total wait window** | **≤3 seconds** | |
+| **Total wait window** | **≤3 seconds** |
+
+> **Correction to the formulation budget.** This document previously specified `<100ms` for the formulation call. That figure is not reachable: a real call to a hosted fast model takes 300–800ms end to end, so a 100ms budget would be missed on essentially every turn and the number would describe nothing. The shipped behaviour is a **configurable hard deadline, defaulting to 600ms** (`LUMEN_FORMULATION_TIMEOUT_SECONDS`), after which the call is abandoned and the turn proceeds with no retrieval. The measured latency is recorded on every `RetrievalSignal`, so the real distribution is observable rather than assumed.
+>
+> Two consequences worth stating. The abandoned call is **not cancelled** — Python cannot stop a running thread — so it completes on its own and its answer is discarded; the thread pool is bounded and late arrivals are logged. And the formulation model is built with **retries disabled** (`max_attempts=1`), unlike every other model call in the system: a call that has already missed a sub-second deadline gains nothing from being tried again, and retrying only guarantees the wait is spent twice.
+>
+> A missed formulation deadline does **not** trigger the carry-forward policy. Carry-forward exists for retrieval that arrived late but is still worth having; a classification that arrived late describes a turn the conversation has already moved past. |
 
 ### Carry-Forward Policy
 

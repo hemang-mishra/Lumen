@@ -217,3 +217,28 @@ class TestTidyingAnswers:
         assert tidied["to_node_id"] == "bel_v1"
         assert tidied["decision_id"] == "d_1"
         assert "confidence" not in tidied
+
+
+class TestComparingEraNames:
+    """
+    How two spellings of one period of somebody's past are recognised as one.
+
+    Nothing constrains how these get written, so the same era arrives as
+    "HIGH_SCHOOL", "high school" and "High-School" depending on who wrote it.
+    """
+
+    @pytest.mark.parametrize(
+        "written",
+        ["HIGH_SCHOOL", "high school", "High-School", "  high   school  ", "High School"],
+    )
+    def test_the_same_period_written_any_way_compares_equal(self, written):
+        assert queries.era_key(written) == "high_school"
+
+    def test_genuinely_different_periods_stay_different(self):
+        assert queries.era_key("high school") != queries.era_key("high school years")
+
+    def test_a_name_with_nothing_in_it_compares_to_nothing(self):
+        assert queries.era_key("  -- ") == ""
+
+    def test_digits_are_part_of_a_name(self):
+        assert queries.era_key("class of 2019") == "class_of_2019"

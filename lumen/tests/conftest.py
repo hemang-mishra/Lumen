@@ -1513,3 +1513,110 @@ def api_client(graph_store, ops_store):
     # what the caller receives when something breaks is the thing being
     # tested — and a leaked stack trace is the failure being guarded against.
     return TestClient(app, raise_server_exceptions=False)
+
+
+# ---------------------------------------------------------------------------
+# Live conversation — reading a turn
+# ---------------------------------------------------------------------------
+
+TURN_AT = datetime(2026, 8, 16, 10, 0, tzinfo=UTC)
+
+
+@pytest.fixture
+def make_turn():
+    """Build one message of a conversation."""
+    from lumen.schemas.query import ChatTurn
+
+    def _make(
+        content: str = "I keep putting off the thing that matters most.",
+        *,
+        turn_index: int = 0,
+        role: str = "user",
+        at: datetime | None = None,
+    ) -> ChatTurn:
+        return ChatTurn(
+            turn_index=turn_index,
+            role=role,
+            content=content,
+            timestamp=at or TURN_AT,
+        )
+
+    return _make
+
+
+@pytest.fixture
+def chat_session():
+    """One day's conversation, empty and in memory."""
+    from lumen.query.session import ChatSession, make_session_id
+
+    day = TURN_AT.date()
+    return ChatSession(
+        session_id=make_session_id("tester", day),
+        user_id="tester",
+        event_date=day,
+        created_at=TURN_AT,
+        last_activity_at=TURN_AT,
+    )
+
+
+@pytest.fixture
+def make_reply():
+    """
+    Build the JSON a classifier would return.
+
+    Written as text rather than as an object because that is what a provider
+    actually hands back, and a test that skipped the parsing step would not
+    notice a reply shape the code cannot read.
+    """
+
+    def _make(
+        *,
+        triggers: list[dict] | None = None,
+        named_entities: list[str] | None = None,
+        register: str = "STABLE",
+        confidence: float = 0.8,
+        critical_domain_opened: str | None = None,
+    ) -> str:
+        return json.dumps(
+            {
+                "triggers": triggers or [],
+                "named_entities": named_entities or [],
+                "emotional_register": register,
+                "confidence": confidence,
+                "critical_domain_opened": critical_domain_opened,
+            }
+        )
+
+    return _make
+
+
+@pytest.fixture
+def make_formulator():
+    """
+    Build a turn reader over a scripted model and a given graph.
+
+    The deadline runner is shared rather than made per reader, so a test
+    that builds several does not leave a thread pool behind for each.
+    """
+    from lumen.providers.fake import FakeLLMProvider
+    from lumen.query.formulation import QueryFormulator
+    from lumen.query.formulation.deadline import DeadlineRunner
+
+    built = []
+    runner = DeadlineRunner(max_workers=2, name="test-formulate")
+
+    def _make(graph, *, script=None, config=None, llm=None):
+        formulator = QueryFormulator(
+            llm=llm or FakeLLMProvider(script if script is not None else []),
+            graph=graph,
+            config=config,
+            runner=runner,
+        )
+        built.append(formulator)
+        return formulator
+
+    yield _make
+
+    for formulator in built:
+        formulator.close()
+    runner.close()

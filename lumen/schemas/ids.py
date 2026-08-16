@@ -98,10 +98,27 @@ def make_slug_node_id(prefix: str, slug: str) -> str:
     return f"{prefix}_{normalized}"
 
 
+def person_node_id(name: str) -> str:
+    """
+    The identifier a person's record has, worked out from their name alone.
+
+    Deterministic on purpose: it means asking whether someone is already
+    known is a single lookup, with no search and no matching involved.
+
+    It lives here, with the rest of the id policy, because two parts of the
+    system now derive it — the pipeline when it records somebody named in an
+    entry, and the live conversation when it checks whether a name just
+    spoken belongs to anyone. Two copies of this rule that drifted apart
+    would mean the second never finds what the first wrote.
+    """
+    return make_slug_node_id(NODE_ID_PREFIXES["PersonEntityNode"], name)
+
+
 __all__ = [
     "NODE_ID_PREFIXES",
     "SEMANTIC_ID_RE",
     "make_node_id",
     "make_scoped_node_id",
     "make_slug_node_id",
+    "person_node_id",
 ]

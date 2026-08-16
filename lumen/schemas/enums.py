@@ -530,6 +530,82 @@ class DialogueAct(StrEnum):
     EXPRESSIVE = "EXPRESSIVE"
 
 
+# ---------------------------------------------------------------------------
+# Live conversation — how a turn is read before anything is looked up
+# ---------------------------------------------------------------------------
+
+
+class TriggerType(StrEnum):
+    """
+    The reason a conversational turn is worth searching the graph for.
+
+    Eight reasons to look, and one to stay put. Each one implies a different
+    kind of search, which is why they are separate rather than a single
+    "yes, retrieve" flag:
+
+    PATTERN_MENTION    — a recurring behaviour, feeling or situation.
+    BELIEF_CHALLENGE   — something once held is being questioned.
+    HISTORICAL_ERA     — a named period of the person's past.
+    NAMED_PERSON       — somebody the graph has a record of.
+    SOMATIC_MARKER     — a physical sensation being described.
+    IDENTITY_STATEMENT — a claim about who the person is or is not.
+    PROGRESS_CLAIM     — a claim that something has changed for the better.
+    OPEN_LOOP_MATCH    — a question left unfinished in an earlier session.
+    NO_TRIGGER         — small talk, logistics, acknowledgement.
+    """
+
+    PATTERN_MENTION = "PATTERN_MENTION"
+    BELIEF_CHALLENGE = "BELIEF_CHALLENGE"
+    HISTORICAL_ERA = "HISTORICAL_ERA"
+    NAMED_PERSON = "NAMED_PERSON"
+    SOMATIC_MARKER = "SOMATIC_MARKER"
+    IDENTITY_STATEMENT = "IDENTITY_STATEMENT"
+    PROGRESS_CLAIM = "PROGRESS_CLAIM"
+    OPEN_LOOP_MATCH = "OPEN_LOOP_MATCH"
+    NO_TRIGGER = "NO_TRIGGER"
+
+
+class EmotionalRegister(StrEnum):
+    """
+    How the person sounds right now, which decides how much history may be
+    put in front of the AI answering them.
+
+    STABLE     — ordinary conversation. Normal amount.
+    VULNERABLE — raw and exposed. Very little, and nothing quoted back.
+    REFLECTIVE — thinking things through. The most that is allowed.
+    CRISIS     — nothing at all. The AI answers with full attention on the
+                 person and no history in the way.
+    """
+
+    STABLE = "STABLE"
+    VULNERABLE = "VULNERABLE"
+    REFLECTIVE = "REFLECTIVE"
+    CRISIS = "CRISIS"
+
+
+class FormulationPath(StrEnum):
+    """
+    How a turn's reading was arrived at.
+
+    Kept because the four ways of producing "nothing to look up" mean
+    completely different things. A trivial turn and a model that timed out
+    look identical in the result and need opposite responses from whoever
+    is watching the logs.
+
+    CLASSIFIED      — the model read the turn and answered.
+    ACKNOWLEDGEMENT — the turn was a plain "yeah" or "go on"; no model used.
+    SAFETY_FLOOR    — the turn tripped the distress check; no model used.
+    TIMED_OUT       — the model took longer than the turn could wait.
+    CALL_FAILED     — the model errored, or its answer could not be read.
+    """
+
+    CLASSIFIED = "CLASSIFIED"
+    ACKNOWLEDGEMENT = "ACKNOWLEDGEMENT"
+    SAFETY_FLOOR = "SAFETY_FLOOR"
+    TIMED_OUT = "TIMED_OUT"
+    CALL_FAILED = "CALL_FAILED"
+
+
 __all__ = [
     "SignalStrength",
     "Provenance",
@@ -567,4 +643,7 @@ __all__ = [
     "BookkeepingOperation",
     "HitlResolutionChoice",
     "DialogueAct",
+    "TriggerType",
+    "EmotionalRegister",
+    "FormulationPath",
 ]

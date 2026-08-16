@@ -583,6 +583,28 @@ the sentence is a claim about somebody's inner life.
 
 ---
 
+## Era Tags Are Uncontrolled Free Text
+
+`EpisodeNode.historical_era`, `PatternNode.era_tag` and `BeliefNode.era_tag` are the
+only three columns naming a period of the user's past, and **none of them is backed by
+an enum**. They hold whatever was written when the record was made. This is a
+deliberate property — a person's life does not divide into a fixed list of chapters,
+and forcing one would mean discarding the era that does not fit — but it has a
+consequence anything querying by era must handle.
+
+Two spellings of one period (`HIGH_SCHOOL`, `high school years`) are two distinct
+values, and an exact-match lookup on the wrong one returns nothing while looking
+exactly like a period nothing was ever written about. So:
+
+- `ReadOnlyGraph.list_era_tags(limit=50)` returns the era names this graph actually
+  holds, across all three columns, deduplicated case- and punctuation-insensitively
+  and ordered by how often each is used. The **stored** spelling is what comes back,
+  because only that one will match in a subsequent lookup.
+- Anything that asks a language model about an era is given that list and rejects
+  answers outside it, rather than accepting a plausible-sounding name. The comparison
+  rule is `lumen.graph.queries.era_key`, shared by the store and its callers so the
+  two cannot disagree about whether two spellings are the same period.
+
 ## Temporal Model
 
 Every node and every edge carries timestamps that enable time-range queries and drive retrieval decay scoring.

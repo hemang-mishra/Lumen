@@ -1148,6 +1148,50 @@ class KuzuGraphProvider(GraphProvider):
             )
         return found[:limit]
 
+    def list_era_tags(self, *, limit: int = 50) -> list[str]:
+        """
+        Every named period of the past that some record is anchored to.
+
+        Counted across all three tables that record one, then handed back
+        most-used first so that cutting the list at a limit keeps the periods
+        that actually carry the person's history rather than an arbitrary
+        few.
+
+        Names that differ only in spacing or capitalisation are treated as
+        the same period, and the spelling that occurs most often is the one
+        returned — whatever comes back has to be usable in a lookup, so it
+        must be a spelling the graph really holds.
+        """
+        counts: dict[str, dict[str, int]] = {}
+        for table, column in ERA_COLUMNS.items():
+            for stored in self._era_values(table, column):
+                key = queries.era_key(stored)
+                if key:
+                    spellings = counts.setdefault(key, {})
+                    spellings[stored] = spellings.get(stored, 0) + 1
+
+        ranked = sorted(
+            counts.values(), key=lambda spellings: sum(spellings.values()), reverse=True
+        )
+        return [max(spellings, key=lambda name: spellings[name]) for spellings in ranked][
+            : max(int(limit), 0)
+        ]
+
+    def _era_values(self, table: str, column: str) -> list[str]:
+        """Every era name written on the live records of one table."""
+        res = self.conn.execute(
+            f"MATCH (n:{table}) "
+            f"WHERE n.{column} IS NOT NULL AND {_active_clause(table)} "
+            f"RETURN n.{column}",
+            {},
+        )
+        values: list[str] = []
+        while res.has_next():
+            value = res.get_next()[0]
+            if isinstance(value, str) and value.strip():
+                values.append(value.strip())
+        return values
+
     def find_unresolved_high_signal(
         self, observation_types: list[str], *, limit: int = 10
     ) -> list[dict[str, Any]]:
