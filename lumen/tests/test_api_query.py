@@ -16,7 +16,7 @@ from fastapi.testclient import TestClient
 from lumen.api.deps import get_formulator, get_graph, get_ops
 from lumen.api.main import create_app
 from lumen.providers.fake import FakeLLMProvider
-from lumen.query.formulation.deadline import DeadlineExceeded
+from lumen.query.deadline import DeadlineExceeded
 from lumen.query.formulation import QueryFormulator
 
 

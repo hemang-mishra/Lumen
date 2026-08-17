@@ -11,7 +11,16 @@ holds state for as long as a conversation lasts, which nothing in the
 pipeline is allowed to do.
 """
 
+from lumen.query.buffer import SessionContextBuffer
 from lumen.query.formulation import QueryFormulator
+from lumen.query.retrieval import ConversationalRetriever
 from lumen.query.session import ChatSession, SessionRegistry, make_session_id
 
-__all__ = ["QueryFormulator", "ChatSession", "SessionRegistry", "make_session_id"]
+__all__ = [
+    "QueryFormulator",
+    "ConversationalRetriever",
+    "ChatSession",
+    "SessionContextBuffer",
+    "SessionRegistry",
+    "make_session_id",
+]

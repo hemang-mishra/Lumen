@@ -21,6 +21,7 @@ from dataclasses import dataclass, field
 from datetime import date, datetime
 
 from lumen.config import QueryConfig
+from lumen.query.buffer import SessionContextBuffer
 from lumen.schemas.enums import Domain
 from lumen.schemas.query import ChatTurn
 
@@ -46,12 +47,14 @@ class ChatSession:
     """
     One day of conversation, held in memory while it happens.
 
-    Two things live here and they have different lifetimes in spirit. The
+    Three things live here and they have different lifetimes in spirit. The
     turns are a short rolling window, kept only so a turn that makes no sense
     alone can be read against the ones before it. The unlocked areas are
     cumulative for the whole day: once somebody has raised a painful subject
     themselves, the most guarded records about it stay available until the
-    day ends, and are locked again tomorrow.
+    day ends, and are locked again tomorrow. The context buffer is today's
+    thread — the few records already surfaced that are still worth offering
+    again — and it is emptied by the same midnight rule as everything else.
 
     The known era names are cached here rather than looked up per turn.
     They change only when the pipeline writes new history, which cannot
@@ -65,6 +68,9 @@ class ChatSession:
     created_at: datetime | None = None
     last_activity_at: datetime | None = None
     max_turns: int = 200
+    context_buffer: SessionContextBuffer = field(
+        default_factory=SessionContextBuffer, repr=False
+    )
 
     _turns: deque[ChatTurn] = field(default_factory=deque, repr=False)
     _unlocked: set[Domain] = field(default_factory=set, repr=False)
@@ -186,6 +192,10 @@ class SessionRegistry:
             created_at=at,
             last_activity_at=at,
             max_turns=self._config.session_max_turns,
+            context_buffer=SessionContextBuffer(
+                max_entries=self._config.session_buffer_size,
+                max_idle_turns=self._config.session_buffer_max_idle_turns,
+            ),
         )
         self._sessions[key] = session
         return session

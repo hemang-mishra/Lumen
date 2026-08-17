@@ -36,6 +36,7 @@ from fastapi.staticfiles import StaticFiles
 
 from lumen.api.deps import get_graph, get_ops
 from lumen.api.errors import register_error_handlers
+from lumen.api.resources import LazySearchStack
 from lumen.api.routes import debug, graph, ingest, query
 from lumen.api.schemas import HealthView
 from lumen.config import AppConfig
@@ -48,7 +49,7 @@ from lumen.operational.repositories import OperationalStore
 from lumen.operational.sqlalchemy_impl import build_operational_store
 from lumen.providers.errors import ProviderError
 from lumen.providers.factory import get_llm_provider
-from lumen.query import QueryFormulator
+from lumen.query import QueryFormulator, SessionRegistry
 from lumen.schemas.enums import ModelRole
 
 logger = logging.getLogger(__name__)
@@ -157,11 +158,16 @@ def _lifespan_for(settings: AppConfig):
         store.init_schema()
         formulator = _build_formulator(settings, provider)
         worker = _build_worker(settings, store, provider)
+        search = LazySearchStack(
+            config=settings, graph=provider, reader=provider, worker=worker
+        )
 
         app.state.graph = provider
         app.state.ops = store
         app.state.formulator = formulator
         app.state.ingest = worker
+        app.state.search = search
+        app.state.sessions = SessionRegistry(settings.query)
         logger.info("api ready", extra={"graph_path": settings.graph.db_path})
 
         try:
@@ -172,6 +178,10 @@ def _lifespan_for(settings: AppConfig):
             # half-written episode, and closing the graph out from under it
             # would be the one way to leave the store in a state no
             # transaction protected.
+            # The search stack goes before the importer, since it may be
+            # borrowing the importer's index and closing that first would
+            # pull it out from under a request still being served.
+            search.close()
             if worker is not None:
                 worker.stop()
             if formulator is not None:

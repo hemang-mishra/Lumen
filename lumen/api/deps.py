@@ -29,7 +29,8 @@ from lumen.config import AppConfig
 from lumen.graph.provider import ReadOnlyGraph
 from lumen.ingest import IngestWorker
 from lumen.operational.repositories import OperationalStore
-from lumen.query import QueryFormulator
+from lumen.providers.errors import ProviderError
+from lumen.query import ConversationalRetriever, QueryFormulator, SessionRegistry
 
 
 def get_graph(request: Request) -> ReadOnlyGraph:
@@ -94,4 +95,47 @@ def get_formulator(request: Request) -> QueryFormulator:
     return formulator
 
 
-__all__ = ["get_graph", "get_ops", "get_config", "get_worker", "get_formulator"]
+def get_retriever(request: Request) -> ConversationalRetriever:
+    """
+    The thing that fetches a turn's history.
+
+    Built on the first request that needs it rather than at startup, because
+    it needs a search index and a model while every other route needs
+    neither. A deployment with nothing configured still starts, still serves
+    the graph, and refuses only this.
+
+    The graph inside it is a reader, so this whole surface remains incapable
+    of changing anything.
+    """
+    stack = getattr(request.app.state, "search", None)
+    if stack is None:
+        raise Unavailable("fetching history", "this deployment cannot search")
+    try:
+        return stack.get()
+    except ProviderError as exc:
+        raise Unavailable(
+            "fetching history", "no language model or embedder is configured"
+        ) from exc
+
+
+def get_sessions(request: Request) -> SessionRegistry:
+    """
+    The live conversations this process is holding.
+
+    Kept on the application rather than made per request, because a
+    conversation that forgets itself between messages has no thread to
+    follow — and following the thread is what one of the three searches
+    does.
+    """
+    return request.app.state.sessions
+
+
+__all__ = [
+    "get_graph",
+    "get_ops",
+    "get_config",
+    "get_worker",
+    "get_formulator",
+    "get_retriever",
+    "get_sessions",
+]

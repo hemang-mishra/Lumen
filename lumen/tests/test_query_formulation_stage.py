@@ -17,7 +17,7 @@ import pytest
 from lumen.config import QueryConfig
 from lumen.providers.errors import ProviderError, ProviderTimeoutError
 from lumen.providers.fake import FakeLLMProvider
-from lumen.query.formulation.deadline import DeadlineExceeded, DeadlineRunner
+from lumen.query.deadline import DeadlineExceeded, DeadlineRunner
 from lumen.schemas.enums import (
     Domain,
     EmotionalRegister,

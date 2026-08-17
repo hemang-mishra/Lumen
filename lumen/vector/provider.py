@@ -70,6 +70,24 @@ class VectorProvider(Protocol):
         """
         ...
 
+    def get_vectors(self, node_ids: list[str]) -> dict[str, list[float]]:
+        """
+        Read back the stored vector for each of these nodes.
+
+        Ids with nothing stored are simply absent from the answer, so a
+        caller can tell "never indexed" from "indexed and far away" — those
+        mean opposite things when deciding whether something is worth
+        surfacing again.
+
+        This exists so a node can be compared against something *without*
+        searching for it. The live conversation layer keeps a short list of
+        what it has already surfaced today and has to ask, each turn,
+        whether any of it still applies. Embedding those nodes again every
+        turn would pay a second time for a measurement the index already
+        holds.
+        """
+        ...
+
     def close(self) -> None:
         """Release database resources."""
         ...

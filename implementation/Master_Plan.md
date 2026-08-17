@@ -640,11 +640,61 @@ This document outlines the systematic, stage-by-stage implementation plan for th
     `lumen/ingest/`, `lumen/api/` and `lumen/env.py`.
   - *Plan:* [`implementation/Goal_13b_Plan.md`](file:///Users/hemangmishra/Projects/Lumen/implementation/Goal_13b_Plan.md)
 
-- [ ] **Goal 14: Parallel Retrieval Passes (A, B, C)**
-  - Pass A: Qdrant hybrid search (HyDE expansion).
-  - Pass B: Kuzu structural anchor lookup (named entities, historical eras).
-  - Pass C: Session context buffer (in-memory, ephemeral per day).
-  - *Test:* Trigger `HISTORICAL_ERA` formulation, verify Pass B retrieves correct nodes.
+- [x] **Goal 14: Parallel Retrieval Passes (A, B, C)** ✅
+  - Implemented `lumen/query/retrieval/` (`stage`, `semantic`, `structural`, `continuity`,
+    `hyde`, `hydrate`, `gate`, `merge`, `contracts`, `prompts`) plus `lumen/query/buffer.py`.
+    `ConversationalRetriever` is the only public name. Input: `RetrievalSignal` +
+    `ChatSession` → Output: `RetrievalBundle`.
+  - **A and B are parallel; C is not, and cannot be** (per explicit design decision). Pass C
+    measures today's already-surfaced records against *this* turn, and the measurement it
+    needs is the one Pass A has just computed. Giving it its own embedding call would double
+    the cost of a turn to learn nothing. It runs afterwards on numbers in memory, in about a
+    millisecond. The spec called all three parallel and is corrected.
+  - **Three seconds is one shared wall clock**, enforced from outside as Goal 13's 600ms is.
+    Whatever finished is returned; whatever did not is abandoned and *reported* as abandoned.
+    A pass that fails costs that pass — losing the semantic half does not lose the anchors.
+  - **The four empty answers stay distinguishable**: nothing worth looking up, somebody in
+    acute distress, the search ran and found nothing, and the search could not run. Goal 8's
+    hardest-won lesson, restated for a layer where the wrong reading makes a system built to
+    remember behave as though it had never met anyone.
+  - **The sensitivity gate ships here**, at the retrieval boundary rather than at injection,
+    so a locked record never leaves the search. Two rules the spec left open are settled:
+    the sensitive domains are `SELF_CONCEPT`/`RELATIONAL`/`HEALTH`/`SPIRITUALITY` — **not**
+    `EMOTIONAL`, which in this kind of conversation would gate the whole graph — and a
+    CRITICAL record with **no** domain (every individual observation) is treated as
+    sensitive until the person opens some sensitive subject. Withheld ids are named on the
+    result, never silently dropped.
+  - **The buffer deadlock is settled too.** Five slots and "CRITICAL is never evicted" means
+    a day can fill with protected records and admit nothing new; a record that cannot get a
+    slot is still offered this turn and simply does not join the thread.
+  - **Ranking here is provisional and says so.** `cosine × signal_weight × session_boost`,
+    with `recency_weight` deliberately absent (Goal 19) and final ranking + the ≤400-token
+    compression left to Goal 15. An anchor match carries **no** `similarity` at all — an
+    exact name match is not a measurement — and is ordered by a configured base value.
+  - *Amends Goal 13:* `deadline.py` moved to `lumen/query/` and gained `run_all()`; both
+    halves of the query layer need it. **A real bug surfaced only by the parallel form:** one
+    `contextvars.Context` cannot be entered by two threads at once, so a single shared copy
+    made every piece after the first fail — invisibly, since it looks like a provider error.
+  - *Amends Goal 8:* row reading (`preview_of`, `signal_of`, `CONTENT_TABLES`,
+    `RETIRED_STATUSES`, `SIGNAL_WEIGHT`) moved to `lumen/graph/rows.py`, so the two retrieval
+    layers cannot drift on what a stored row says. The pipeline's modules re-export.
+  - *Amends Goal 1:* `VectorProvider.get_vectors()` — a stored record's position could not be
+    read back at all, and the continuity check needs it to compare without searching. Vectors
+    come back normalised, which is what the collection stores.
+  - *Amends Goal 13b:* `POST /query/retrieve` — the reading endpoint answers whether the
+    router is any good; this answers whether the searches find the right things, and is the
+    only way to see the continuity pass, which needs a conversation longer than one turn.
+    `LazySearchStack` shares the importer's index rather than opening a second.
+  - *Docs amended ahead of coding:* `Conversational_RAG_Mode.md` (the parallelism correction,
+    where Pass C's numbers come from, the buffer deadlock, the two sensitivity rules, the
+    score split by layer, Pass A's unreachable 800ms budget, and `PROGRESS_CLAIM`'s
+    previously-undefined "closure detection"), `Technical_HLD.md` §3.1 and §6.
+  - *Test:* Against real Kuzu and real Qdrant, seeded per test. The Master Plan's named case
+    — a `HISTORICAL_ERA` turn surfacing what is filed under that era — is asserted both at
+    the pass and through the whole component.
+  - *Result:* 3213 tests passing (2822 from Goals 1–13b + 391 new), **100% coverage** on
+    `lumen/query/`, `lumen/graph/rows.py` and `lumen/api/`.
+  - *Plan:* [`implementation/Goal_14_Plan.md`](file:///Users/hemangmishra/Projects/Lumen/implementation/Goal_14_Plan.md)
 
 - [ ] **Goal 15: Context Assembly & Pruning**
   - Merge candidates from all passes, apply retrieval score formula (cosine × signal_weight × recency_weight).

@@ -251,6 +251,22 @@ class QueryConfig:
       LUMEN_SESSION_MAX_TURNS           — most turns a day's session holds in memory
       LUMEN_FORMULATION_MAX_WORKERS     — threads available for timing out a call
 
+    And for fetching what a turn points at:
+
+      LUMEN_RETRIEVAL_BUDGET_SECONDS    — the whole wait a turn may spend searching
+      LUMEN_PASS_A_TIMEOUT_SECONDS      — how long the meaning-based search may take
+      LUMEN_PASS_B_TIMEOUT_SECONDS      — how long the anchor lookups may take
+      LUMEN_CONV_PASS_A_KEEP            — matches kept from the meaning-based search
+      LUMEN_CONV_PASS_A_OVERFETCH       — matches fetched before ranking
+      LUMEN_CONV_PASS_B_KEEP            — records kept per anchor
+      LUMEN_CONV_CANDIDATE_CAP          — most records handed on from one turn
+      LUMEN_SESSION_BUFFER_SIZE         — how much of today's thread is remembered
+      LUMEN_SESSION_BUFFER_IDLE_TURNS   — turns of silence before it is forgotten
+      LUMEN_SESSION_BOOST               — how much being part of today's thread counts
+      LUMEN_SESSION_BOOST_THRESHOLD     — how close it must be to still count
+      LUMEN_ANCHOR_BASE_SCORE           — what an exact anchor match is worth
+      LUMEN_RETRIEVAL_MAX_WORKERS       — threads available for the parallel searches
+
     The timeout is the number that matters most. It is deliberately shorter
     than any other model call in the system: this one runs on every single
     turn, and the person is waiting on it. Six hundred milliseconds is about
@@ -259,6 +275,12 @@ class QueryConfig:
 
     The turn window exists because some turns cannot be read alone. "I don't
     feel that anymore" says nothing without the sentence before it.
+
+    The three-second search budget is the other side of the same coin. It is
+    spent while the person is still reading the previous reply, which is what
+    makes it invisible rather than a pause — and it is a limit on the whole
+    search, not on each part of it, because that is what the person waiting
+    actually experiences.
     """
 
     formulation_timeout_seconds: float = _env_float(
@@ -270,6 +292,37 @@ class QueryConfig:
     era_vocabulary_limit: int = _env_int("LUMEN_ERA_VOCABULARY_LIMIT", 50)
     session_max_turns: int = _env_int("LUMEN_SESSION_MAX_TURNS", 200)
     formulation_max_workers: int = _env_int("LUMEN_FORMULATION_MAX_WORKERS", 4)
+
+    retrieval_budget_seconds: float = _env_float("LUMEN_RETRIEVAL_BUDGET_SECONDS", 3.0)
+    semantic_pass_timeout_seconds: float = _env_float(
+        "LUMEN_PASS_A_TIMEOUT_SECONDS", 2.0
+    )
+    structural_pass_timeout_seconds: float = _env_float(
+        "LUMEN_PASS_B_TIMEOUT_SECONDS", 0.5
+    )
+
+    # More matches are fetched than kept, for the reason the pipeline fetches
+    # extra: ranking happens after the search, and a weighty record can sit
+    # just below the cut on raw distance and belong above it once its weight
+    # counts.
+    conversational_pass_a_keep: int = _env_int("LUMEN_CONV_PASS_A_KEEP", 5)
+    conversational_pass_a_overfetch: int = _env_int("LUMEN_CONV_PASS_A_OVERFETCH", 20)
+    conversational_pass_b_keep: int = _env_int("LUMEN_CONV_PASS_B_KEEP", 5)
+    conversational_candidate_cap: int = _env_int("LUMEN_CONV_CANDIDATE_CAP", 12)
+
+    # Today's thread. Five records, forgotten after five turns of nobody
+    # coming back to them — long enough to carry a subject across a
+    # digression, short enough that this morning does not colour tonight.
+    session_buffer_size: int = _env_int("LUMEN_SESSION_BUFFER_SIZE", 5)
+    session_buffer_max_idle_turns: int = _env_int("LUMEN_SESSION_BUFFER_IDLE_TURNS", 5)
+    session_boost_multiplier: float = _env_float("LUMEN_SESSION_BOOST", 1.3)
+    session_boost_threshold: float = _env_float("LUMEN_SESSION_BOOST_THRESHOLD", 0.35)
+
+    # What an exact anchor match counts as when ordering a mixed list. It is
+    # a policy number, not a measurement — a record found because a name
+    # matched has no similarity score, and never gets given one.
+    anchor_base_score: float = _env_float("LUMEN_ANCHOR_BASE_SCORE", 0.6)
+    retrieval_max_workers: int = _env_int("LUMEN_RETRIEVAL_MAX_WORKERS", 4)
 
 
 @dataclass(frozen=True)

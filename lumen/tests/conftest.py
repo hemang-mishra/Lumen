@@ -1133,6 +1133,8 @@ def seed_pattern(graph_store):
         status: str = "ACTIVE",
         evidence_count: int = 3,
         era_tag: str | None = None,
+        domain: str = "EMOTIONAL",
+        signal: str = "STANDARD",
     ) -> str:
         graph_store.write_node(
             "PatternNode",
@@ -1144,8 +1146,8 @@ def seed_pattern(graph_store):
                 "last_reinforced_at": valid_from,
                 "pattern_name": name,
                 "pattern_description": description,
-                "domain": "EMOTIONAL",
-                "signal_strength": "STANDARD",
+                "domain": domain,
+                "signal_strength": signal,
                 "provenance": "USER_GENERATED",
                 "verification_status": "IMPLICIT",
                 "evidence_count": evidence_count,
@@ -1645,7 +1647,7 @@ def make_formulator():
     """
     from lumen.providers.fake import FakeLLMProvider
     from lumen.query.formulation import QueryFormulator
-    from lumen.query.formulation.deadline import DeadlineRunner
+    from lumen.query.deadline import DeadlineRunner
 
     built = []
     runner = DeadlineRunner(max_workers=2, name="test-formulate")
@@ -1664,4 +1666,204 @@ def make_formulator():
 
     for formulator in built:
         formulator.close()
+    runner.close()
+
+
+# ---------------------------------------------------------------------------
+# Live conversation — fetching a turn's history
+#
+# Tested against the same real Kuzu and real Qdrant the extraction-side
+# retrieval uses, for the same reason: every question these passes ask is a
+# query, and a stand-in answering from a dictionary would agree with whatever
+# it was told.
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def make_trigger():
+    """Build one checked reason to search."""
+    from lumen.schemas.query import RetrievalTrigger
+
+    def _make(
+        trigger_type,
+        *,
+        domain=None,
+        era=None,
+        person_node_ids=(),
+        keywords=("resistance",),
+    ):
+        return RetrievalTrigger(
+            trigger_type=trigger_type,
+            domain=domain,
+            era=era,
+            person_node_ids=tuple(person_node_ids),
+            keywords=tuple(keywords),
+        )
+
+    return _make
+
+
+@pytest.fixture
+def make_signal():
+    """Build the reading of a turn, as the searches receive it."""
+    from lumen.schemas.query import RetrievalSignal
+
+    def _make(
+        *triggers,
+        session_id: str = "tester_2026_08_16",
+        turn_index: int = 0,
+        unlocked=(),
+        suppressed: bool = False,
+    ) -> RetrievalSignal:
+        return RetrievalSignal(
+            session_id=session_id,
+            turn_index=turn_index,
+            retrieval_triggers=tuple(triggers),
+            unlocked_domains=tuple(unlocked),
+            suppressed_by_crisis=suppressed,
+        )
+
+    return _make
+
+
+@pytest.fixture
+def index_node(vector_store, embedder):
+    """
+    Put a record into the search index under a chosen text or vector.
+
+    Separate from the fixtures that write to the graph, because a record
+    that exists but was never indexed is a real state worth testing — it is
+    what an old graph looks like, and it is the case the continuity check
+    falls back to words for.
+    """
+
+    def _index(node_id: str, text: str = "", *, vector=None, node_type="ObservationNode"):
+        vector_store.upsert(
+            node_id,
+            vector if vector is not None else embedder.embed_text(text),
+            {"node_type": node_type, "status": "ACTIVE"},
+        )
+        return node_id
+
+    return _index
+
+
+@pytest.fixture
+def seed_person(graph_store):
+    """
+    Put a person into the graph under the identifier their name produces.
+
+    Derived rather than chosen, because that derivation is how reading a
+    turn recognises a name and how this half finds the record again. A test
+    that picked its own identifier would pass while the two halves disagreed.
+    """
+    from lumen.schemas.ids import person_node_id
+
+    def _seed(name: str = "Alex") -> str:
+        node_id = person_node_id(name)
+        graph_store.write_node(
+            "PersonEntityNode",
+            {
+                "node_id": node_id,
+                "canonical_name": name,
+                "first_mentioned_at": "2026-01-01T00:00:00Z",
+                "last_mentioned_at": "2026-06-11T00:00:00Z",
+                "relationship_to_user": "MENTOR",
+                "relationship_sentiment_trend": "STABLE",
+                "status": "ACTIVE",
+            },
+        )
+        return node_id
+
+    return _seed
+
+
+@pytest.fixture
+def seed_open_loop(graph_store):
+    """Put one unfinished question into the graph."""
+
+    def _seed(
+        node_id: str = "loop_old",
+        *,
+        description: str = "Is the resistance about leaving, or about being alone?",
+        status: str = "OPEN",
+    ) -> str:
+        graph_store.write_node(
+            "OpenLoopNode",
+            {
+                "node_id": node_id,
+                "created_at": "2026-06-01T00:00:00+00:00",
+                "valid_from": "2026-06-01T00:00:00+00:00",
+                "loop_description": description,
+                "loop_category": "UNRESOLVED_QUESTION",
+                "provenance": "USER_GENERATED",
+                "source_episode_id": "ep_old",
+                "resolution_status": status,
+                "last_referenced_at": "2026-06-01T00:00:00+00:00",
+            },
+        )
+        return node_id
+
+    return _seed
+
+
+@pytest.fixture
+def hyde_replies():
+    """
+    A scripted model that answers the invented-record request.
+
+    Keyed on the phrase unique to that instruction, so one script can serve
+    a test that also reads turns without either answer reaching the wrong
+    caller.
+    """
+
+    def _build(texts: list[str] | None = None, *, reply: str | None = None):
+        from lumen.providers.fake import FakeLLMProvider
+
+        if reply is None:
+            written = texts or ["an earlier entry about the same thing"]
+            reply = json.dumps(
+                {
+                    "hypotheticals": [
+                        {"index": position, "text": text}
+                        for position, text in enumerate(written, start=1)
+                    ]
+                }
+            )
+        return FakeLLMProvider({"ITEMS:": reply})
+
+    return _build
+
+
+@pytest.fixture
+def make_retriever(graph_store, vector_store, embedder):
+    """
+    Build a retriever over the real stores and a scripted model.
+
+    The thread pool is shared between everything one test builds, so a test
+    that makes several does not leave one behind for each.
+    """
+    from lumen.providers.fake import FakeLLMProvider
+    from lumen.query.deadline import DeadlineRunner
+    from lumen.query.retrieval import ConversationalRetriever
+
+    built = []
+    runner = DeadlineRunner(max_workers=3, name="test-retrieve")
+
+    def _make(*, llm=None, config=None, graph=None, vectors=None, embed=None):
+        retriever = ConversationalRetriever(
+            graph=graph or graph_store,
+            vectors=vectors or vector_store,
+            embedder=embed or embedder,
+            llm=llm or FakeLLMProvider([]),
+            config=config,
+            runner=runner,
+        )
+        built.append(retriever)
+        return retriever
+
+    yield _make
+
+    for retriever in built:
+        retriever.close()
     runner.close()

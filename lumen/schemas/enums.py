@@ -606,6 +606,49 @@ class FormulationPath(StrEnum):
     CALL_FAILED = "CALL_FAILED"
 
 
+class RetrievalPass(StrEnum):
+    """
+    Which of the three searches found a record during a live conversation.
+
+    Kept on every candidate because the three mean different things about
+    how much to trust it.
+
+    SEMANTIC   — it reads like what was just said.
+    STRUCTURAL — it is attached to a person, a period, or an unfinished
+                 question the turn named. It may read nothing like the turn
+                 at all, which is the entire reason this one exists.
+    CONTINUITY — it was already surfaced earlier today and still applies.
+    """
+
+    SEMANTIC = "SEMANTIC"
+    STRUCTURAL = "STRUCTURAL"
+    CONTINUITY = "CONTINUITY"
+
+
+class RetrievalOutcome(StrEnum):
+    """
+    Why a turn's search produced what it produced.
+
+    The distinction that matters is the last two. A search that ran and
+    found nothing means this person has no history on the subject; a search
+    that could not run means nobody knows. Both leave an empty list, and
+    treating the second as the first is how a system that remembers starts
+    quietly behaving as though it had never met anyone.
+
+    RETRIEVED   — the search ran and found something.
+    NOTHING     — the search ran and there was nothing to find.
+    NOT_NEEDED  — the turn gave no reason to search.
+    SUPPRESSED  — there were reasons, and the person is in acute distress.
+    UNAVAILABLE — the search could not be carried out.
+    """
+
+    RETRIEVED = "RETRIEVED"
+    NOTHING = "NOTHING"
+    NOT_NEEDED = "NOT_NEEDED"
+    SUPPRESSED = "SUPPRESSED"
+    UNAVAILABLE = "UNAVAILABLE"
+
+
 __all__ = [
     "SignalStrength",
     "Provenance",
@@ -646,4 +689,6 @@ __all__ = [
     "TriggerType",
     "EmotionalRegister",
     "FormulationPath",
+    "RetrievalPass",
+    "RetrievalOutcome",
 ]

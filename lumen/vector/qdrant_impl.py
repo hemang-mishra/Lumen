@@ -25,6 +25,19 @@ logger = logging.getLogger(__name__)
 IN_MEMORY = ":memory:"
 
 
+def _point_id(node_id: str) -> str:
+    """
+    The store's own identifier for a node.
+
+    Qdrant wants a UUID and Lumen names things like `pat_2026_06_11_001`, so
+    one is derived from the other. Derived rather than recorded, and always
+    the same way, which is what makes writing a node twice an update instead
+    of a duplicate — and what lets a vector be read back later knowing only
+    the node's real name.
+    """
+    return str(uuid.uuid5(uuid.NAMESPACE_OID, node_id))
+
+
 def _connection_for(location: str) -> dict[str, str]:
     """
     Work out what a location string was meant to say.
@@ -182,7 +195,7 @@ class QdrantVectorProvider(VectorProvider):
         Upsert a dense vector with its associated payload.
         Uses a deterministic UUID5 derived from node_id to ensure idempotent upserts.
         """
-        qdrant_id = str(uuid.uuid5(uuid.NAMESPACE_OID, node_id))
+        qdrant_id = _point_id(node_id)
 
         # Always store node_id in payload for reverse lookup
         payload["node_id"] = node_id
@@ -237,3 +250,38 @@ class QdrantVectorProvider(VectorProvider):
             for hit in search_result
             if hit.payload and "node_id" in hit.payload
         ]
+
+    def get_vectors(self, node_ids: list[str]) -> dict[str, list[float]]:
+        """
+        Read back the stored vector for each of these nodes.
+
+        Ids with nothing stored are left out of the answer rather than
+        answered with an empty list, so "never indexed" stays distinguishable
+        from "indexed". The node's real name is read back out of the payload
+        rather than reversed out of the point id, which cannot be done — the
+        derivation only runs one way.
+
+        What comes back is the *normalised* form of what was written. The
+        collection measures cosine distance, so Qdrant scales every vector to
+        unit length on the way in and there is no copy of the original. That
+        makes no difference to the only thing these are used for — comparing
+        directions, which is what cosine measures — but it does mean these
+        are not byte-for-byte what the embedder produced.
+        """
+        if not node_ids:
+            return {}
+
+        points = self.client.retrieve(
+            collection_name=self.collection_name,
+            ids=[_point_id(node_id) for node_id in node_ids],
+            with_vectors=True,
+            with_payload=True,
+        )
+
+        found: dict[str, list[float]] = {}
+        for point in points:
+            name = (point.payload or {}).get("node_id")
+            vector = point.vector
+            if name and isinstance(vector, list):
+                found[str(name)] = [float(value) for value in vector]
+        return found

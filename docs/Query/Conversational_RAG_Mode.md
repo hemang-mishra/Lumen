@@ -143,11 +143,49 @@ The formulation layer also classifies the user's current emotional register. Thi
 
 ## Stage 2: Three Parallel Retrieval Passes
 
+> **Correction to "parallel".** Passes A and B genuinely run side by side under one
+> shared wall-clock budget. Pass C cannot: its whole job is to measure today's already-surfaced
+> nodes against *this* turn, and the measurement it needs is the one Pass A has just computed.
+> Giving Pass C its own embedding call to measure the same sentence a second time would double
+> the cost of a turn to learn nothing. The shipped order is **A ∥ B, then C** — and C is
+> arithmetic on numbers already in memory, so it adds about a millisecond.
+
 ### Pass A — Semantic Retrieval
 HyDE expansion → Hybrid BM25 + Vector → Top 3–5 nodes. (Same as existing architecture.)
 
+One HyDE call covers every trigger on the turn, batched and aligned by index; a missing
+hypothetical falls back to the turn's own words rather than shifting the list up, because
+searching one trigger with another trigger's text returns confident wrong nodes. Sparse/BM25
+remains unimplemented — the provider logs a warning and searches dense-only, as it has since
+Goal 1.
+
+Two triggers narrow the search to particular node kinds, because they name experiences the
+graph records under specific types: `SOMATIC_MARKER` → `PHYSIOLOGICAL_CAPACITY_STATE` /
+`SUPPRESSED_EMOTION_SURFACING`; `IDENTITY_STATEMENT` → `BeliefNode` plus `BELIEF` /
+`META_BELIEF` / `IDENTITY_FUSION_STATE` observations. The rest search unrestricted.
+
 ### Pass B — Structural Retrieval
 Named-entity anchors + historical_era tags + high-sensitivity open nodes. (Defined in Architecture.md Stage 2.)
+
+Which anchors run is decided by the trigger, as a table rather than a chain of conditions:
+
+| Trigger | Anchors followed |
+|---|---|
+| `NAMED_PERSON` | everything mentioning them, plus the patterns and beliefs those notes became |
+| `HISTORICAL_ERA` | everything tagged with that era, in the graph's own spelling |
+| `OPEN_LOOP_MATCH` | the open-loop table |
+| `PROGRESS_CLAIM` | open loops **and** the current standing records in the trigger's domain |
+| `BELIEF_CHALLENGE` | the current beliefs in the trigger's domain |
+| `PATTERN_MENTION`, `SOMATIC_MARKER`, `IDENTITY_STATEMENT` | none — semantic answers them |
+
+**`PROGRESS_CLAIM` → "closure detection" is defined here for the first time.** The document
+named the behaviour without saying what it looks up. A claim that something has changed is a
+claim about a *specific* standing record, and the only way to judge it is to have that record
+and the questions left open beside it — so both are fetched.
+
+A trigger with no anchor half leaves this pass with nothing to run, which is recorded as *not
+having run* rather than as having run and found nothing. The distinction matters downstream:
+"the graph was asked and said nothing" and "the graph was never asked" are different facts.
 
 ### Pass C — Session Continuity Retrieval (NEW)
 
@@ -173,6 +211,21 @@ Pass C is unique to Conversational RAG Mode. It maintains a `SessionContextBuffe
 
 **Buffer management:** Max 5 nodes. Nodes not relevant for 5+ consecutive turns are evicted. Nodes with `extraction_signal_strength: CRITICAL` are never evicted mid-session.
 
+**Where the relevance number comes from.** Previously unstated, which made the `<20ms, always
+succeeds` budget unbuildable — a comparison needs something to compare. Each node caches its
+own stored vector when it enters the buffer (one index read per newly-admitted node), and each
+turn compares those against Pass A's query vector. That is arithmetic, hence the budget. When
+either side has no vector — Pass A could not run, or the node was written before the index
+existed — the comparison falls back to word overlap against the node's preview. Blunter, and
+used rather than skipped, because a conversation losing its thread is a worse failure than a
+slightly wrong relevance.
+
+**The deadlock the two rules produce together.** Five slots and "CRITICAL is never evicted"
+means a session can fill entirely with protected nodes and be unable to admit anything new.
+The shipped rule: protected entries are never removed, and a new node that cannot get a slot
+is still returned to the AI on this turn — it simply does not join the buffer. Nothing is
+lost; the buffer stops growing.
+
 ---
 
 ## Stage 3: Context Assembly
@@ -186,6 +239,15 @@ conv_score = cosine_similarity × signal_weight × recency_weight × session_rel
 ```
 
 Where `session_relevance_boost` = 1.3× if the node is already in the `SessionContextBuffer`.
+
+> **Split by layer, as the extraction-side formula was.** Retrieval (Goal 14) produces a
+> *provisional* ordering — `cosine × signal_weight × session_relevance_boost` — used only to
+> rank and cut its own candidate list. `recency_weight` is **not** in it: temporal decay is
+> Goal 19's, and inventing a decay curve early would mean building it twice. Final ranking and
+> the ≤400-token compression are Goal 15's. A node found by an anchor carries no cosine at all
+> — an exact name match is not a measurement — so it is ordered by a configured base value
+> (`LUMEN_ANCHOR_BASE_SCORE`) while its `similarity` field stays unset, so nothing downstream
+> can mistake a policy number for a measured one.
 
 ### Node Compression Templates
 
@@ -226,6 +288,25 @@ A `CRITICAL` signal-strength node in a sensitive domain can be injected only if 
 
 **Example:** When the user says *"a teenager trying to figure out what is going on"* — this is `CRITICAL_DOMAIN_OPENED` for `ADOLESCENT_TRAUMA`. From that point, `CRITICAL` signal-strength nodes linked to identity confusion and adolescent isolation are unlocked for injection. The unlock expires at session end and must be re-triggered in a future session.
 
+### Which domains are sensitive, and what about nodes that have none
+
+Two rules this section needed and did not state. Both are enforced at the retrieval boundary
+(Goal 14) rather than at injection, so a gated node never leaves the search at all.
+
+**The sensitive domains are four:** `SELF_CONCEPT`, `RELATIONAL`, `HEALTH`, `SPIRITUALITY`.
+`EMOTIONAL` is deliberately excluded — in a therapeutic conversation nearly everything is
+emotional, and gating that would gate the entire graph, which is useless rather than careful.
+
+**A `CRITICAL` node with no domain at all is treated as sensitive.** This is the common case,
+not an edge case: only the standing records (patterns, beliefs, lessons, principles) carry a
+domain, while individual observations carry none. Such a node stays locked until the user has
+opened *some* sensitive domain in the session. The safe reading of "we do not know what this
+is about" is caution, since by definition it is the heaviest material in the graph.
+
+Gated nodes are **named** on the retrieval result rather than silently dropped. A system that
+quietly withholds things is one nobody can debug, and "why did it not mention the obvious
+thing?" is a question somebody will eventually ask of a graph they know holds the answer.
+
 ---
 
 ## Stage 5: Injection Explicitness — Model-Discretion Rule
@@ -259,11 +340,19 @@ RAG retrieval is allowed to take up to **3 seconds** before the carry-forward po
 | Stage | Target | Notes |
 |---|---|---|
 | Query Formulation | **600ms hard deadline** (configurable) | Must complete before retrieval starts. See correction below. |
-| Pass A (Semantic) | <800ms | Can use full window if needed |
+| Pass A (Semantic) | <2s (see below) | Contains a model call |
 | Pass B (Structural) | <200ms (graph lookup, no embedding) | Faster — no vector math |
 | Pass C (Buffer) | <20ms (in-memory) | Always succeeds |
 | Assembly + Compression | <200ms | |
-| **Total wait window** | **≤3 seconds** |
+| **Total wait window** | **≤3 seconds** | Enforced as a shared wall clock, not per pass |
+
+> **Correction to Pass A's budget.** `<800ms` cannot hold: Pass A contains a HyDE model call,
+> which this same document prices at 300–800ms, *plus* an embedding call and an index search.
+> The shipped budget is 2s for Pass A within the unchanged 3s total
+> (`LUMEN_PASS_A_TIMEOUT_SECONDS`), and the 3s is enforced from outside as one shared deadline
+> across A and B — three seconds means three seconds to the person waiting, not three seconds
+> each. A pass that misses it is abandoned and reported as abandoned; the pass that finished
+> still answers.
 
 > **Correction to the formulation budget.** This document previously specified `<100ms` for the formulation call. That figure is not reachable: a real call to a hosted fast model takes 300–800ms end to end, so a 100ms budget would be missed on essentially every turn and the number would describe nothing. The shipped behaviour is a **configurable hard deadline, defaulting to 600ms** (`LUMEN_FORMULATION_TIMEOUT_SECONDS`), after which the call is abandoned and the turn proceeds with no retrieval. The measured latency is recorded on every `RetrievalSignal`, so the real distribution is observable rather than assumed.
 >

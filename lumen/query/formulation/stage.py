@@ -34,7 +34,7 @@ from lumen.providers.errors import ProviderError
 from lumen.providers.protocols import LLMProvider
 from lumen.query.formulation import safety, triage
 from lumen.query.formulation.contracts import ClassifierReply
-from lumen.query.formulation.deadline import DeadlineExceeded, DeadlineRunner
+from lumen.query.deadline import DeadlineExceeded, DeadlineRunner
 from lumen.query.formulation.grounding import (
     GroundingContext,
     clean_names,

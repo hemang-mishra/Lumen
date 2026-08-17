@@ -20,6 +20,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from lumen.graph.provider import EdgeRow, GraphSlice
 from lumen.graph.queries import node_type_of, tidy_edge, tidy_row
+from lumen.schemas.query import RetrievalSignal
 
 
 class NodeView(BaseModel):
@@ -303,6 +304,125 @@ class FormulationRequest(BaseModel):
     history: list[FormulationTurn] = Field(default_factory=list, max_length=20)
 
 
+class RetrievalRequest(FormulationRequest):
+    """
+    A turn to read, and then to actually go and fetch history for.
+
+    Everything `FormulationRequest` carries, plus one thing it deliberately
+    does not: a way to stay in the same conversation across calls.
+
+    Attributes:
+        session_key: Names a conversation to continue. Without it every
+            request is its own day and starts with nothing remembered, which
+            makes the continuity search impossible to see — it exists
+            precisely to notice that this turn and an earlier one are about
+            the same thing, and a conversation of length one has no earlier
+            one. With it, successive calls share a day's memory the way a
+            real conversation would.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    session_key: str | None = Field(default=None, min_length=1, max_length=120)
+
+
+class RetrievedNodeView(BaseModel):
+    """
+    One record fetched for a turn, as the outside sees it.
+
+    A trimmed view rather than the internal shape. What the search hands
+    around internally carries the whole record so the next stage can
+    compress it without reading the graph again; that is machinery, and
+    machinery does not belong on a web response.
+
+    Attributes:
+        node_id: Which record.
+        node_type: What kind.
+        preview: Its readable text, shortened.
+        found_by: Which of the three searches surfaced it.
+        trigger_type: Which reason led there.
+        similarity: How closely it matched, where that was measured.
+        signal_strength: How much it weighs.
+        domain: The area of life, where the record names one.
+        era_tag: The period of life, likewise.
+        anchor_type: Which kind of anchor led here, for structural finds.
+        anchor_value: The anchor itself.
+        boosted: True when today's conversation had already been round this
+            record once.
+        rank_score: Its provisional place in the order.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    node_id: str
+    node_type: str
+    preview: str
+    found_by: str
+    trigger_type: str | None = None
+    similarity: float | None = None
+    signal_strength: str
+    domain: str | None = None
+    era_tag: str | None = None
+    anchor_type: str | None = None
+    anchor_value: str | None = None
+    boosted: bool = False
+    rank_score: float
+
+
+class PassReportView(BaseModel):
+    """
+    What one of the three searches did.
+
+    Attributes:
+        which: Which search.
+        ran: False when it never got to start.
+        found: How many records it turned up.
+        kept: How many survived.
+        duration_ms: How long it took.
+        failure: A short word for what went wrong, or nothing.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    which: str
+    ran: bool
+    found: int
+    kept: int
+    duration_ms: int
+    failure: str | None = None
+
+
+class TurnContextView(BaseModel):
+    """
+    Everything decided and everything found for one sentence.
+
+    Both halves together, because they are only meaningful as a pair: the
+    records make no sense without the reasons that fetched them, and the
+    reasons are hard to judge without seeing what they actually returned.
+
+    Attributes:
+        signal: What reading the turn decided.
+        outcome: The short version of how the search went.
+        candidates: The records, best first.
+        passes: What each search did.
+        latency_ms: How long the search took.
+        within_budget: False when the deadline passed with work outstanding.
+        gated: Records held back as too sensitive to arrive uninvited.
+        buffered: What today's conversation is currently holding on to.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    signal: RetrievalSignal
+    outcome: str
+    candidates: list[RetrievedNodeView] = Field(default_factory=list)
+    passes: list[PassReportView] = Field(default_factory=list)
+    latency_ms: int
+    within_budget: bool
+    gated: list[str] = Field(default_factory=list)
+    buffered: list[str] = Field(default_factory=list)
+
+
 class ConversationReceipt(BaseModel):
     """
     What happened to one conversation from an uploaded file.
@@ -572,6 +692,10 @@ __all__ = [
     "HealthView",
     "FormulationTurn",
     "FormulationRequest",
+    "RetrievalRequest",
+    "RetrievedNodeView",
+    "PassReportView",
+    "TurnContextView",
     "ConversationReceipt",
     "RejectionView",
     "UploadReceipt",

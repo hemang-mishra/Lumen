@@ -210,6 +210,7 @@ The personal version runs all services as Python modules in a single process. Th
 | **HITL Service** | Review queue management, one-tap decisions | Module in BFF | Separate FastAPI service |
 | **Scheduler** | Trigger Macroextraction jobs on schedule | APScheduler in BFF | Kubernetes CronJob |
 | **Formulation Service** | Query Formulation Layer (Conversational RAG) — classifies turn, emits RetrievalSignal | `lumen/query/formulation/`, a synchronous call in the Query Service | Sidecar in Query Service |
+| **Conversational Retrieval** | Passes A/B/C for a live turn under one 3s budget, plus the sensitivity gate | `lumen/query/retrieval/`, a synchronous call in the Query Service | Sidecar in Query Service |
 
 **Note on `lumen/query/`.** The query layer is a top-level package, not a member of `lumen/pipeline/`. Two rules that protect the pipeline do not apply to it and would read as violations if it lived there: it reads and never writes, and it holds per-conversation state for the length of a session. The pipeline's stages may do neither.
 
@@ -466,11 +467,19 @@ User turn arrives (WebSocket message)
         │
         ├─ NO_TRIGGER → pass to AI immediately (no wait)
         │
-        └─ TRIGGER → dispatch retrieval (async, 3s budget)
+        └─ TRIGGER → ConversationalRetriever.retrieve(signal, session)
+               │            one shared 3s wall clock, enforced from outside
                │
-               ├─ PassA: qdrant.hybrid_search(hyde_expansion)
-               ├─ PassB: graph.anchor_lookup(named_entities, historical_era)
-               └─ PassC: session_buffer.get_relevant(session_context_buffer)
+               ├─ PassA ─┐ qdrant.hybrid_search(hyde_expansion), ≤2s
+               ├─ PassB ─┘ graph anchors, chosen per trigger — run side by side
+               │
+               └─ PassC: session buffer, after A, on A's query vector
+                         │
+                         ▼
+                  sensitivity gate: CRITICAL nodes in unopened domains withheld
+                         │
+                         ▼
+                  merge: dedupe (anchor copy wins), rank, cut
                          │
                          ▼
                   ContextAssembler.rank_and_compress(candidates, max_tokens=400)
@@ -484,7 +493,11 @@ User turn arrives (WebSocket message)
 
 The `SessionContextBuffer` lives in memory per-session (Zustand on frontend, Python dict in Query Service). It is NOT persisted to the graph — it is ephemeral per calendar day.
 
-That ephemeral day-state is `lumen.query.session.ChatSession`, held by a `SessionRegistry` keyed on `(user_id, session_label)`. Asking for a session on a date the held one does not cover replaces it — that is the entire midnight rule, with no timer and no sweep. It currently holds the recent turns and the sensitive domains the user has opened themselves; Goal 14 adds the retrieval buffer to the same object. Its identity `(user_id, event_date, session_label)` matches the operational `session_buffers` key, so a live conversation and the buffer that will later be ingested are recognisably the same thing.
+That ephemeral day-state is `lumen.query.session.ChatSession`, held by a `SessionRegistry` keyed on `(user_id, session_label)`. Asking for a session on a date the held one does not cover replaces it — that is the entire midnight rule, with no timer and no sweep. It holds the recent turns, the sensitive domains the user has opened themselves, and (since Goal 14) the `SessionContextBuffer` itself. Its identity `(user_id, event_date, session_label)` matches the operational `session_buffers` key, so a live conversation and the buffer that will later be ingested are recognisably the same thing.
+
+**Passes A and B are parallel; Pass C is not, and cannot be.** Pass C measures the buffer against the current turn using the query vector Pass A has just computed. Running it alongside A would mean either measuring against nothing or paying for a second embedding of the same sentence. It runs afterwards, on numbers already in memory, in about a millisecond. Each buffered node caches its own stored vector on admission (`VectorProvider.get_vectors`, added in Goal 14), so no per-turn search is needed; where a vector is missing the comparison falls back to word overlap.
+
+**The retrieval result reports each pass separately**, including whether it ran at all. A pass that failed, a pass that found nothing, and a pass with nothing to look up are three different facts, and the layer above answers all three identically unless it is told which one happened.
 
 The formulation model is resolved through the `LIGHTWEIGHT` role but built with `max_attempts=1`. Every other call in the system retries with backoff, which is correct for work nobody is waiting on; this one has a sub-second deadline that a retry has already missed.
 

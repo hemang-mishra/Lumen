@@ -217,14 +217,19 @@ class TestTheApiCannotWrite:
         }
         assert used == {"GET"}
 
-    def test_every_post_is_one_of_the_three_that_have_earned_it(self, api_client):
-        # An allow-list rather than a count, so that adding a fourth is a
+    def test_every_post_is_one_of_the_four_that_have_earned_it(self, api_client):
+        # An allow-list rather than a count, so that adding a fifth is a
         # deliberate act with a reason written next to it.
         #
         #   /query/formulate — changes nothing, but what it is given is
         #     somebody's sentence about their own life. A GET would put that
         #     in the URL, and from there into every access log it passes
         #     through.
+        #
+        #   /query/retrieve — the same sentence, and the same reason. It
+        #     reads the graph and the search index and writes to neither;
+        #     the only thing it changes is one in-memory conversation's
+        #     memory of itself, which is gone at midnight and never stored.
         #
         #   /ingest/file, /ingest/json — the one way in. Both hand what they
         #     receive to the importer and put an identifier on a queue;
@@ -237,7 +242,12 @@ class TestTheApiCannotWrite:
             for path, operations in spec["paths"].items()
             if "post" in operations
         }
-        assert posts == {"/query/formulate", "/ingest/file", "/ingest/json"}
+        assert posts == {
+            "/query/formulate",
+            "/query/retrieve",
+            "/ingest/file",
+            "/ingest/json",
+        }
 
     def test_the_upload_routes_cannot_reach_the_graph_themselves(self):
         # The importer is the only thing in the process that writes, and the
