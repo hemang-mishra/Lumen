@@ -358,6 +358,27 @@ def test_log_dir(tmp_path_factory):
 
 
 @pytest.fixture(autouse=True)
+def the_real_databases_are_out_of_reach(tmp_path_factory, monkeypatch):
+    """
+    Point every default at somewhere disposable.
+
+    A test that builds an application without naming a configuration gets the
+    shipped defaults, and the shipped defaults are the databases a running
+    Lumen uses. One such test was quietly creating a Kuzu database in the
+    repository root on every run and opening the real operational store — and
+    the day the schema moved on, that leftover database failed the suite in a
+    test that had nothing to do with it.
+
+    Anything that genuinely cares about a path still passes its own; this
+    only decides where "unspecified" points.
+    """
+    root = tmp_path_factory.mktemp("lumen-test-stores")
+    monkeypatch.setenv("LUMEN_GRAPH_DB_PATH", str(root / "graph.db"))
+    monkeypatch.setenv("LUMEN_OPS_DB_URL", f"sqlite:///{root / 'ops.db'}")
+    monkeypatch.setenv("LUMEN_VECTOR_LOCATION", ":memory:")
+
+
+@pytest.fixture(autouse=True)
 def logging_stays_inside_the_test(test_log_dir, monkeypatch):
     """
     Keep the suite out of the log file the real service writes.

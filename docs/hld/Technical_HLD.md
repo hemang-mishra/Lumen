@@ -210,9 +210,12 @@ The personal version runs all services as Python modules in a single process. Th
 | **HITL Service** | Review queue management, one-tap decisions | Module in BFF | Separate FastAPI service |
 | **Scheduler** | Trigger Macroextraction jobs on schedule | APScheduler in BFF | Kubernetes CronJob |
 | **Formulation Service** | Query Formulation Layer (Conversational RAG) — classifies turn, emits RetrievalSignal | `lumen/query/formulation/`, a synchronous call in the Query Service | Sidecar in Query Service |
-| **Conversational Retrieval** | Passes A/B/C for a live turn under one 3s budget, plus the sensitivity gate | `lumen/query/retrieval/`, a synchronous call in the Query Service | Sidecar in Query Service |
+| **Conversational Retrieval** | Passes A/B/C for a live turn under one shared budget, plus the sensitivity gate | `lumen/query/retrieval/`, a synchronous call in the Query Service | Sidecar in Query Service |
+| **Context Assembly & Prompting** | Compresses retrieved nodes into a briefing, builds the system prompt, keeps the conversation's own memory | `lumen/query/{assembly,prompting,memory}/`, `lumen/query/conversation.py` | Module in Query Service |
 
-**Note on `lumen/query/`.** The query layer is a top-level package, not a member of `lumen/pipeline/`. Two rules that protect the pipeline do not apply to it and would read as violations if it lived there: it reads and never writes, and it holds per-conversation state for the length of a session. The pipeline's stages may do neither.
+**Note on `lumen/query/`.** The query layer is a top-level package, not a member of `lumen/pipeline/`. Two rules that protect the pipeline do not apply to it and would read as violations if it lived there: it never writes to the graph, and it holds per-conversation state for the length of a session. The pipeline's stages may do neither.
+
+Since Goal 15 it does write *conversations* — the turns themselves and a running summary — into the operational store. That is not a graph write and does not weaken the guarantee that matters: nothing on this side can create, change or retire a record of somebody's history.
 
 ### 3.2 Personal Project Topology
 
@@ -482,10 +485,13 @@ User turn arrives (WebSocket message)
                   merge: dedupe (anchor copy wins), rank, cut
                          │
                          ▼
-                  ContextAssembler.rank_and_compress(candidates, max_tokens=400)
-                         │
+                  ContextAssembler.assemble(bundle, signal)
+                         │   allowance set by register: 0 / 400 / 800 / 1500 tokens
+                         │   repeats collapsed, no more than 3 of any one kind
                          ▼
-                  SystemPromptPatcher.inject(ai_context, compressed_context)
+                  PromptComposer.compose(...) → ChatPrompt
+                         │   persona + briefing + rolling summary + recent turns
+                         │   a different, shorter instruction entirely in CRISIS
                          │
                          ▼
                   AI generates response (streaming)
@@ -498,6 +504,20 @@ That ephemeral day-state is `lumen.query.session.ChatSession`, held by a `Sessio
 **Passes A and B are parallel; Pass C is not, and cannot be.** Pass C measures the buffer against the current turn using the query vector Pass A has just computed. Running it alongside A would mean either measuring against nothing or paying for a second embedding of the same sentence. It runs afterwards, on numbers already in memory, in about a millisecond. Each buffered node caches its own stored vector on admission (`VectorProvider.get_vectors`, added in Goal 14), so no per-turn search is needed; where a vector is missing the comparison falls back to word overlap.
 
 **The retrieval result reports each pass separately**, including whether it ran at all. A pass that failed, a pass that found nothing, and a pass with nothing to look up are three different facts, and the layer above answers all three identically unless it is told which one happened.
+
+### 6.1 What the assistant is actually sent
+
+`ChatPrompt` is the single object every earlier stage feeds: the system instruction, the recent turns, and the briefing that went into the instruction with a record of what was cut. It is a pure function of its inputs, which is what makes `POST /query/prompt` able to print exactly what the model would receive before any chat surface exists.
+
+The instruction has a fixed order — identity, how to be, the briefing and how to use it, where the conversation has got to, safety — and empty sections are omitted rather than left as headings. In `CRISIS` the whole instruction is replaced by a shorter one; withholding the history while still asking for curiosity and pattern-noticing would be half a decision.
+
+### 6.2 Conversation storage and memory
+
+**The query layer now writes, and the distinction matters.** It never writes to the graph — that guarantee is unchanged and is what `ReadOnlyGraph` enforces by type. What it writes is the conversation itself, into the same `session_buffers` the extraction pipeline consumes. A chat held anywhere else would be a chat that never becomes history.
+
+Messages carry `parent_message_id` and the buffer carries `active_message_id`, so a conversation is a tree and the readable thread is one path through it. Editing writes a sibling and moves the pointer; nothing is destroyed. `build_decay_event` follows the active thread, so an abandoned branch never becomes graph history.
+
+Memory is the recent turns verbatim plus a `rolling_summary` stored on the buffer, refreshed every few turns by one cheap call made *after* the reply goes out. Each refresh folds the previous summary plus what has been said since, so a three-hour conversation costs what a ten-minute one does.
 
 The formulation model is resolved through the `LIGHTWEIGHT` role but built with `max_attempts=1`. Every other call in the system retries with backoff, which is correct for work nobody is waiting on; this one has a sub-second deadline that a retry has already missed.
 

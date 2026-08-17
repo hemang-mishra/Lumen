@@ -47,7 +47,15 @@ class OperationalRecord(BaseModel):
 
 
 class BufferMessageRecord(OperationalRecord):
-    """One message in a buffer."""
+    """
+    One message in a buffer.
+
+    `parent_message_id` is what this message replies to. It is normally the
+    message before it, and it is something else exactly once: when somebody
+    edits an earlier message, the rewrite shares the original's parent and
+    the two become siblings. Reading a conversation follows these links
+    rather than the arrival numbers.
+    """
 
     message_id: str = Field(min_length=1)
     session_id: str = Field(min_length=1)
@@ -58,10 +66,19 @@ class BufferMessageRecord(OperationalRecord):
     event_date: date
     dialogue_act: DialogueAct | None = None
     co_created_marker: bool = False
+    parent_message_id: str | None = None
 
 
 class SessionBufferRecord(OperationalRecord):
-    """A conversation being collected, without its messages."""
+    """
+    A conversation being collected, without its messages.
+
+    Three fields exist for the live-chat side of it. The active message names
+    the end of the thread the person is actually in, which is the only way to
+    tell a branch they kept from one they moved away from. The summary and
+    the point it was written up to are how a long conversation stays
+    coherent without re-reading every turn.
+    """
 
     session_id: str = Field(min_length=1)
     user_id: str = Field(min_length=1)
@@ -74,6 +91,9 @@ class SessionBufferRecord(OperationalRecord):
     last_activity_at: datetime | None = None
     decayed_at: datetime | None = None
     ingested_at: datetime | None = None
+    active_message_id: str | None = None
+    rolling_summary: str | None = None
+    summary_through_seq: int = Field(default=0, ge=0)
 
 
 class StageMetrics(OperationalRecord):

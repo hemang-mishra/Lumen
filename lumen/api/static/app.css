@@ -253,6 +253,19 @@ pre {
 .record { border-top: 1px solid var(--line); padding: 12px 0; }
 .record:first-of-type { border-top: none; padding-top: 4px; }
 
+/* What became of one finding, sitting with the finding itself. */
+.fate {
+  display: flex;
+  gap: 10px;
+  align-items: baseline;
+  flex-wrap: wrap;
+  margin: 6px 0;
+  padding-left: 10px;
+  border-left: 2px solid var(--line);
+  font-size: 14px;
+}
+.fate .said { display: inline; max-width: 60ch; }
+
 /* ---- chat ----------------------------------------------------------- */
 
 .turn { padding: 10px 12px; border-radius: 6px; margin-bottom: 8px; max-width: 80%; }

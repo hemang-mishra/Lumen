@@ -230,7 +230,33 @@ lost; the buffer stops growing.
 
 ## Stage 3: Context Assembly
 
-Candidates from Passes A, B, C are merged and ranked. The final injection block has a hard cap of **400 tokens**. This is non-negotiable.
+Candidates from Passes A, B, C are merged and ranked.
+
+> **The 400-token cap is replaced, per explicit user decision.** It was chosen when the
+> binding constraint was a three-second wait; that constraint has been lifted (5–10 seconds
+> before a considered reply is acceptable, and recall matters more), and 400 tokens throws
+> away most of what retrieval worked to find. What ships instead is an allowance set by how
+> the person sounds:
+>
+> | Register | Tokens | Records | Quotes | Kinds |
+> |---|---|---|---|---|
+> | `CRISIS` | 0 | 0 | — | none at all |
+> | `VULNERABLE` | ~400 | 2 | no | settled records only — patterns, beliefs, lessons, principles |
+> | `STABLE` | ~800 | 4 | yes | any |
+> | `REFLECTIVE` | ~1500 | 6 | yes | any |
+>
+> The reason for varying it is not cost. A wall of history in front of a light question
+> makes the answer worse — the assistant reaches for connections nobody asked about instead
+> of answering what was said. Configurable via `LUMEN_CONTEXT_TOKENS_*` and
+> `LUMEN_CONTEXT_RECORDS_*`; there is deliberately **no** crisis setting, so that a clinical
+> decision cannot become a configuration mistake.
+>
+> Two further rules cut before the budget does. Records whose text overlaps an
+> already-chosen one by ≥0.8 are dropped as repeats — a strong theme otherwise fills the
+> whole allowance with variations on itself — and no more than three records of any one kind
+> get through, because three patterns and a belief is a more useful briefing than six
+> patterns. Everything cut is recorded with the rule that cut it, since a briefing that
+> disappoints is usually explained by what is missing.
 
 ### Ranking Formula (Conversational Mode)
 
@@ -253,6 +279,19 @@ Where `session_relevance_boost` = 1.3× if the node is already in the `SessionCo
 
 Nodes are not injected raw. Each is compressed to a 1–2 sentence therapeutic briefing.
 
+Three rules run through the shipped templates. **Dates are said the way people say them** —
+"yesterday", "three weeks ago", "in March" — because a timestamp in a briefing is noise the
+assistant has to translate before it can use it. **Quotes are dropped when the register is
+`VULNERABLE`**: hearing your own sentence repeated back during a bad moment lands as being
+studied rather than heard. And **a node of an unfamiliar kind still becomes a sentence**
+through a plain fallback, because losing a relevant piece of somebody's history to a missing
+row in a table would be the worse failure.
+
+A node's own capitalisation is left alone. Lowering the first letter reads slightly more
+like prose and turns "Alex called about it" into "alex called about it"; there is no
+reliable way to tell a name from an ordinary word at the start of a line, and names are
+exactly what a briefing about somebody's relationships must not mangle.
+
 | Node Type | Template |
 |---|---|
 | `PatternNode` | *"Pattern: [label]. Appeared [N] times. Typical trigger: [trigger]. Typical outcome: [outcome]."* |
@@ -261,6 +300,19 @@ Nodes are not injected raw. Each is compressed to a 1–2 sentence therapeutic b
 | `OpenLoopNode` | *"Unresolved question from [date]: '[question]'."* |
 | `EpisodeNode` (causal chain) | *"On [date]: [TRIGGER] → [INTERNAL_STATE] → [ACTION] → [OUTCOME]."* |
 | `META_BELIEF` | *"Core self-model: '[content]'. [Active/Superseded]."* |
+
+### The system prompt around it
+
+The block does not stand alone. It is one section of an instruction with a fixed order —
+who the assistant is, how to be with them, the briefing and how to use it, where the
+conversation has got to, and what to do if they are in trouble. Sections with nothing in
+them are left out entirely rather than included as empty headings: "what you know about
+them" followed by silence reads as a claim that there is nothing to know.
+
+**In `CRISIS` the whole instruction is replaced**, not merely emptied of history. The
+ordinary one asks for curiosity and pattern-noticing, and that is the wrong thing to ask for
+at that moment even with no notes attached. The crisis form asks for presence, forbids
+analysis, and points at real help.
 
 ### Injection Format
 
@@ -340,6 +392,8 @@ RAG retrieval is allowed to take up to **3 seconds** before the carry-forward po
 | Stage | Target | Notes |
 |---|---|---|
 | Query Formulation | **600ms hard deadline** (configurable) | Must complete before retrieval starts. See correction below. |
+| Context assembly + prompt | <50ms | Templates and arithmetic; no model call |
+| Conversation summary refresh | ~1 call per 8 turns | **After** the reply, never on the critical path |
 | Pass A (Semantic) | <2s (see below) | Contains a model call |
 | Pass B (Structural) | <200ms (graph lookup, no embedding) | Faster — no vector math |
 | Pass C (Buffer) | <20ms (in-memory) | Always succeeds |
@@ -370,10 +424,52 @@ Context is **never discarded**. There are two outcomes:
 Carried-forward context is tagged `retrieval_source: DEFERRED` so the AI knows it is slightly stale relative to the current conversation state. Deferred context is injected at a lower priority rank than fresh retrieval (0.9× conv_score).
 
 > **Why 3 seconds?** The therapeutic conversational rhythm is preserved — the user is reading the previous AI response during this window. A 3-second retrieval window that runs in parallel with the user's reading time is effectively invisible. 5–10 seconds would exceed reading time and produce a felt pause.
+>
+> **Superseded, per explicit user decision.** The window is now **8 seconds**
+> (`LUMEN_RETRIEVAL_BUDGET_SECONDS`, with Pass A at 6s). A brief pause before a considered
+> reply is normal in this kind of conversation and reads as thought rather than lag; an
+> answer that missed the one relevant thing does not read as anything at all. Recall is
+> worth more here than the last few hundred milliseconds, and the budget is still enforced
+> as one shared wall clock so the pause has a ceiling.
 
 ---
 
 ## Session Lifecycle
+
+### Conversations are stored, and editing branches
+
+A live chat is written into the same `session_buffers` the extraction pipeline already
+reads — the `NATIVE_CHAT` source has existed since Goal 3, and the live session's identity
+`(user_id, event_date, session_label)` was built to match. That is what makes today's
+conversation become tomorrow's graph with nothing to copy across. Note that the *identity*
+matches while the *identifier* does not: the store names a conversation itself, and only
+that name finds it again.
+
+Messages carry a `parent_message_id`, so a conversation is a tree and the visible thread is
+one path through it. Editing a message writes a sibling of the original and moves the
+buffer's `active_message_id`; the original and everything that followed stay stored and
+readable. Nothing anybody said is ever destroyed — the same instinct as the graph's
+append-only rule.
+
+**The pipeline extracts the active thread only.** A message that was edited away was said,
+but it is not what the person settled on, and letting abandoned branches become permanent
+history would record arguments they took back as things they believe.
+
+### Conversation memory: the recent turns, and a summary of the rest
+
+The `SessionContextBuffer` above is about *retrieved nodes*. This is the separate question
+of the conversation itself staying coherent after an hour.
+
+The last `LUMEN_CHAT_RECENT_TURNS` (default 12) turns are sent word for word. Everything
+older is folded into a running summary stored on the buffer (`rolling_summary`,
+`summary_through_seq`), refreshed once every `LUMEN_CHAT_SUMMARY_EVERY` (default 8) turns by
+one cheap model call. Each refresh folds *the previous summary plus the turns since it*,
+which is what keeps a long conversation costing the same as a short one.
+
+Two details matter. The refresh happens **after** a reply has gone out, never while somebody
+is waiting. And the summary is sent only when there is conversation it covers that the
+recent turns do not — otherwise the assistant reads the same stretch twice in two different
+voices.
 
 ### Session = Calendar Day
 

@@ -22,10 +22,10 @@
   <section>
     <h2>What a sentence would look up</h2>
     <div class="notice warn">
-      This is not the conversation layer. It reads a sentence, goes and fetches
-      what that sentence points at, and shows both — but it writes no reply.
-      Assembling the fetched records into a briefing is still to be built, so a
-      reply here would be a mock-up rather than the thing itself.
+      This is not the conversation layer. It reads a sentence, fetches what that
+      sentence points at, and shows exactly what the assistant would be sent
+      because of it — but it writes no reply. Generating one is the next piece
+      of work, and a mock-up here would be the least useful thing on the page.
     </div>
     <p class="lede">
       Everything this layer decides is invisible by design: it happens between
@@ -42,7 +42,7 @@
       <div class="row" style="margin-top:8px; justify-content:flex-end">
         <label class="dim" style="margin-right:auto">
           <input type="checkbox" id="fetch" checked>
-          fetch what it points at
+          fetch what it points at, and show the prompt
         </label>
         <button id="clear">Start over</button>
         <button id="send">Read it</button>
@@ -108,6 +108,17 @@ async function read() {
       });
       thread.append(reading(context.signal));
       thread.append(fetched(context));
+
+      // The same turn again, one stage further on. Two calls rather than one
+      // because they answer different questions — whether the right records
+      // were found, and whether they became a briefing worth reading — and
+      // seeing them apart is the point of the page.
+      const prompt = await api("/query/prompt", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ text, session_key: sessionKey + "-prompt" }),
+      });
+      thread.append(briefed(prompt));
     } else {
       const signal = await api("/query/formulate", {
         method: "POST",
@@ -226,6 +237,51 @@ function fetched(context) {
       : null,
 
     foldout("Everything it fetched", context),
+  );
+}
+
+/** What the assistant would actually be sent. */
+function briefed(prompt) {
+  const lines = prompt.briefing || [];
+
+  return el("div", { class: "turn sys" },
+    el("div", { class: "stage-head" },
+      el("span", { class: "name" }, "Would be sent"),
+      el("span", { class: "tag queued" }, prompt.emotional_register),
+      el("span", { class: "dim" },
+        `${prompt.briefing_tokens}/${prompt.token_budget} tokens of history`),
+      el("span", { class: "faint" }, `${prompt.total_tokens} in total`),
+      prompt.suppressed
+        ? el("span", { class: "tag dup" }, "history withheld")
+        : null,
+    ),
+
+    // The briefing is the part worth reading by eye. No test can say whether
+    // a sentence is a fair summary of the record behind it; a person can.
+    lines.length
+      ? el("div", { style: "margin-top:10px" },
+          lines.map((line) =>
+            el("div", { class: "row", style: "margin-bottom:6px" },
+              el("span", {}, line.text),
+              el("span", { class: "faint" }, ` — ${line.node_id}`),
+            )
+          ))
+      : el("div", { class: "faint", style: "margin-top:8px" },
+          prompt.suppressed
+            ? "Nothing was offered: this turn reads as distress."
+            : "No history reached the assistant for this turn."),
+
+    (prompt.dropped || []).length
+      ? el("div", { class: "dim", style: "margin-top:8px" },
+          "Cut: " + prompt.dropped.map((d) => `${d.node_id} (${d.reason})`).join(", "))
+      : null,
+
+    prompt.summary
+      ? el("div", { class: "dim", style: "margin-top:8px" },
+          "So far: " + prompt.summary)
+      : null,
+
+    foldout("The instructions in full", prompt.system),
   );
 }
 </script>

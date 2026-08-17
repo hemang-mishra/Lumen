@@ -696,10 +696,43 @@ This document outlines the systematic, stage-by-stage implementation plan for th
     `lumen/query/`, `lumen/graph/rows.py` and `lumen/api/`.
   - *Plan:* [`implementation/Goal_14_Plan.md`](file:///Users/hemangmishra/Projects/Lumen/implementation/Goal_14_Plan.md)
 
-- [ ] **Goal 15: Context Assembly & Pruning**
-  - Merge candidates from all passes, apply retrieval score formula (cosine × signal_weight × recency_weight).
-  - Compress to ≤400 token context block.
-  - *Test:* Verify assembler respects token budget and applies temporal decay correctly.
+- [x] **Goal 15: Context Assembly, the Voice, and Conversation Memory** ✅
+  - Implemented `lumen/query/assembly/` (the briefing), `lumen/query/prompting/` (the voice
+    and `PromptComposer`), `lumen/query/memory/` (the conversation's own memory) and
+    `lumen/query/conversation.py` (holding a chat). Output: **`ChatPrompt`** — exactly what
+    the assistant would be sent, as one inspectable object.
+  - **The ≤400-token cap is replaced by an allowance that fits the moment** (per explicit
+    user decision): nothing in crisis, ~400 tokens and no quotes when raw, ~800 ordinary,
+    ~1500 when thinking something through. Not a cost decision — a wall of history in front
+    of a light question makes the answer worse.
+  - **Retrieval's budget rises from 3s to 8s** (per explicit user decision). A brief pause
+    before a considered reply reads as thought; an answer that missed the one relevant thing
+    reads as nothing.
+  - **A chat is written into the buffer the pipeline already reads.** `NATIVE_CHAT` has been
+    a valid source since Goal 3 and the live session's identity was built to match, so
+    following it makes today's conversation become tomorrow's graph with nothing to copy
+    across.
+  - **Editing branches; nothing said is destroyed.** Messages carry a parent, the buffer
+    names the live end, and an edit writes a sibling — the graph's append-only instinct
+    applied to conversation. **The pipeline extracts the active thread only**, because a
+    message somebody took back is not what they settled on.
+  - **Memory is the recent turns verbatim plus a stored rolling summary**, refreshed every
+    few turns by one cheap call made *after* a reply goes out. Each refresh folds the
+    previous summary plus what has been said since, so a three-hour chat costs what a
+    ten-minute one does.
+  - **In crisis the instructions change, not just the context.** Withholding the history
+    while still asking for curiosity and pattern-noticing would be half a decision.
+  - *Amends Goal 13:* the query layer now writes — conversations, never the graph. Stated in
+    the package docstring and the HLD rather than glossed.
+  - *Bug caught by a test:* the briefing lowercased first words and turned "Alex called
+    about it" into "alex called about it". Records keep their own capitalisation now — names
+    are the one thing a briefing about somebody's relationships must not mangle.
+  - *Docs amended:* `Conversational_RAG_Mode.md` (the allowance table, the template rules,
+    the crisis prompt switch, conversation storage and branching, chat memory, and the
+    superseded 3-second window), `Technical_HLD.md` §3.1 and §6.
+  - *Result:* 3433 tests passing (3213 from Goals 1–14 + 220 new), **100% coverage** on
+    `lumen/query/` and `lumen/operational/`.
+  - *Plan:* [`implementation/Goal_15_Plan.md`](file:///Users/hemangmishra/Projects/Lumen/implementation/Goal_15_Plan.md)
 
 - [ ] **Goal 16: Conversational RAG End-to-End Simulation**
   - Implement `lumen/api/routes/chat.py` with streaming WebSocket support.

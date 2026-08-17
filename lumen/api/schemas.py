@@ -194,6 +194,67 @@ class DecisionHistoryView(BaseModel):
     decisions: list[NodeView] = Field(default_factory=list)
 
 
+class DecisionOutcomeView(BaseModel):
+    """
+    What became of one finding when it met the rest of the history.
+
+    The step that matters most and shows least. Everything up to here is
+    reading; this is the point where a thing somebody noticed on a Tuesday
+    either becomes a lasting belief, joins a pattern they have had for years,
+    or is held back for them to look at. Without it, the graph reports what
+    was found and never what was made of it.
+
+    Attributes:
+        source_node_id: The finding this happened to.
+        action: What was decided — MERGE, BRANCH, REINFORCE, EVOLVE and the
+            rest.
+        target_node_id: The record it was *compared against*, if there was
+            one. Not the same as what it became: a finding branches when
+            nothing already said it, and the comparison that reached that
+            answer is still worth showing.
+        target_type: What kind of record that is, so "the same as a belief
+            you already held" can be said rather than an identifier shown.
+        target_preview: What that record actually says.
+        became_node_id: The lasting record this finding turned into, when it
+            turned into one. This is the question people actually arrive
+            with — "did this become a belief?" — and it is reached by the
+            link the decision drew, not by the comparison it made.
+        became_type: What kind of record that is.
+        became_preview: What it says.
+        edge_type_created: The link the decision drew.
+        confidence: How sure the model was.
+        runner_up_action: The answer it nearly gave instead.
+        runner_up_confidence: How sure it was of that one.
+        status: Whether the decision still stands or was rolled back.
+        waiting_for_a_person: True when it was held back rather than acted
+            on. A decision recorded but not applied looks exactly like one
+            that was applied unless this is said out loud.
+        model_used: Which model decided.
+        decided_at: When.
+        decision_id: The note itself, for anything that wants to undo it.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    source_node_id: str = Field(min_length=1)
+    action: str = ""
+    target_node_id: str | None = None
+    target_type: str | None = None
+    target_preview: str | None = None
+    became_node_id: str | None = None
+    became_type: str | None = None
+    became_preview: str | None = None
+    edge_type_created: str | None = None
+    confidence: float | None = None
+    runner_up_action: str | None = None
+    runner_up_confidence: float | None = None
+    status: str = ""
+    waiting_for_a_person: bool = False
+    model_used: str | None = None
+    decided_at: str | None = None
+    decision_id: str = ""
+
+
 class EpisodeDetailView(BaseModel):
     """
     One piece of writing and everything it produced.
@@ -201,12 +262,15 @@ class EpisodeDetailView(BaseModel):
     Attributes:
         episode: The piece of writing itself.
         contents: What came out of it, and the links between.
+        outcomes: What was decided about each of those findings — newest
+            first, and empty for an episode that has not been reconciled.
     """
 
     model_config = ConfigDict(extra="forbid")
 
     episode: NodeView
     contents: GraphSliceView
+    outcomes: list[DecisionOutcomeView] = Field(default_factory=list)
 
 
 class GraphStatsView(BaseModel):
@@ -324,6 +388,84 @@ class RetrievalRequest(FormulationRequest):
     model_config = ConfigDict(extra="forbid")
 
     session_key: str | None = Field(default=None, min_length=1, max_length=120)
+
+
+class BriefingLineView(BaseModel):
+    """
+    One line of the briefing, and where it came from.
+
+    The line is what the assistant reads; the record it came from is what
+    somebody judging the briefing needs, because "is this sentence a fair
+    summary of that record?" is the only question worth asking about it.
+
+    Attributes:
+        node_id: The record behind this line.
+        node_type: What kind of record.
+        text: The sentence the assistant reads.
+        tokens: Roughly what it costs.
+        found_by: Which search surfaced it.
+        boosted: True when today's conversation had already been round it.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    node_id: str
+    node_type: str
+    text: str
+    tokens: int
+    found_by: str
+    boosted: bool = False
+
+
+class DroppedLineView(BaseModel):
+    """
+    One record that was fetched and did not make the briefing.
+
+    Attributes:
+        node_id: The record left out.
+        reason: Which rule left it out.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    node_id: str
+    reason: str
+
+
+class PromptView(BaseModel):
+    """
+    Exactly what the assistant would be sent for one sentence.
+
+    The whole point of the inspection surface: everything about this layer
+    happens between somebody speaking and the assistant answering, and none
+    of it reaches a screen. Without a way to print it, the only evidence that
+    the briefing is any good is that the replies feel about right.
+
+    Attributes:
+        system: The instructions, in full, exactly as they would be sent.
+        messages: The conversation as the assistant would see it.
+        briefing: The lines drawn from their history, with their sources.
+        dropped: What was fetched and cut, and by which rule.
+        summary: What the earlier part of the conversation was about.
+        emotional_register: How the turn was read, which set the allowance.
+        token_budget: What the briefing was allowed.
+        briefing_tokens: What it used.
+        total_tokens: Roughly what the whole prompt costs.
+        suppressed: True when history was deliberately withheld.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    system: str
+    messages: list[FormulationTurn] = Field(default_factory=list)
+    briefing: list[BriefingLineView] = Field(default_factory=list)
+    dropped: list[DroppedLineView] = Field(default_factory=list)
+    summary: str | None = None
+    emotional_register: str
+    token_budget: int
+    briefing_tokens: int
+    total_tokens: int
+    suppressed: bool = False
 
 
 class RetrievedNodeView(BaseModel):
@@ -686,6 +828,7 @@ __all__ = [
     "NodeListView",
     "VersionChainView",
     "DecisionHistoryView",
+    "DecisionOutcomeView",
     "EpisodeDetailView",
     "GraphStatsView",
     "ProvenanceView",
@@ -693,6 +836,9 @@ __all__ = [
     "FormulationTurn",
     "FormulationRequest",
     "RetrievalRequest",
+    "BriefingLineView",
+    "DroppedLineView",
+    "PromptView",
     "RetrievedNodeView",
     "PassReportView",
     "TurnContextView",

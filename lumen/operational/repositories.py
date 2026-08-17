@@ -101,7 +101,58 @@ class SessionBufferRepository(Protocol):
         ...
 
     def get_messages(self, session_id: str) -> list[BufferMessageRecord]:
-        """Fetch a buffer's messages in the order they were added."""
+        """
+        Fetch every message a buffer holds, in the order they arrived.
+
+        Everything, including branches the person moved away from. Anything
+        that wants what the conversation actually says wants `active_thread`
+        instead.
+        """
+        ...
+
+    def active_thread(self, session_id: str) -> list[BufferMessageRecord]:
+        """
+        Fetch the conversation as the person would read it, oldest first.
+
+        Follows the reply links back from whichever message the buffer names
+        as current, so a message that was edited away is left out along with
+        everything that followed from it. A conversation that has never
+        branched — every import, and every chat nobody edited — comes back
+        exactly as `get_messages` would return it.
+        """
+        ...
+
+    def branch_from(
+        self, session_id: str, parent_message_id: str | None, message: BufferMessageRecord
+    ) -> BufferMessageRecord:
+        """
+        Add a message as a reply to a particular earlier one, and make that
+        the live thread.
+
+        This is what editing is. Passing the parent of the message being
+        rewritten puts the new one beside it rather than after it; the
+        original and everything that followed stay stored and are simply no
+        longer the thread being read.
+        """
+        ...
+
+    def set_active(self, session_id: str, message_id: str) -> None:
+        """
+        Point the conversation at a different branch.
+
+        How somebody moves back to a version they had left — nothing is
+        rewritten, only which end is being read from.
+        """
+        ...
+
+    def save_summary(self, session_id: str, summary: str, through_seq: int) -> None:
+        """
+        Record what this conversation has been about so far.
+
+        `through_seq` is how much of it the summary covers, so the next
+        refresh reads only what has been said since rather than the whole
+        conversation again.
+        """
         ...
 
     def find_decayed(self, cutoff: datetime, limit: int = 50) -> list[SessionBufferRecord]:

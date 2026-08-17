@@ -49,7 +49,13 @@ from lumen.operational.repositories import OperationalStore
 from lumen.operational.sqlalchemy_impl import build_operational_store
 from lumen.providers.errors import ProviderError
 from lumen.providers.factory import get_llm_provider
-from lumen.query import QueryFormulator, SessionRegistry
+from lumen.query import (
+    ConversationMemory,
+    ConversationStore,
+    PromptComposer,
+    QueryFormulator,
+    SessionRegistry,
+)
 from lumen.schemas.enums import ModelRole
 
 logger = logging.getLogger(__name__)
@@ -155,7 +161,7 @@ def _lifespan_for(settings: AppConfig):
         provider = KuzuGraphProvider(settings.graph.db_path)
         provider.init_schema()
         store = build_operational_store(settings)
-        store.init_schema()
+        _bring_the_schema_up_to_date(store)
         formulator = _build_formulator(settings, provider)
         worker = _build_worker(settings, store, provider)
         search = LazySearchStack(
@@ -168,6 +174,12 @@ def _lifespan_for(settings: AppConfig):
         app.state.ingest = worker
         app.state.search = search
         app.state.sessions = SessionRegistry(settings.query)
+        app.state.composer = PromptComposer(config=settings.chat)
+        app.state.memory = ConversationMemory(
+            store=ConversationStore(store.buffers),
+            llm=_summariser(settings),
+            config=settings.chat,
+        )
         logger.info("api ready", extra={"graph_path": settings.graph.db_path})
 
         try:
@@ -191,6 +203,46 @@ def _lifespan_for(settings: AppConfig):
             logger.info("api stopped")
 
     return lifespan
+
+
+def _bring_the_schema_up_to_date(store) -> None:
+    """
+    Run the migrations the operational database has not had yet.
+
+    This used to create any missing tables instead, which is a different
+    thing and quietly the wrong one. Creating tables leaves a database with
+    no record of which migrations it represents, so the next change to a
+    model adds a column that never reaches the table — and the failure
+    arrives much later as `no such column` from whichever query happens to
+    touch it first, with nothing to connect it back to a schema that was
+    never migrated.
+
+    A database that holds tables but no migration history is refused rather
+    than guessed at. It can only have come from the old path, and the two
+    ways out are a one-line command each — but choosing between them means
+    knowing which migration its tables actually represent, which is a
+    question for a person and not for a service starting up.
+    """
+    from sqlalchemy import inspect
+
+    from lumen.operational.migrator import upgrade_to_head
+
+    inspector = inspect(store.engine)
+    tables = set(inspector.get_table_names())
+
+    if tables and "alembic_version" not in tables:
+        raise RuntimeError(
+            "the operational database has tables but no migration history, so "
+            "the migrations cannot be applied to it. It was built by an older "
+            "startup path that created tables directly. Stamp it with the "
+            "revision its tables match and then upgrade:\n"
+            "    uv run alembic stamp <revision>\n"
+            "    uv run alembic upgrade head\n"
+            "or, if nothing in it is worth keeping, delete it and start again."
+        )
+
+    upgrade_to_head(store.engine)
+    logger.info("operational schema is up to date")
 
 
 def _build_worker(settings: AppConfig, ops, graph) -> IngestWorker | None:
@@ -289,6 +341,25 @@ def _build_formulator(
         )
         return None
     return QueryFormulator(llm=llm, graph=graph, config=settings.query)
+
+
+def _summariser(settings: AppConfig):
+    """
+    The model that writes up a conversation, if there is one.
+
+    Nobody waits on this call — it happens after a reply has gone out — so it
+    keeps the ordinary retries rather than the turn reader's single attempt.
+    A deployment with no model configured simply stops compressing the older
+    part of a conversation; everything else about holding one still works.
+    """
+    try:
+        return get_llm_provider(ModelRole.LIGHTWEIGHT, settings)
+    except ProviderError:
+        logger.warning(
+            "no model is configured, so conversations will not be summarised",
+            exc_info=True,
+        )
+        return None
 
 
 def _answers(probe) -> bool:

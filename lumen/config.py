@@ -293,9 +293,13 @@ class QueryConfig:
     session_max_turns: int = _env_int("LUMEN_SESSION_MAX_TURNS", 200)
     formulation_max_workers: int = _env_int("LUMEN_FORMULATION_MAX_WORKERS", 4)
 
-    retrieval_budget_seconds: float = _env_float("LUMEN_RETRIEVAL_BUDGET_SECONDS", 3.0)
+    # Eight seconds, not three. The three-second window was chosen to stay
+    # inside the time somebody spends reading the previous reply; a longer
+    # pause before a considered answer is normal in this kind of
+    # conversation, and an answer that missed the one relevant thing is not.
+    retrieval_budget_seconds: float = _env_float("LUMEN_RETRIEVAL_BUDGET_SECONDS", 8.0)
     semantic_pass_timeout_seconds: float = _env_float(
-        "LUMEN_PASS_A_TIMEOUT_SECONDS", 2.0
+        "LUMEN_PASS_A_TIMEOUT_SECONDS", 6.0
     )
     structural_pass_timeout_seconds: float = _env_float(
         "LUMEN_PASS_B_TIMEOUT_SECONDS", 0.5
@@ -323,6 +327,58 @@ class QueryConfig:
     # matched has no similarity score, and never gets given one.
     anchor_base_score: float = _env_float("LUMEN_ANCHOR_BASE_SCORE", 0.6)
     retrieval_max_workers: int = _env_int("LUMEN_RETRIEVAL_MAX_WORKERS", 4)
+
+
+@dataclass(frozen=True)
+class ChatConfig:
+    """
+    Tuning knobs for what the assistant is actually sent.
+
+    Two separate things live here. The briefing allowance decides how much of
+    somebody's own history goes in front of the assistant, and it varies with
+    how they sound — a wall of history in front of a light question makes the
+    answer worse, and somebody thinking out loud can use everything there is.
+    The memory settings decide how much of the conversation itself it can
+    still see after an hour of talking.
+
+    Environment variables:
+      LUMEN_CONTEXT_TOKENS_VULNERABLE / _STABLE / _REFLECTIVE
+      LUMEN_CONTEXT_RECORDS_VULNERABLE / _STABLE / _REFLECTIVE
+      LUMEN_CONTEXT_DUPLICATE_THRESHOLD — how alike two briefings may be
+      LUMEN_CONTEXT_PER_KIND_CAP        — most records of any one kind
+      LUMEN_CHARS_PER_TOKEN             — how token counts are estimated
+      LUMEN_CHAT_RECENT_TURNS           — turns kept word for word
+      LUMEN_CHAT_SUMMARY_EVERY          — turns between summary refreshes
+      LUMEN_CHAT_SUMMARY_WORDS          — how long the summary may run
+
+    There is no crisis setting, and that is deliberate. Nothing is injected
+    when somebody is in acute distress, and making that a number somebody
+    could raise would turn a clinical decision into a configuration mistake
+    waiting to happen.
+    """
+
+    vulnerable_tokens: int = _env_int("LUMEN_CONTEXT_TOKENS_VULNERABLE", 400)
+    stable_tokens: int = _env_int("LUMEN_CONTEXT_TOKENS_STABLE", 800)
+    reflective_tokens: int = _env_int("LUMEN_CONTEXT_TOKENS_REFLECTIVE", 1500)
+
+    vulnerable_records: int = _env_int("LUMEN_CONTEXT_RECORDS_VULNERABLE", 2)
+    stable_records: int = _env_int("LUMEN_CONTEXT_RECORDS_STABLE", 4)
+    reflective_records: int = _env_int("LUMEN_CONTEXT_RECORDS_REFLECTIVE", 6)
+
+    # Two briefings that read almost alike are one briefing taking up two
+    # slots. A strong theme otherwise fills the whole allowance with
+    # variations on itself.
+    duplicate_threshold: float = _env_float("LUMEN_CONTEXT_DUPLICATE_THRESHOLD", 0.8)
+    per_kind_cap: int = _env_int("LUMEN_CONTEXT_PER_KIND_CAP", 3)
+
+    chars_per_token: float = _env_float("LUMEN_CHARS_PER_TOKEN", 4.0)
+
+    # How much of the conversation is sent word for word, and how often
+    # everything older is folded into a few sentences. Twelve turns is about
+    # the span somebody refers back to without re-explaining themselves.
+    recent_turns: int = _env_int("LUMEN_CHAT_RECENT_TURNS", 12)
+    summary_every: int = _env_int("LUMEN_CHAT_SUMMARY_EVERY", 8)
+    summary_words: int = _env_int("LUMEN_CHAT_SUMMARY_WORDS", 200)
 
 
 @dataclass(frozen=True)
@@ -552,6 +608,7 @@ class AppConfig:
     observability: ObservabilityConfig = field(default_factory=ObservabilityConfig)
     pipeline: PipelineConfig = field(default_factory=PipelineConfig)
     query: QueryConfig = field(default_factory=QueryConfig)
+    chat: ChatConfig = field(default_factory=ChatConfig)
     ingest: IngestConfig = field(default_factory=IngestConfig)
 
     # The personal build has one user. Multi-user deployments set this per request.

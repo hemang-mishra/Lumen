@@ -10,6 +10,8 @@ checked that those two agree.
 
 from __future__ import annotations
 
+import json
+
 import pytest
 
 from lumen.config import AppConfig
@@ -37,6 +39,66 @@ def a_processed_entry(
 @pytest.fixture
 def episode_id(a_processed_entry) -> str:
     return a_processed_entry.episodes[0].episode_id
+
+
+@pytest.fixture
+def merged_into_a_pattern(
+    ops_store, graph_store, vector_store, embedder, full_run_providers,
+    decayed_session, seed_pattern
+):
+    """
+    A run where a finding joins a pattern the person already had.
+
+    Built by running the pipeline rather than by writing the decision into
+    the graph, because what is being checked is that the reported outcome
+    matches what reconciliation actually did. The pattern is seeded with the
+    finding's own words behind it so the search genuinely finds it — the
+    stand-in embedder gives identical text identical vectors.
+    """
+    from lumen.tests.conftest import EPISODE_TEXT
+
+    finding = "Comparing himself to Alex is what causes the pain"
+    pattern_id = seed_pattern("pat_old", name="Comparison spiral")
+    vector_store.upsert(
+        pattern_id,
+        embedder.embed_text(finding),
+        {"node_type": "PatternNode", "status": "ACTIVE"},
+    )
+
+    light, deep = full_run_providers(
+        {
+            "decision": json.dumps(
+                {
+                    "decisions": [
+                        {
+                            "item_index": 1,
+                            "primary": {
+                                "action": "MERGE",
+                                "target_node_id": pattern_id,
+                                "confidence": 0.95,
+                                "reason": "the same thing said before",
+                            },
+                        }
+                    ],
+                    "people": [],
+                }
+            ),
+            "hyde": json.dumps(
+                {"hypotheticals": [{"index": 1, "text": finding}]}
+            ),
+        }
+    )
+    report = run_pipeline(
+        decayed_session(EPISODE_TEXT),
+        graph=graph_store,
+        vectors=vector_store,
+        embedder=embedder,
+        lightweight=light,
+        thinking=deep,
+        ops=ops_store,
+        config=AppConfig(),
+    )
+    return report.episodes[0].episode_id, pattern_id
 
 
 @pytest.fixture
@@ -275,6 +337,138 @@ class TestOneEntry:
 
         assert response.status_code == 404
         assert response.json()["kind"] == "episode"
+
+
+class TestWhatAnEntryChangedInTheHistory:
+    """
+    The step that matters most and shows least.
+
+    Everything before it is reading. This is where a thing somebody noticed
+    on a Tuesday becomes a lasting belief, joins a pattern they have had for
+    years, or is held back for them to look at — and read as records and
+    links alone, an entry that changed nothing looks exactly like one that
+    changed everything.
+    """
+
+    def test_each_finding_says_what_was_decided_about_it(
+        self, api_client, episode_id
+    ):
+        body = api_client.get(f"/graph/episodes/{episode_id}").json()
+
+        assert body["outcomes"]
+        outcome = body["outcomes"][0]
+        assert outcome["source_node_id"]
+        assert outcome["action"]
+        assert outcome["decision_id"]
+
+    def test_the_outcomes_belong_to_this_entrys_findings(
+        self, api_client, episode_id
+    ):
+        body = api_client.get(f"/graph/episodes/{episode_id}").json()
+
+        findings = {
+            node["node_id"]
+            for node in body["contents"]["nodes"]
+            if node["node_id"] != episode_id
+        }
+        assert {outcome["source_node_id"] for outcome in body["outcomes"]} <= findings
+
+    def test_what_a_finding_became_is_named_rather_than_numbered(
+        self, api_client, merged_into_a_pattern
+    ):
+        """
+        An identifier is not an answer. "It joined the pattern you have been
+        calling Comparison spiral" is; resolving that by hand against a
+        second table is answering the question badly.
+        """
+        episode_id, pattern_id = merged_into_a_pattern
+
+        body = api_client.get(f"/graph/episodes/{episode_id}").json()
+
+        joined = next(
+            outcome
+            for outcome in body["outcomes"]
+            if outcome["target_node_id"] == pattern_id
+        )
+        assert joined["action"] == "MERGE"
+        assert joined["target_type"] == "PatternNode"
+        assert joined["target_preview"] == "Comparison spiral"
+        assert joined["edge_type_created"]
+
+    def test_a_finding_that_became_a_lasting_record_says_what_it_became(
+        self, api_client, episode_id
+    ):
+        """
+        The question people actually arrive with: did this become a belief?
+
+        It is not answered by the decision's target, which names what the
+        finding was *compared against* — on a BRANCH that is whatever the
+        search turned up, or nothing at all. What it became is reached by the
+        link the decision drew, and matched to the decision by id, because
+        one finding can be decided about more than once.
+        """
+        body = api_client.get(f"/graph/episodes/{episode_id}").json()
+
+        grew = [o for o in body["outcomes"] if o["became_node_id"]]
+        assert grew, "this run promoted nothing, so there is nothing to report"
+        assert grew[0]["became_type"]
+        assert grew[0]["became_preview"]
+
+    def test_a_finding_that_stayed_with_its_entry_became_nothing(
+        self, api_client, episode_id
+    ):
+        """
+        The common and correct outcome. A thing that happened is saved with
+        its day and promoted to nothing, and reporting that as a failure is
+        how a graph ends up with a permanent record for every sentence.
+        """
+        body = api_client.get(f"/graph/episodes/{episode_id}").json()
+
+        stayed = [o for o in body["outcomes"] if not o["became_node_id"]]
+        assert stayed
+        assert all(o["became_type"] is None for o in stayed)
+
+    def test_what_it_became_is_not_confused_with_what_it_was_compared_to(
+        self, api_client, merged_into_a_pattern
+    ):
+        """
+        Two different questions that a single field would blur. A merge is
+        weighed against the pattern it joins; a branch is weighed against
+        whatever the search found and becomes something new.
+        """
+        episode_id, pattern_id = merged_into_a_pattern
+
+        body = api_client.get(f"/graph/episodes/{episode_id}").json()
+        joined = next(
+            o for o in body["outcomes"] if o["target_node_id"] == pattern_id
+        )
+
+        assert joined["action"] == "MERGE"
+        assert joined["became_node_id"] != joined["source_node_id"]
+
+    def test_a_decision_that_was_held_back_says_so(self, api_client, episode_id):
+        """
+        A note of a decision and a decision that took effect look identical
+        otherwise — and the difference is whether it is in the history yet.
+        """
+        body = api_client.get(f"/graph/episodes/{episode_id}").json()
+
+        assert all("waiting_for_a_person" in o for o in body["outcomes"])
+        acted = [o for o in body["outcomes"] if not o["waiting_for_a_person"]]
+        assert all(o["status"] in {"ACTIVE", "ROLLED_BACK"} for o in acted)
+
+    def test_an_entry_nobody_decided_about_reports_no_outcomes(
+        self, api_client, graph_store, episode_id
+    ):
+        """Empty rather than absent: the question was asked and had no answer."""
+        graph_store.write_node(
+            "EpisodeNode",
+            {"node_id": "ep_undecided_001", "episode_summary": "never reconciled"},
+        )
+
+        body = api_client.get("/graph/episodes/ep_undecided_001").json()
+
+        assert body["outcomes"] == []
 
 
 class TestCausalSequences:

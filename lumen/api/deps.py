@@ -30,7 +30,13 @@ from lumen.graph.provider import ReadOnlyGraph
 from lumen.ingest import IngestWorker
 from lumen.operational.repositories import OperationalStore
 from lumen.providers.errors import ProviderError
-from lumen.query import ConversationalRetriever, QueryFormulator, SessionRegistry
+from lumen.query import (
+    ConversationalRetriever,
+    ConversationMemory,
+    PromptComposer,
+    QueryFormulator,
+    SessionRegistry,
+)
 
 
 def get_graph(request: Request) -> ReadOnlyGraph:
@@ -118,6 +124,30 @@ def get_retriever(request: Request) -> ConversationalRetriever:
         ) from exc
 
 
+def get_composer(request: Request) -> PromptComposer:
+    """
+    The thing that builds what the assistant is sent.
+
+    Held on the application rather than made per request, though it would
+    cost almost nothing to build one: it carries the settings that decide how
+    much history a turn may hold, and having one copy of those means changing
+    them changes every turn rather than the next one.
+    """
+    return request.app.state.composer
+
+
+def get_memory(request: Request) -> ConversationMemory:
+    """
+    The thing that remembers the conversation itself.
+
+    Distinct from the graph, which remembers the person. This one only knows
+    about today, and it reads and writes the same store the extraction
+    pipeline eventually consumes — which is what makes a chat become history
+    rather than being a separate thing that resembles one.
+    """
+    return request.app.state.memory
+
+
 def get_sessions(request: Request) -> SessionRegistry:
     """
     The live conversations this process is holding.
@@ -137,5 +167,7 @@ __all__ = [
     "get_worker",
     "get_formulator",
     "get_retriever",
+    "get_composer",
+    "get_memory",
     "get_sessions",
 ]

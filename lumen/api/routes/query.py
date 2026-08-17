@@ -24,15 +24,28 @@ from datetime import UTC, datetime
 
 from fastapi import APIRouter, Depends
 
-from lumen.api.deps import get_formulator, get_retriever, get_sessions
+from lumen.api.deps import (
+    get_composer,
+    get_formulator,
+    get_memory,
+    get_retriever,
+    get_sessions,
+)
 from lumen.api.schemas import (
+    BriefingLineView,
+    DroppedLineView,
     FormulationRequest,
+    FormulationTurn,
     PassReportView,
+    PromptView,
     RetrievalRequest,
     RetrievedNodeView,
     TurnContextView,
 )
 from lumen.query.formulation import QueryFormulator
+from lumen.query.memory import ConversationMemory
+from lumen.query.memory.contracts import Recollection
+from lumen.query.prompting import ChatPrompt, PromptComposer
 from lumen.query.retrieval import ConversationalRetriever
 from lumen.query.retrieval.contracts import RetrievalBundle, RetrievedNode
 from lumen.query.session import ChatSession, SessionRegistry, make_session_id
@@ -89,6 +102,125 @@ def retrieve_for_turn(
     signal = formulator.formulate(_next_turn(body, session), session)
     bundle = retriever.retrieve(signal, session)
     return _as_view(signal, bundle, session)
+
+
+@router.post("/prompt", response_model=PromptView)
+def prompt_for_turn(
+    body: RetrievalRequest,
+    formulator: QueryFormulator = Depends(get_formulator),
+    retriever: ConversationalRetriever = Depends(get_retriever),
+    composer: PromptComposer = Depends(get_composer),
+    memory: ConversationMemory = Depends(get_memory),
+    sessions: SessionRegistry = Depends(get_sessions),
+) -> PromptView:
+    """
+    Show exactly what the assistant would be sent for one sentence.
+
+    The whole of this layer happens between somebody speaking and the
+    assistant answering, and none of it ever reaches a screen. That is right
+    for the product and leaves nobody able to tell whether the briefing is
+    any good — so here it is in full: the instructions, the lines drawn from
+    their history, what was fetched and cut, and the conversation as the
+    assistant would see it.
+
+    No reply is generated. Writing one is the next goal's job, and a mocked
+    one here would be the least useful thing on the page.
+    """
+    session = _continuing_session(body, sessions)
+    _replay(body, session)
+
+    turn = _next_turn(body, session)
+    stored = _keep(memory, body, session, turn)
+
+    signal = formulator.formulate(turn, session)
+    bundle = retriever.retrieve(signal, session)
+    recollection = _recollection(memory, session, stored)
+    prompt = composer.compose(
+        bundle=bundle, signal=signal, recollection=recollection
+    )
+    return _as_prompt_view(prompt)
+
+
+def _keep(
+    memory: ConversationMemory,
+    body: RetrievalRequest,
+    session: ChatSession,
+    turn: ChatTurn,
+) -> str | None:
+    """
+    Store this turn, when the caller asked to stay in one conversation, and
+    say where it was stored.
+
+    Only then. A one-off request is a question about a sentence, and saving
+    every such sentence would fill somebody's history with things nobody
+    said to anybody. Naming a conversation is what turns the same call into
+    part of one — and it is what gives the memory anything to recall.
+
+    The identifier is handed back rather than assumed. A live session and the
+    stored conversation behind it share an identity — the same person, day
+    and label — but not a name: the store gives a conversation its own, and
+    only that one finds it again.
+    """
+    if not body.session_key:
+        return None
+
+    buffer = memory.store.open(session.user_id, on=session.event_date)
+    memory.store.append(
+        buffer.session_id, role="user", content=turn.content, at=turn.timestamp
+    )
+    return buffer.session_id
+
+
+def _recollection(
+    memory: ConversationMemory, session: ChatSession, stored_id: str | None
+) -> Recollection:
+    """
+    What the assistant can still see of this conversation.
+
+    Read from the stored conversation when there is one, since that is the
+    only case where there is anything to remember beyond this call. A
+    one-off request is answered from the turns it supplied itself, which is
+    the honest reading of a conversation that exists for the length of one
+    request.
+    """
+    if stored_id is not None:
+        return memory.recall(stored_id)
+    return Recollection(
+        turns=tuple(session.recent_turns(session.turn_count)),
+        total_turns=session.turn_count,
+    )
+
+
+def _as_prompt_view(prompt: ChatPrompt) -> PromptView:
+    """Everything the assistant would receive, as the outside may see it."""
+    return PromptView(
+        system=prompt.system,
+        messages=[
+            FormulationTurn(role=turn.role, content=turn.content)
+            for turn in prompt.messages
+        ],
+        briefing=[
+            BriefingLineView(
+                node_id=item.node_id,
+                node_type=item.node_type,
+                text=item.text,
+                tokens=item.tokens,
+                found_by=item.found_by.value,
+                boosted=item.boosted,
+            )
+            for item in prompt.context.items
+        ],
+        dropped=[
+            DroppedLineView(node_id=item.node_id, reason=item.reason)
+            for item in prompt.context.dropped
+        ],
+        summary=prompt.summary,
+        emotional_register=prompt.context.emotional_register.value,
+        token_budget=prompt.context.token_budget,
+        briefing_tokens=prompt.context.estimated_tokens,
+        total_tokens=prompt.estimated_tokens,
+        suppressed=prompt.context.suppressed,
+    )
 
 
 def _replay(body: FormulationRequest, session: ChatSession) -> None:

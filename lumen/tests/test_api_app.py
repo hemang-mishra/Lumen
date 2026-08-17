@@ -127,6 +127,80 @@ class TestStartingAndStopping:
         assert provider.conn is None
 
 
+class TestTheSchemaTheServiceStartsWith:
+    """
+    Starting up runs the migrations rather than creating tables.
+
+    The difference is invisible on day one and decides everything after it.
+    A database built by creating tables carries no record of which
+    migrations it represents, so the next column added to a model never
+    reaches it — and the failure surfaces much later as `no such column`
+    from whichever query touches it first, with nothing pointing back at a
+    schema that was never migrated. That happened here, on real data.
+    """
+
+    def _config(self, tmp_path) -> AppConfig:
+        return AppConfig(
+            graph=GraphConfig(db_path=str(tmp_path / "graph")),
+            operational=OperationalConfig(db_url=f"sqlite:///{tmp_path / 'ops.db'}"),
+        )
+
+    def test_a_fresh_database_comes_up_fully_migrated(self, tmp_path):
+        from fastapi.testclient import TestClient
+        from sqlalchemy import create_engine, inspect
+
+        from lumen.operational.migrator import detect_schema_drift
+
+        config = self._config(tmp_path)
+        with TestClient(create_app(config)):
+            pass
+
+        engine = create_engine(config.operational.db_url)
+        try:
+            assert "alembic_version" in set(inspect(engine).get_table_names())
+            assert detect_schema_drift(engine) == []
+        finally:
+            engine.dispose()
+
+    def test_a_database_with_tables_but_no_history_is_refused(self, tmp_path):
+        """
+        The state the old path left behind, and the one state that cannot be
+        resolved by guessing: which migration those tables represent is a
+        question for a person.
+        """
+        from fastapi.testclient import TestClient
+        from sqlalchemy import create_engine
+
+        from lumen.operational import models
+
+        config = self._config(tmp_path)
+        engine = create_engine(config.operational.db_url)
+        models.Base.metadata.create_all(engine)
+        engine.dispose()
+
+        with pytest.raises(RuntimeError, match="no migration history"):
+            with TestClient(create_app(config)):
+                pass
+
+    def test_the_refusal_says_how_to_get_out_of_it(self, tmp_path):
+        from fastapi.testclient import TestClient
+        from sqlalchemy import create_engine
+
+        from lumen.operational import models
+
+        config = self._config(tmp_path)
+        engine = create_engine(config.operational.db_url)
+        models.Base.metadata.create_all(engine)
+        engine.dispose()
+
+        with pytest.raises(RuntimeError) as raised:
+            with TestClient(create_app(config)):
+                pass
+
+        assert "alembic stamp" in str(raised.value)
+        assert "alembic upgrade head" in str(raised.value)
+
+
 class TestHealth:
     def test_a_working_service_says_so(self, api_client):
         body = api_client.get("/health").json()
@@ -217,8 +291,8 @@ class TestTheApiCannotWrite:
         }
         assert used == {"GET"}
 
-    def test_every_post_is_one_of_the_four_that_have_earned_it(self, api_client):
-        # An allow-list rather than a count, so that adding a fifth is a
+    def test_every_post_is_one_of_the_five_that_have_earned_it(self, api_client):
+        # An allow-list rather than a count, so that adding a sixth is a
         # deliberate act with a reason written next to it.
         #
         #   /query/formulate — changes nothing, but what it is given is
@@ -230,6 +304,10 @@ class TestTheApiCannotWrite:
         #     reads the graph and the search index and writes to neither;
         #     the only thing it changes is one in-memory conversation's
         #     memory of itself, which is gone at midnight and never stored.
+        #
+        #   /query/prompt — the same sentence again, and the same reason.
+        #     It shows exactly what the assistant would be sent and writes
+        #     nothing anywhere; it does not even generate a reply.
         #
         #   /ingest/file, /ingest/json — the one way in. Both hand what they
         #     receive to the importer and put an identifier on a queue;
@@ -245,6 +323,7 @@ class TestTheApiCannotWrite:
         assert posts == {
             "/query/formulate",
             "/query/retrieve",
+            "/query/prompt",
             "/ingest/file",
             "/ingest/json",
         }

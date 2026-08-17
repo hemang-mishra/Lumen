@@ -221,7 +221,13 @@ daily context logs/
 
 # --- Lumen Specific ---
 # Graph Database (Kuzu)
+# Kuzu was a directory once and is a file now, so both forms are named. The
+# trailing slash alone let a test-created database into a commit.
+lumen_graph.db
 lumen_graph.db/
+lumen_graph.db.wal
+lumen_ops.db-shm
+lumen_ops.db-wal
 temp_test_kuzu
 
 # Vector Database (Qdrant local storage)
