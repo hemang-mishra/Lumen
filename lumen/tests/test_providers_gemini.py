@@ -17,6 +17,8 @@ from pydantic import BaseModel, ConfigDict
 
 from lumen.config import ProviderConfig
 from lumen.providers.errors import (
+    ProviderError,
+    StreamInterrupted,
     ProviderConfigurationError,
     ProviderContentBlockedError,
     ProviderRateLimitError,
@@ -84,6 +86,12 @@ class FakeModels:
         if self.error is not None:
             raise self.error
         return self.result
+
+    def generate_content_stream(self, **kwargs):
+        self.calls.append(kwargs)
+        if self.error is not None:
+            raise self.error
+        return iter(self.result if isinstance(self.result, list) else [self.result])
 
 
 def build_client(result=None, error=None):
@@ -668,3 +676,82 @@ class TestClosing:
         """Nothing to release, but the method has to exist and not complain."""
         provider, _ = build_provider(provider_config)
         provider.close()
+
+
+class TestStreamingAReply:
+    """
+    A reply arriving as it is written.
+
+    The refusal check is the interesting part. Gemini can start answering and
+    then stop on a safety filter, so a stream that is only checked at the
+    start would present a cut-off reply as a short one.
+    """
+
+    def test_the_pieces_join_up(self, provider_config):
+        pieces = [reply("Hello ", prompt_tokens=None, completion_tokens=None),
+                  reply("there", prompt_tokens=None, completion_tokens=None)]
+        provider, _ = build_provider(provider_config, result=pieces)
+
+        chunks = list(provider.stream_text([ChatMessage(role="user", content="hi")]))
+
+        assert "".join(chunk.text for chunk in chunks) == "Hello there"
+
+    def test_the_totals_arrive_with_the_piece_that_carries_them(self, provider_config):
+        pieces = [
+            reply("Hello", prompt_tokens=None, completion_tokens=None),
+            reply("", prompt_tokens=12, completion_tokens=5),
+        ]
+        provider, _ = build_provider(provider_config, result=pieces)
+
+        final = list(provider.stream_text([ChatMessage(role="user", content="hi")]))[-1]
+
+        assert final.final is True
+        assert final.usage.completion_tokens == 5
+
+    def test_the_system_instruction_is_sent(self, provider_config):
+        provider, models = build_provider(
+            provider_config,
+            result=[reply("hi", prompt_tokens=None, completion_tokens=None)],
+        )
+
+        list(
+            provider.stream_text(
+                [ChatMessage(role="user", content="hi")],
+                system_instruction="be warm",
+            )
+        )
+
+        assert models.calls[0]["config"].system_instruction == "be warm"
+
+    def test_a_reply_stopped_by_a_filter_partway_is_noticed(self, provider_config):
+        """
+        Not just checked at the start. A reply that begins fine and is then
+        cut off would otherwise be handed on as a short answer.
+        """
+        pieces = [
+            reply("I can tell you ", prompt_tokens=None, completion_tokens=None),
+            reply(
+                "",
+                finish_reason="SAFETY",
+                prompt_tokens=None,
+                completion_tokens=None,
+                safety_ratings=[
+                    SimpleNamespace(
+                        category="HARM_CATEGORY_DANGEROUS_CONTENT", blocked=True
+                    )
+                ],
+            ),
+        ]
+        provider, _ = build_provider(provider_config, result=pieces)
+
+        with pytest.raises(StreamInterrupted) as caught:
+            list(provider.stream_text([ChatMessage(role="user", content="hi")]))
+
+        assert caught.value.said == "I can tell you "
+
+    def test_a_failure_before_any_words_is_an_ordinary_failure(self, provider_config):
+        # Nothing reached anybody, so there is nothing that cannot be retried.
+        provider, _ = build_provider(provider_config, error=RuntimeError("no"))
+
+        with pytest.raises(ProviderError):
+            list(provider.stream_text([ChatMessage(role="user", content="hi")]))

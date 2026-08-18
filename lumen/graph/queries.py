@@ -105,6 +105,23 @@ JSON_COLUMNS: frozenset[str] = frozenset(
 # unlike the rest it needs no per-table lookup.
 VALID_FROM = "valid_from"
 
+# The date a record was written down. Every table has one, but it only means
+# the same thing as VALID_FROM for records that were never backdated.
+CREATED_AT = "created_at"
+
+# The kinds of record that have no date they became true, but can still be
+# asked about by date because when they were written *is* when they happened.
+# A note of a decision is made at the moment the decision is taken, and a
+# report is written at the moment it covers up to.
+#
+# Deliberately a short opt-in list rather than "everything without a start
+# date". A step in a sequence and a person both lack one because they have no
+# moment of their own at all, and letting a date filter reach them would
+# answer a question they cannot honestly answer.
+DATED_BY_CREATION: frozenset[str] = frozenset(
+    {"DecisionAuditNode", "MacroextractionReportNode"}
+)
+
 
 def _tables_without_a_start_date() -> frozenset[str]:
     """
@@ -184,9 +201,9 @@ def build_filters(
         conditions.append(f"{alias}.{column} {operator} ${key}")
         params[key] = _as_text(value)
 
-    dated = has_start_date(table)
-    add("since", VALID_FROM if dated else None, since, ">=")
-    add("until", VALID_FROM if dated else None, until, "<=")
+    dated = date_column(table)
+    add("since", dated, since, ">=")
+    add("until", dated, until, "<=")
     add("domain", available.get("domain"), domain)
     add("signal", available.get("signal"), signal_strength)
     add("era", available.get("era"), era_tag)
@@ -199,13 +216,29 @@ def build_filters(
 
 def has_start_date(table: str) -> bool:
     """
-    Whether this kind of record can be filtered or ordered by when it began.
+    Whether this kind of record carries a date it became true.
 
     Worked out once from the schema. A step in a sequence belongs to
     whenever its sequence was, a person is not something that starts on a
     date, and the note of a decision records only when it was made.
     """
     return table not in _tables_without_a_start_date()
+
+
+def date_column(table: str) -> str | None:
+    """
+    Which column to use when asking this kind of record about time.
+
+    Most records answer with the date they became true. A couple have no such
+    date but were written at the moment they describe, so they answer with the
+    date they were written instead. The rest have no honest answer and are
+    left out of date-bounded questions entirely.
+    """
+    if has_start_date(table):
+        return VALID_FROM
+    if table in DATED_BY_CREATION:
+        return CREATED_AT
+    return None
 
 
 def active_clause(table: str, *, alias: str = "n") -> str:
@@ -362,6 +395,9 @@ __all__ = [
     "FILTER_COLUMNS",
     "JSON_COLUMNS",
     "VALID_FROM",
+    "CREATED_AT",
+    "DATED_BY_CREATION",
+    "date_column",
     "era_key",
     "has_start_date",
     "Filters",

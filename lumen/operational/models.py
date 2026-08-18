@@ -88,6 +88,25 @@ class SessionBuffer(Base):
     decayed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     ingested_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
+    # The last message of the thread the person is actually in.
+    #
+    # A conversation is a tree once messages can be edited, and this names
+    # the branch that counts: walking parents back from here gives what the
+    # person kept, while the branches they moved away from stay stored and
+    # unreachable from this pointer. Empty on an imported conversation and on
+    # anything written before editing existed, which is read as "no branching
+    # here, take every message in order".
+    active_message_id: Mapped[str | None] = mapped_column(String(128))
+
+    # What this conversation has been about, in a few sentences, refreshed
+    # every so often. Stored rather than held in memory so a long chat still
+    # makes sense to the assistant after a restart — and so the cost of
+    # writing it is paid once rather than on every turn.
+    rolling_summary: Mapped[str | None] = mapped_column(Text)
+    summary_through_seq: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0
+    )
+
     messages: Mapped[list["BufferMessage"]] = relationship(
         back_populates="buffer",
         cascade="all, delete-orphan",
@@ -109,9 +128,20 @@ class BufferMessage(Base):
     """
     One message inside a buffer.
 
-    Ordering comes from the seq column rather than the timestamp. Imported
-    conversations sometimes carry identical or missing timestamps, and message
-    order still has to survive that.
+    Two different orderings live here and they answer different questions.
+    `seq` is arrival order — it never repeats within a conversation and it is
+    what an imported transcript is read by, since those sometimes carry
+    identical or missing timestamps. `parent_message_id` is conversational
+    order: which message this one is a reply to.
+
+    They differ the moment somebody edits something. An edit is written as a
+    new message sharing the old one's parent, so the two are siblings; they
+    have different arrival numbers and the same place in the conversation.
+    Reading a thread follows parents, not numbers.
+
+    Nothing is ever deleted. A branch the person moved away from stays
+    exactly where it was and stays readable — the same instinct as the
+    graph's append-only rule, applied to what was said.
     """
 
     __tablename__ = "buffer_messages"
@@ -125,8 +155,21 @@ class BufferMessage(Base):
     )
     seq: Mapped[int] = mapped_column(Integer, nullable=False)
 
+    # What this message is a reply to. Empty for the first message of a
+    # conversation. No foreign key on purpose: it points inside its own
+    # table, and a self-reference would make a whole conversation impossible
+    # to delete in one statement.
+    parent_message_id: Mapped[str | None] = mapped_column(String(128), index=True)
+
     role: Mapped[str] = mapped_column(String(8), nullable=False)
     content: Mapped[str] = mapped_column(Text, nullable=False)
+
+    # Whether this turn was spoken or typed. Kept per message because a day
+    # where somebody did both is normal, and the extraction pipeline cleans
+    # the two differently.
+    modality: Mapped[str] = mapped_column(
+        String(16), nullable=False, server_default="TEXT", default="TEXT"
+    )
     timestamp: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     event_date: Mapped[date] = mapped_column(Date, nullable=False)
 

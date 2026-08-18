@@ -251,6 +251,22 @@ class QueryConfig:
       LUMEN_SESSION_MAX_TURNS           — most turns a day's session holds in memory
       LUMEN_FORMULATION_MAX_WORKERS     — threads available for timing out a call
 
+    And for fetching what a turn points at:
+
+      LUMEN_RETRIEVAL_BUDGET_SECONDS    — the whole wait a turn may spend searching
+      LUMEN_PASS_A_TIMEOUT_SECONDS      — how long the meaning-based search may take
+      LUMEN_PASS_B_TIMEOUT_SECONDS      — how long the anchor lookups may take
+      LUMEN_CONV_PASS_A_KEEP            — matches kept from the meaning-based search
+      LUMEN_CONV_PASS_A_OVERFETCH       — matches fetched before ranking
+      LUMEN_CONV_PASS_B_KEEP            — records kept per anchor
+      LUMEN_CONV_CANDIDATE_CAP          — most records handed on from one turn
+      LUMEN_SESSION_BUFFER_SIZE         — how much of today's thread is remembered
+      LUMEN_SESSION_BUFFER_IDLE_TURNS   — turns of silence before it is forgotten
+      LUMEN_SESSION_BOOST               — how much being part of today's thread counts
+      LUMEN_SESSION_BOOST_THRESHOLD     — how close it must be to still count
+      LUMEN_ANCHOR_BASE_SCORE           — what an exact anchor match is worth
+      LUMEN_RETRIEVAL_MAX_WORKERS       — threads available for the parallel searches
+
     The timeout is the number that matters most. It is deliberately shorter
     than any other model call in the system: this one runs on every single
     turn, and the person is waiting on it. Six hundred milliseconds is about
@@ -259,6 +275,12 @@ class QueryConfig:
 
     The turn window exists because some turns cannot be read alone. "I don't
     feel that anymore" says nothing without the sentence before it.
+
+    The three-second search budget is the other side of the same coin. It is
+    spent while the person is still reading the previous reply, which is what
+    makes it invisible rather than a pause — and it is a limit on the whole
+    search, not on each part of it, because that is what the person waiting
+    actually experiences.
     """
 
     formulation_timeout_seconds: float = _env_float(
@@ -270,6 +292,217 @@ class QueryConfig:
     era_vocabulary_limit: int = _env_int("LUMEN_ERA_VOCABULARY_LIMIT", 50)
     session_max_turns: int = _env_int("LUMEN_SESSION_MAX_TURNS", 200)
     formulation_max_workers: int = _env_int("LUMEN_FORMULATION_MAX_WORKERS", 4)
+
+    # Eight seconds, not three. The three-second window was chosen to stay
+    # inside the time somebody spends reading the previous reply; a longer
+    # pause before a considered answer is normal in this kind of
+    # conversation, and an answer that missed the one relevant thing is not.
+    retrieval_budget_seconds: float = _env_float("LUMEN_RETRIEVAL_BUDGET_SECONDS", 8.0)
+    semantic_pass_timeout_seconds: float = _env_float(
+        "LUMEN_PASS_A_TIMEOUT_SECONDS", 6.0
+    )
+    structural_pass_timeout_seconds: float = _env_float(
+        "LUMEN_PASS_B_TIMEOUT_SECONDS", 0.5
+    )
+
+    # More matches are fetched than kept, for the reason the pipeline fetches
+    # extra: ranking happens after the search, and a weighty record can sit
+    # just below the cut on raw distance and belong above it once its weight
+    # counts.
+    conversational_pass_a_keep: int = _env_int("LUMEN_CONV_PASS_A_KEEP", 5)
+    conversational_pass_a_overfetch: int = _env_int("LUMEN_CONV_PASS_A_OVERFETCH", 20)
+    conversational_pass_b_keep: int = _env_int("LUMEN_CONV_PASS_B_KEEP", 5)
+    conversational_candidate_cap: int = _env_int("LUMEN_CONV_CANDIDATE_CAP", 12)
+
+    # Today's thread. Five records, forgotten after five turns of nobody
+    # coming back to them — long enough to carry a subject across a
+    # digression, short enough that this morning does not colour tonight.
+    session_buffer_size: int = _env_int("LUMEN_SESSION_BUFFER_SIZE", 5)
+    session_buffer_max_idle_turns: int = _env_int("LUMEN_SESSION_BUFFER_IDLE_TURNS", 5)
+    session_boost_multiplier: float = _env_float("LUMEN_SESSION_BOOST", 1.3)
+    session_boost_threshold: float = _env_float("LUMEN_SESSION_BOOST_THRESHOLD", 0.35)
+
+    # The same question asked of the stand-in measurement, and deliberately a
+    # harder bar. When a record has no position in the index, relevance falls
+    # back to counting how many of the turn's words appear in its text — and
+    # a third of them appearing is something that happens by accident, where
+    # a third of the way between two positions in the index does not. One
+    # number for both scales makes the fallback wave through everything held,
+    # on exactly the turns where the search was already in trouble.
+    session_boost_keyword_threshold: float = _env_float(
+        "LUMEN_SESSION_BOOST_KEYWORD_THRESHOLD", 0.6
+    )
+
+    # What an exact anchor match counts as when ordering a mixed list. It is
+    # a policy number, not a measurement — a record found because a name
+    # matched has no similarity score, and never gets given one.
+    anchor_base_score: float = _env_float("LUMEN_ANCHOR_BASE_SCORE", 0.6)
+
+    # What happens to a search that missed its deadline and finished anyway.
+    # It cannot be stopped, so its answer is either kept for the next turn or
+    # thrown away — and the next turn is the only one where it is still about
+    # roughly what is being talked about. Ranked below anything fresh,
+    # because it answers the question before this one.
+    carry_forward_turns: int = _env_int("LUMEN_CARRY_FORWARD_TURNS", 1)
+    deferred_penalty: float = _env_float("LUMEN_DEFERRED_PENALTY", 0.9)
+    retrieval_max_workers: int = _env_int("LUMEN_RETRIEVAL_MAX_WORKERS", 4)
+
+
+@dataclass(frozen=True)
+class ChatConfig:
+    """
+    Tuning knobs for what the assistant is actually sent.
+
+    Two separate things live here. The briefing allowance decides how much of
+    somebody's own history goes in front of the assistant, and it varies with
+    how they sound — a wall of history in front of a light question makes the
+    answer worse, and somebody thinking out loud can use everything there is.
+    The memory settings decide how much of the conversation itself it can
+    still see after an hour of talking.
+
+    Environment variables:
+      LUMEN_CONTEXT_TOKENS_VULNERABLE / _STABLE / _REFLECTIVE
+      LUMEN_CONTEXT_RECORDS_VULNERABLE / _STABLE / _REFLECTIVE
+      LUMEN_CONTEXT_DUPLICATE_THRESHOLD — how alike two briefings may be
+      LUMEN_CONTEXT_PER_KIND_CAP        — most records of any one kind
+      LUMEN_CHARS_PER_TOKEN             — how token counts are estimated
+      LUMEN_CHAT_RECENT_TURNS           — turns kept word for word
+      LUMEN_CHAT_SUMMARY_EVERY          — turns between summary refreshes
+      LUMEN_CHAT_SUMMARY_WORDS          — how long the summary may run
+      LUMEN_CHAT_PREVIOUS_DAYS          — earlier days carried into today
+      LUMEN_CHAT_PREVIOUS_DAY_LOOKBACK  — how far back to reach to find them
+      LUMEN_CHAT_PREVIOUS_DAY_TOKENS    — the allowance those days share
+      LUMEN_VOICE_ENABLED               — whether replies are spoken
+      LUMEN_MAX_AUDIO_BYTES             — the largest recording accepted
+
+    There is no crisis setting, and that is deliberate. Nothing is injected
+    when somebody is in acute distress, and making that a number somebody
+    could raise would turn a clinical decision into a configuration mistake
+    waiting to happen.
+    """
+
+    vulnerable_tokens: int = _env_int("LUMEN_CONTEXT_TOKENS_VULNERABLE", 400)
+    stable_tokens: int = _env_int("LUMEN_CONTEXT_TOKENS_STABLE", 800)
+    reflective_tokens: int = _env_int("LUMEN_CONTEXT_TOKENS_REFLECTIVE", 1500)
+
+    vulnerable_records: int = _env_int("LUMEN_CONTEXT_RECORDS_VULNERABLE", 2)
+    stable_records: int = _env_int("LUMEN_CONTEXT_RECORDS_STABLE", 4)
+    reflective_records: int = _env_int("LUMEN_CONTEXT_RECORDS_REFLECTIVE", 6)
+
+    # Two briefings that read almost alike are one briefing taking up two
+    # slots. A strong theme otherwise fills the whole allowance with
+    # variations on itself.
+    duplicate_threshold: float = _env_float("LUMEN_CONTEXT_DUPLICATE_THRESHOLD", 0.8)
+    per_kind_cap: int = _env_int("LUMEN_CONTEXT_PER_KIND_CAP", 3)
+
+    chars_per_token: float = _env_float("LUMEN_CHARS_PER_TOKEN", 4.0)
+
+    # How much of the conversation is sent word for word, and how often
+    # everything older is folded into a few sentences. Twelve turns is about
+    # the span somebody refers back to without re-explaining themselves.
+    recent_turns: int = _env_int("LUMEN_CHAT_RECENT_TURNS", 12)
+    summary_every: int = _env_int("LUMEN_CHAT_SUMMARY_EVERY", 8)
+    summary_words: int = _env_int("LUMEN_CHAT_SUMMARY_WORDS", 200)
+
+    # How much of the last few days today's conversation opens with. Life
+    # runs on longer than one night, and a thread dropped on Monday is often
+    # picked up on Thursday — so this counts days that hold a conversation
+    # rather than squares on the calendar, and reaches back a fortnight to
+    # find them. Free: every day already writes a summary of itself.
+    # Whether replies are spoken. Off by default because it needs a model
+    # that many deployments will not have configured, and a chat that refuses
+    # to start over a missing voice would be a poor trade.
+    voice_enabled: bool = _env_bool("LUMEN_VOICE_ENABLED", False)
+    max_audio_bytes: int = _env_int("LUMEN_MAX_AUDIO_BYTES", 25 * 1024 * 1024)
+
+    previous_days: int = _env_int("LUMEN_CHAT_PREVIOUS_DAYS", 3)
+    previous_day_lookback: int = _env_int("LUMEN_CHAT_PREVIOUS_DAY_LOOKBACK", 14)
+    previous_day_tokens: int = _env_int("LUMEN_CHAT_PREVIOUS_DAY_TOKENS", 700)
+
+
+@dataclass(frozen=True)
+class MacroConfig:
+    """
+    Settings for the periodic reports that ask "what keeps happening?".
+
+    Everything here is a threshold in a judgement that would otherwise be
+    buried in code: how many times something has to recur before it is worth
+    naming, how long something has to go unmentioned before it counts as
+    ignored, how many separate things have to move together before that is a
+    shift rather than a coincidence.
+
+    They are gathered in one place because they are the report's opinions,
+    and opinions belong somewhere a person can read and change them.
+    """
+
+    enabled: bool = _env_bool("LUMEN_MACRO_ENABLED", True)
+
+    # How long after a period ends before it is reported on. Reports cover
+    # when things happened rather than when they were written, and a report
+    # is never rewritten, so running the instant a period ends would freeze
+    # it before the last few entries about it had been made.
+    weekly_grace_days: int = _env_int("LUMEN_MACRO_WEEKLY_GRACE_DAYS", 1)
+    monthly_grace_days: int = _env_int("LUMEN_MACRO_MONTHLY_GRACE_DAYS", 3)
+    quarterly_grace_days: int = _env_int("LUMEN_MACRO_QUARTERLY_GRACE_DAYS", 3)
+
+    # How far back to look for periods that were never reported on, and how
+    # many may be caught up in one go. The cap matters: a system switched off
+    # for a year would otherwise wake up and start dozens of model calls at
+    # once.
+    catchup_periods: int = _env_int("LUMEN_MACRO_CATCHUP_PERIODS", 6)
+    max_runs_per_invocation: int = _env_int("LUMEN_MACRO_MAX_RUNS", 4)
+
+    # The near-real-time scan. A burst of beliefs branching or contradicting
+    # inside two days is the shape of something shifting while it happens.
+    shadow_window_hours: int = _env_int("LUMEN_MACRO_SHADOW_WINDOW_HOURS", 48)
+    shadow_min_decisions: int = _env_int("LUMEN_MACRO_SHADOW_MIN_DECISIONS", 3)
+    shadow_min_targets: int = _env_int("LUMEN_MACRO_SHADOW_MIN_TARGETS", 2)
+    shadow_repeat_hours: int = _env_int("LUMEN_MACRO_SHADOW_REPEAT_HOURS", 24)
+
+    # How much of a window one report will read. A cap rather than a
+    # suggestion, and hitting it is recorded in the report rather than
+    # hidden, because a partial summary presented as a whole one is a wrong
+    # answer that looks right.
+    max_episodes_per_window: int = _env_int("LUMEN_MACRO_MAX_EPISODES", 200)
+    max_nodes_per_kind: int = _env_int("LUMEN_MACRO_MAX_NODES_PER_KIND", 500)
+
+    # How much of the arithmetic makes it into the report.
+    top_patterns_limit: int = _env_int("LUMEN_MACRO_TOP_PATTERNS", 10)
+    high_signal_limit: int = _env_int("LUMEN_MACRO_HIGH_SIGNAL_LIMIT", 25)
+    open_loop_limit: int = _env_int("LUMEN_MACRO_OPEN_LOOP_LIMIT", 25)
+    ignored_lesson_limit: int = _env_int("LUMEN_MACRO_IGNORED_LESSON_LIMIT", 10)
+    aging_limit: int = _env_int("LUMEN_MACRO_AGING_LIMIT", 25)
+
+    # How often something has to happen before the report says it recurs.
+    repeated_lesson_min_episodes: int = _env_int("LUMEN_MACRO_REPEATED_LESSON_MIN", 3)
+    relational_min_observations: int = _env_int("LUMEN_MACRO_RELATIONAL_MIN", 2)
+    arc_min_episodes: int = _env_int("LUMEN_MACRO_ARC_MIN_EPISODES", 3)
+
+    # How long a lesson can go unmentioned before it counts as ignored, and
+    # how far back to look for lessons that might qualify.
+    ignored_lesson_days: int = _env_int("LUMEN_MACRO_IGNORED_LESSON_DAYS", 14)
+    ignored_lesson_lookback_days: int = _env_int("LUMEN_MACRO_IGNORED_LOOKBACK_DAYS", 180)
+
+    # When a quiet pattern is worth less, and when it is quiet enough that
+    # nobody can tell from the record whether it resolved or just stopped
+    # being written down. The multipliers are reported here and applied to
+    # search ranking elsewhere.
+    cooling_days: int = _env_int("LUMEN_MACRO_COOLING_DAYS", 180)
+    dormant_days: int = _env_int("LUMEN_MACRO_DORMANT_DAYS", 365)
+    cooling_multiplier: float = _env_float("LUMEN_MACRO_COOLING_MULTIPLIER", 0.85)
+    dormant_multiplier: float = _env_float("LUMEN_MACRO_DORMANT_MULTIPLIER", 0.5)
+
+    # What counts as an identity-level shift rather than a few patterns
+    # moving independently, and how far back the comparison reaches.
+    archetype_min_patterns: int = _env_int("LUMEN_MACRO_ARCHETYPE_MIN_PATTERNS", 5)
+    archetype_window_days: int = _env_int("LUMEN_MACRO_ARCHETYPE_WINDOW_DAYS", 90)
+
+    # The single call that writes the report's prose. Capped by length
+    # because a quarter of somebody's history does not fit in a prompt, and
+    # retried twice because it is nobody's live request.
+    narrative_max_chars: int = _env_int("LUMEN_MACRO_NARRATIVE_MAX_CHARS", 20000)
+    narrative_attempts: int = _env_int("LUMEN_MACRO_NARRATIVE_ATTEMPTS", 2)
+    narrative_excerpt_chars: int = _env_int("LUMEN_MACRO_EXCERPT_CHARS", 220)
 
 
 @dataclass(frozen=True)
@@ -335,14 +568,21 @@ class ProviderConfig:
     thinking_provider: str = _env("LUMEN_THINKING_PROVIDER", "gemini")
     thinking_model: str = _env("LUMEN_THINKING_MODEL", "gemini-2.5-pro")
 
+    # The model that talks to the person. Configured on its own because
+    # writing a warm reply in under a second and doing the overnight
+    # extraction reasoning are different jobs with different needs — tying
+    # them together means every improvement to one hurts the other.
+    conversation_provider: str = _env("LUMEN_CONVERSATION_PROVIDER", "gemini")
+    conversation_model: str = _env("LUMEN_CONVERSATION_MODEL", "gemini-2.5-flash")
+
     embedding_provider: str = _env("LUMEN_EMBEDDING_PROVIDER", "gemini")
     embedding_model: str = _env("LUMEN_EMBEDDING_MODEL", "text-embedding-004")
 
-    transcription_provider: str = _env("LUMEN_TRANSCRIPTION_PROVIDER", "whisper_cpp")
-    transcription_model: str = _env("LUMEN_TRANSCRIPTION_MODEL", "base.en")
+    transcription_provider: str = _env("LUMEN_TRANSCRIPTION_PROVIDER", "gemini")
+    transcription_model: str = _env("LUMEN_TRANSCRIPTION_MODEL", "gemini-2.5-flash")
 
-    tts_provider: str = _env("LUMEN_TTS_PROVIDER", "macos")
-    tts_model: str = _env("LUMEN_TTS_MODEL", "default")
+    tts_provider: str = _env("LUMEN_TTS_PROVIDER", "gemini")
+    tts_model: str = _env("LUMEN_TTS_MODEL", "gemini-2.5-flash-preview-tts")
 
     # Where a local Ollama daemon is listening.
     ollama_host: str = _env("LUMEN_OLLAMA_HOST", "http://localhost:11434")
@@ -394,6 +634,10 @@ class ProviderConfig:
         mapping: dict[ModelRole, tuple[str, str]] = {
             ModelRole.LIGHTWEIGHT: (self.lightweight_provider, self.lightweight_model),
             ModelRole.THINKING: (self.thinking_provider, self.thinking_model),
+            ModelRole.CONVERSATION: (
+                self.conversation_provider,
+                self.conversation_model,
+            ),
             ModelRole.EMBEDDING: (self.embedding_provider, self.embedding_model),
             ModelRole.TRANSCRIPTION: (self.transcription_provider, self.transcription_model),
             ModelRole.TTS: (self.tts_provider, self.tts_model),
@@ -499,7 +743,9 @@ class AppConfig:
     observability: ObservabilityConfig = field(default_factory=ObservabilityConfig)
     pipeline: PipelineConfig = field(default_factory=PipelineConfig)
     query: QueryConfig = field(default_factory=QueryConfig)
+    chat: ChatConfig = field(default_factory=ChatConfig)
     ingest: IngestConfig = field(default_factory=IngestConfig)
+    macro: MacroConfig = field(default_factory=MacroConfig)
 
     # The personal build has one user. Multi-user deployments set this per request.
     user_id: str = _env("LUMEN_USER_ID", "local")

@@ -12,6 +12,7 @@
   <nav>
     <a href="index.html">Import</a>
     <a href="episodes.html">Episodes</a>
+    <a href="reports.html">Reports</a>
     <a href="trace.html">Runs</a>
     <a href="chat.html">Turn reader</a>
   </nav>
@@ -22,10 +23,10 @@
   <section>
     <h2>What a sentence would look up</h2>
     <div class="notice warn">
-      This is not the conversation layer. It reads a sentence and reports what
-      <em>would</em> be retrieved because of it — nothing is searched for, and no
-      answer is written. Retrieval and assembly are still to be built, so a
-      reply here would be a mock-up rather than the thing itself.
+      This is not the conversation layer. It reads a sentence, fetches what that
+      sentence points at, and shows exactly what the assistant would be sent
+      because of it — but it writes no reply. Generating one is the next piece
+      of work, and a mock-up here would be the least useful thing on the page.
     </div>
     <p class="lede">
       Everything this layer decides is invisible by design: it happens between
@@ -40,6 +41,10 @@
         <textarea id="text" placeholder="Say something the way you would to the assistant…"></textarea>
       </div>
       <div class="row" style="margin-top:8px; justify-content:flex-end">
+        <label class="dim" style="margin-right:auto">
+          <input type="checkbox" id="fetch" checked>
+          fetch what it points at, and show the prompt
+        </label>
         <button id="clear">Start over</button>
         <button id="send">Read it</button>
       </div>
@@ -60,9 +65,15 @@
  * Four turns of context are what the reader itself uses. Some sentences
  * cannot be read alone: "I don't feel that anymore" says nothing without the
  * one before it.
+ *
+ * Fetching is different. It needs a conversation that lasts, because one of
+ * the three searches exists purely to notice that this turn and an earlier one
+ * are about the same thing — and a conversation of length one has no earlier
+ * one. So a key is sent, and the server keeps the day's thread against it.
  */
 
 const history = [];
+const sessionKey = "ui-" + Math.random().toString(36).slice(2, 10);
 
 document.getElementById("send").addEventListener("click", read);
 document.getElementById("clear").addEventListener("click", () => {
@@ -83,14 +94,40 @@ async function read() {
   box.value = "";
 
   const button = document.getElementById("send");
+  const alsoFetch = document.getElementById("fetch").checked;
   button.disabled = true;
   try {
-    const signal = await api("/query/formulate", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ text, history: history.slice(-4) }),
-    });
-    thread.append(reading(signal));
+    if (alsoFetch) {
+      const context = await api("/query/retrieve", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          text,
+          history: history.slice(-4),
+          session_key: sessionKey,
+        }),
+      });
+      thread.append(reading(context.signal));
+      thread.append(fetched(context));
+
+      // The same turn again, one stage further on. Two calls rather than one
+      // because they answer different questions — whether the right records
+      // were found, and whether they became a briefing worth reading — and
+      // seeing them apart is the point of the page.
+      const prompt = await api("/query/prompt", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ text, session_key: sessionKey + "-prompt" }),
+      });
+      thread.append(briefed(prompt));
+    } else {
+      const signal = await api("/query/formulate", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ text, history: history.slice(-4) }),
+      });
+      thread.append(reading(signal));
+    }
     history.push({ role: "user", content: text });
   } catch (error) {
     thread.append(el("div", { class: "turn sys" }, say("bad", String(error.message))));
@@ -145,6 +182,107 @@ function reading(signal) {
       : null,
 
     foldout("Everything it decided", signal),
+  );
+}
+
+/** What the three searches came back with. */
+function fetched(context) {
+  const found = context.candidates || [];
+
+  return el("div", { class: "turn sys" },
+    el("div", { class: "stage-head" },
+      el("span", { class: "name" }, "Fetched"),
+      el("span", { class: "tag queued" }, context.outcome),
+      el("span", { class: "dim" }, howLong(context.latency_ms)),
+      context.within_budget
+        ? null
+        : el("span", { class: "tag dup" }, "over budget"),
+    ),
+
+    // A search that found nothing and a search that could not run look
+    // identical in the list and mean opposite things, so the per-search
+    // account is shown rather than folded away.
+    el("div", { class: "dim", style: "margin-top:6px" },
+      (context.passes || []).map((pass) =>
+        `${pass.which}: ${pass.failure || (pass.ran ? pass.kept : "not needed")}`
+      ).join("  ·  ")),
+
+    found.length
+      ? el("table", { style: "margin-top:10px" },
+          el("thead", {}, el("tr", {},
+            el("th", {}, "Record"), el("th", {}, "Found by"),
+            el("th", {}, "Score"), el("th", {}, "Says"))),
+          el("tbody", {}, found.map((node) =>
+            el("tr", {},
+              el("td", {}, node.node_id),
+              el("td", { class: "dim" },
+                [node.found_by, node.anchor_type, node.boosted ? "carried" : null]
+                  .filter(Boolean).join(" · ")),
+              el("td", { class: "dim" }, node.rank_score.toFixed(2)),
+              el("td", {}, node.preview),
+            )
+          )),
+        )
+      : el("div", { class: "faint", style: "margin-top:8px" },
+          "Nothing came back for this turn."),
+
+    // Named rather than silently dropped: a system that quietly withholds
+    // things is one nobody can debug.
+    (context.gated || []).length
+      ? say("warn", "Held back until the subject is raised: " + context.gated.join(", "))
+      : null,
+
+    (context.buffered || []).length
+      ? el("div", { class: "dim", style: "margin-top:8px" },
+          "Today's thread: " + context.buffered.join(", "))
+      : null,
+
+    foldout("Everything it fetched", context),
+  );
+}
+
+/** What the assistant would actually be sent. */
+function briefed(prompt) {
+  const lines = prompt.briefing || [];
+
+  return el("div", { class: "turn sys" },
+    el("div", { class: "stage-head" },
+      el("span", { class: "name" }, "Would be sent"),
+      el("span", { class: "tag queued" }, prompt.emotional_register),
+      el("span", { class: "dim" },
+        `${prompt.briefing_tokens}/${prompt.token_budget} tokens of history`),
+      el("span", { class: "faint" }, `${prompt.total_tokens} in total`),
+      prompt.suppressed
+        ? el("span", { class: "tag dup" }, "history withheld")
+        : null,
+    ),
+
+    // The briefing is the part worth reading by eye. No test can say whether
+    // a sentence is a fair summary of the record behind it; a person can.
+    lines.length
+      ? el("div", { style: "margin-top:10px" },
+          lines.map((line) =>
+            el("div", { class: "row", style: "margin-bottom:6px" },
+              el("span", {}, line.text),
+              el("span", { class: "faint" }, ` — ${line.node_id}`),
+            )
+          ))
+      : el("div", { class: "faint", style: "margin-top:8px" },
+          prompt.suppressed
+            ? "Nothing was offered: this turn reads as distress."
+            : "No history reached the assistant for this turn."),
+
+    (prompt.dropped || []).length
+      ? el("div", { class: "dim", style: "margin-top:8px" },
+          "Cut: " + prompt.dropped.map((d) => `${d.node_id} (${d.reason})`).join(", "))
+      : null,
+
+    prompt.summary
+      ? el("div", { class: "dim", style: "margin-top:8px" },
+          "So far: " + prompt.summary)
+      : null,
+
+    foldout("The instructions in full", prompt.system),
   );
 }
 </script>

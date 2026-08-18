@@ -36,7 +36,8 @@ from fastapi.staticfiles import StaticFiles
 
 from lumen.api.deps import get_graph, get_ops
 from lumen.api.errors import register_error_handlers
-from lumen.api.routes import debug, graph, ingest, query
+from lumen.api.resources import LazyChatStack, LazySearchStack
+from lumen.api.routes import chat, debug, graph, ingest, query, reports
 from lumen.api.schemas import HealthView
 from lumen.config import AppConfig
 from lumen.env import load_env
@@ -47,8 +48,15 @@ from lumen.observability.logging import configure_logging
 from lumen.operational.repositories import OperationalStore
 from lumen.operational.sqlalchemy_impl import build_operational_store
 from lumen.providers.errors import ProviderError
+from lumen.pipeline.macroextraction.service import MacroextractionService
 from lumen.providers.factory import get_llm_provider
-from lumen.query import QueryFormulator
+from lumen.query import (
+    ConversationMemory,
+    ConversationStore,
+    PromptComposer,
+    QueryFormulator,
+    SessionRegistry,
+)
 from lumen.schemas.enums import ModelRole
 
 logger = logging.getLogger(__name__)
@@ -82,6 +90,8 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
     app.include_router(graph.router)
     app.include_router(debug.router)
     app.include_router(query.router)
+    app.include_router(chat.router)
+    app.include_router(reports.router)
 
     # Not mounted at all when uploads are switched off, rather than mounted
     # and refusing. A deployment that says it only reads should not have a
@@ -154,14 +164,36 @@ def _lifespan_for(settings: AppConfig):
         provider = KuzuGraphProvider(settings.graph.db_path)
         provider.init_schema()
         store = build_operational_store(settings)
-        store.init_schema()
+        _bring_the_schema_up_to_date(store)
         formulator = _build_formulator(settings, provider)
         worker = _build_worker(settings, store, provider)
+        search = LazySearchStack(
+            config=settings, graph=provider, reader=provider, worker=worker
+        )
 
         app.state.graph = provider
         app.state.ops = store
+        app.state.reporter = MacroextractionService(
+            config=settings, graph=provider, ops=store
+        )
         app.state.formulator = formulator
         app.state.ingest = worker
+        app.state.search = search
+        app.state.sessions = SessionRegistry(settings.query)
+        app.state.composer = PromptComposer(config=settings.chat)
+        app.state.memory = ConversationMemory(
+            store=ConversationStore(store.buffers),
+            llm=_summariser(settings),
+            config=settings.chat,
+        )
+        app.state.chat = LazyChatStack(
+            config=settings,
+            search=search,
+            formulator=formulator,
+            composer=app.state.composer,
+            memory=app.state.memory,
+            sessions=app.state.sessions,
+        )
         logger.info("api ready", extra={"graph_path": settings.graph.db_path})
 
         try:
@@ -172,6 +204,11 @@ def _lifespan_for(settings: AppConfig):
             # half-written episode, and closing the graph out from under it
             # would be the one way to leave the store in a state no
             # transaction protected.
+            # The search stack goes before the importer, since it may be
+            # borrowing the importer's index and closing that first would
+            # pull it out from under a request still being served.
+            app.state.chat.close()
+            search.close()
             if worker is not None:
                 worker.stop()
             if formulator is not None:
@@ -181,6 +218,46 @@ def _lifespan_for(settings: AppConfig):
             logger.info("api stopped")
 
     return lifespan
+
+
+def _bring_the_schema_up_to_date(store) -> None:
+    """
+    Run the migrations the operational database has not had yet.
+
+    This used to create any missing tables instead, which is a different
+    thing and quietly the wrong one. Creating tables leaves a database with
+    no record of which migrations it represents, so the next change to a
+    model adds a column that never reaches the table — and the failure
+    arrives much later as `no such column` from whichever query happens to
+    touch it first, with nothing to connect it back to a schema that was
+    never migrated.
+
+    A database that holds tables but no migration history is refused rather
+    than guessed at. It can only have come from the old path, and the two
+    ways out are a one-line command each — but choosing between them means
+    knowing which migration its tables actually represent, which is a
+    question for a person and not for a service starting up.
+    """
+    from sqlalchemy import inspect
+
+    from lumen.operational.migrator import upgrade_to_head
+
+    inspector = inspect(store.engine)
+    tables = set(inspector.get_table_names())
+
+    if tables and "alembic_version" not in tables:
+        raise RuntimeError(
+            "the operational database has tables but no migration history, so "
+            "the migrations cannot be applied to it. It was built by an older "
+            "startup path that created tables directly. Stamp it with the "
+            "revision its tables match and then upgrade:\n"
+            "    uv run alembic stamp <revision>\n"
+            "    uv run alembic upgrade head\n"
+            "or, if nothing in it is worth keeping, delete it and start again."
+        )
+
+    upgrade_to_head(store.engine)
+    logger.info("operational schema is up to date")
 
 
 def _build_worker(settings: AppConfig, ops, graph) -> IngestWorker | None:
@@ -279,6 +356,25 @@ def _build_formulator(
         )
         return None
     return QueryFormulator(llm=llm, graph=graph, config=settings.query)
+
+
+def _summariser(settings: AppConfig):
+    """
+    The model that writes up a conversation, if there is one.
+
+    Nobody waits on this call — it happens after a reply has gone out — so it
+    keeps the ordinary retries rather than the turn reader's single attempt.
+    A deployment with no model configured simply stops compressing the older
+    part of a conversation; everything else about holding one still works.
+    """
+    try:
+        return get_llm_provider(ModelRole.LIGHTWEIGHT, settings)
+    except ProviderError:
+        logger.warning(
+            "no model is configured, so conversations will not be summarised",
+            exc_info=True,
+        )
+        return None
 
 
 def _answers(probe) -> bool:

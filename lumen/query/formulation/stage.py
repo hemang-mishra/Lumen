@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import logging
 import time
+from dataclasses import dataclass
 
 from pydantic import ValidationError
 
@@ -34,7 +35,7 @@ from lumen.providers.errors import ProviderError
 from lumen.providers.protocols import LLMProvider
 from lumen.query.formulation import safety, triage
 from lumen.query.formulation.contracts import ClassifierReply
-from lumen.query.formulation.deadline import DeadlineExceeded, DeadlineRunner
+from lumen.query.deadline import DeadlineExceeded, DeadlineRunner
 from lumen.query.formulation.grounding import (
     GroundingContext,
     clean_names,
@@ -44,10 +45,40 @@ from lumen.query.formulation.grounding import (
 )
 from lumen.query.formulation.prompts import SYSTEM_INSTRUCTION, build_prompt
 from lumen.query.session import ChatSession
-from lumen.schemas.enums import EmotionalRegister, FormulationPath
+from lumen.schemas.enums import Domain, EmotionalRegister, FormulationPath
 from lumen.schemas.query import ChatTurn, RetrievalSignal, RetrievalTrigger
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class Reading:
+    """
+    What one deadline-guarded reading of a turn produced.
+
+    Exists so the work and its consequences can be separated. Everything here
+    was worked out on a worker thread that may have been abandoned; nothing
+    is acted on until the calling thread decides the reading arrived in time.
+
+    Attributes:
+        register: How the person sounds.
+        confidence: How sure the model was, held to 0–1.
+        triggers: The reasons to search that survived being checked against
+            the graph.
+        names: The names the turn mentioned, tidied but not checked.
+        opened: A sensitive area of life the person opened themselves, if any.
+        eras_to_remember: The era names, when they were fetched on this turn
+            and the fetch worked. Nothing when they were already known, and
+            nothing when the read failed — a failed read must not be cached,
+            or one bad moment switches off era lookups until midnight.
+    """
+
+    register: EmotionalRegister
+    confidence: float
+    triggers: tuple[RetrievalTrigger, ...]
+    names: tuple[str, ...]
+    opened: Domain | None
+    eras_to_remember: tuple[str, ...] | None
 
 
 class QueryFormulator:
@@ -107,11 +138,11 @@ class QueryFormulator:
                 confidence=1.0,
             )
 
-        reply, path = self._ask(turn, session)
-        if reply is None:
+        reading, path = self._consider(turn, session)
+        if reading is None:
             return self._finish(turn, session, started=started, path=path)
 
-        return self._read(reply, turn, session, started=started)
+        return self._read(reading, turn, session, started=started)
 
     def close(self) -> None:
         """Release the thread pool, if this object is the one that made it."""
@@ -122,33 +153,39 @@ class QueryFormulator:
     # Asking the model
     # ------------------------------------------------------------------
 
-    def _ask(
+    def _consider(
         self, turn: ChatTurn, session: ChatSession
-    ) -> tuple[ClassifierReply | None, FormulationPath]:
+    ) -> tuple[Reading | None, FormulationPath]:
         """
-        One call, with a hard limit on how long the turn may wait for it.
+        Read the turn, with a hard limit on how long it may take.
+
+        **Everything that touches a store or a model is inside the limit**,
+        not just the model call. The graph reads on either side of it — the
+        era names before, the checks on what the model claimed after — are
+        reads of an embedded database that serialises against the importer,
+        so one of them can wait on a write transaction for as long as that
+        transaction takes. A budget covering only the middle of the stage is
+        a budget that describes nothing.
+
+        Nothing here touches the day's session. It is read once, before the
+        work starts, and written to afterwards by the caller — because a
+        reading that misses its deadline goes on running with nobody waiting
+        for it, and a stray write from one of those would let a turn nobody
+        used unlock a sensitive subject.
 
         Every way this can go wrong ends the same way — nothing is looked
         up — but they are reported separately, because a model that is
         always slow and a model that is always erroring are different
         problems with different fixes.
         """
-        eras = era_vocabulary(self._graph, session, config=self._config)
+        known = session.era_vocabulary
         history = session.recent_turns(
             max(self._config.formulation_context_turns - 1, 0)
         )
-        prompt = build_prompt(
-            [*history, turn],
-            classify_index=turn.turn_index,
-            eras=eras,
-            keyword_limit=self._config.max_keywords_per_trigger,
-        )
 
         try:
-            result = self._runner.run(
-                lambda: self._llm.generate_structured(
-                    prompt, ClassifierReply, system_instruction=SYSTEM_INSTRUCTION
-                ),
+            reading = self._runner.run(
+                lambda: self._reading(turn, history, known),
                 timeout_seconds=self._config.formulation_timeout_seconds,
             )
         except DeadlineExceeded:
@@ -171,27 +208,78 @@ class QueryFormulator:
             )
             return None, FormulationPath.CALL_FAILED
 
+        if reading is None:
+            return None, FormulationPath.CALL_FAILED
+        return reading, FormulationPath.CLASSIFIED
+
+    def _reading(
+        self,
+        turn: ChatTurn,
+        history: list[ChatTurn],
+        known_eras: tuple[str, ...] | None,
+    ) -> Reading | None:
+        """
+        The whole of the work, on one thread, inside one budget.
+
+        Runs on a worker thread and therefore touches nothing shared. The era
+        names it may have to fetch are handed back rather than cached here,
+        so that only a reading the turn actually used is remembered for the
+        rest of the day.
+        """
+        fetched = (
+            era_vocabulary(self._graph, config=self._config)
+            if known_eras is None
+            else None
+        )
+        eras = known_eras if known_eras is not None else fetched
+
+        prompt = build_prompt(
+            [*history, turn],
+            classify_index=turn.turn_index,
+            eras=eras or (),
+            keyword_limit=self._config.max_keywords_per_trigger,
+        )
+        result = self._llm.generate_structured(
+            prompt, ClassifierReply, system_instruction=SYSTEM_INSTRUCTION
+        )
+
         if result.data is None:
             logger.warning(
                 "the model's reading of the turn could not be read back",
-                extra={
-                    "session_id": session.session_id,
-                    "reason": result.parse_error,
-                },
+                extra={"reason": result.parse_error},
             )
-            return None, FormulationPath.CALL_FAILED
+            return None
 
         try:
-            return ClassifierReply.model_validate(result.data), FormulationPath.CLASSIFIED
+            reply = ClassifierReply.model_validate(result.data)
         except ValidationError as exc:
             logger.warning(
                 "the model's reading of the turn had an unexpected shape",
-                extra={
-                    "session_id": session.session_id,
-                    "errors": exc.error_count(),
-                },
+                extra={"errors": exc.error_count()},
             )
-            return None, FormulationPath.CALL_FAILED
+            return None
+
+        context = GroundingContext(
+            graph=self._graph,
+            eras=eras or (),
+            keyword_limit=self._config.max_keywords_per_trigger,
+        )
+        triggers = ground_triggers(reply.triggers, context=context)[
+            : max(self._config.max_triggers_per_turn, 0)
+        ]
+
+        return Reading(
+            register=_parse_register(reply.emotional_register),
+            confidence=_clamp(reply.confidence),
+            triggers=triggers,
+            names=clean_names(reply.named_entities),
+            opened=parse_domain(reply.critical_domain_opened),
+            # Only a freshly fetched, successful answer is worth keeping. A
+            # failed read comes back as nothing and is not remembered, so the
+            # next turn asks again instead of assuming this history has no
+            # eras in it for the rest of the day.
+            eras_to_remember=fetched,
+        )
 
     # ------------------------------------------------------------------
     # Making sense of what came back
@@ -199,14 +287,18 @@ class QueryFormulator:
 
     def _read(
         self,
-        reply: ClassifierReply,
+        reading: Reading,
         turn: ChatTurn,
         session: ChatSession,
         *,
         started: float,
     ) -> RetrievalSignal:
         """
-        Turn a model's answer into a checked signal.
+        Apply a finished reading to the day, and build the signal from it.
+
+        This is the only place the day is changed, and it runs on the calling
+        thread — so a reading that was abandoned for missing its deadline can
+        never reach it, however long it goes on running afterwards.
 
         The order matters at the end. Anything the person opened up is
         remembered *before* a crisis clears the reasons to search, because
@@ -214,22 +306,16 @@ class QueryFormulator:
         that again — the crisis suppresses this turn's lookup, not the fact
         that the subject is now on the table.
         """
-        context = GroundingContext(
-            graph=self._graph,
-            eras=era_vocabulary(self._graph, session, config=self._config),
-            keyword_limit=self._config.max_keywords_per_trigger,
-        )
-        triggers = ground_triggers(reply.triggers, context=context)[
-            : max(self._config.max_triggers_per_turn, 0)
-        ]
+        if reading.eras_to_remember is not None:
+            session.remember_era_vocabulary(reading.eras_to_remember)
 
-        opened = parse_domain(reply.critical_domain_opened)
-        if opened is not None:
-            session.unlock(opened)
+        if reading.opened is not None:
+            session.unlock(reading.opened)
 
-        register = _parse_register(reply.emotional_register)
-        suppressed = register is EmotionalRegister.CRISIS and bool(triggers)
-        if register is EmotionalRegister.CRISIS:
+        triggers = reading.triggers
+        in_crisis = reading.register is EmotionalRegister.CRISIS
+        suppressed = in_crisis and bool(triggers)
+        if in_crisis:
             triggers = ()
 
         return self._finish(
@@ -237,11 +323,11 @@ class QueryFormulator:
             session,
             started=started,
             path=FormulationPath.CLASSIFIED,
-            register=register,
-            confidence=_clamp(reply.confidence),
+            register=reading.register,
+            confidence=reading.confidence,
             triggers=triggers,
-            names=clean_names(reply.named_entities),
-            opened=opened,
+            names=reading.names,
+            opened=reading.opened,
             suppressed=suppressed,
         )
 
@@ -325,4 +411,4 @@ def _elapsed_ms(started: float) -> int:
     return max(int((time.perf_counter() - started) * 1000), 0)
 
 
-__all__ = ["QueryFormulator"]
+__all__ = ["QueryFormulator", "Reading"]

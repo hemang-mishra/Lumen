@@ -143,11 +143,49 @@ The formulation layer also classifies the user's current emotional register. Thi
 
 ## Stage 2: Three Parallel Retrieval Passes
 
+> **Correction to "parallel".** Passes A and B genuinely run side by side under one
+> shared wall-clock budget. Pass C cannot: its whole job is to measure today's already-surfaced
+> nodes against *this* turn, and the measurement it needs is the one Pass A has just computed.
+> Giving Pass C its own embedding call to measure the same sentence a second time would double
+> the cost of a turn to learn nothing. The shipped order is **A ∥ B, then C** — and C is
+> arithmetic on numbers already in memory, so it adds about a millisecond.
+
 ### Pass A — Semantic Retrieval
 HyDE expansion → Hybrid BM25 + Vector → Top 3–5 nodes. (Same as existing architecture.)
 
+One HyDE call covers every trigger on the turn, batched and aligned by index; a missing
+hypothetical falls back to the turn's own words rather than shifting the list up, because
+searching one trigger with another trigger's text returns confident wrong nodes. Sparse/BM25
+remains unimplemented — the provider logs a warning and searches dense-only, as it has since
+Goal 1.
+
+Two triggers narrow the search to particular node kinds, because they name experiences the
+graph records under specific types: `SOMATIC_MARKER` → `PHYSIOLOGICAL_CAPACITY_STATE` /
+`SUPPRESSED_EMOTION_SURFACING`; `IDENTITY_STATEMENT` → `BeliefNode` plus `BELIEF` /
+`META_BELIEF` / `IDENTITY_FUSION_STATE` observations. The rest search unrestricted.
+
 ### Pass B — Structural Retrieval
 Named-entity anchors + historical_era tags + high-sensitivity open nodes. (Defined in Architecture.md Stage 2.)
+
+Which anchors run is decided by the trigger, as a table rather than a chain of conditions:
+
+| Trigger | Anchors followed |
+|---|---|
+| `NAMED_PERSON` | everything mentioning them, plus the patterns and beliefs those notes became |
+| `HISTORICAL_ERA` | everything tagged with that era, in the graph's own spelling |
+| `OPEN_LOOP_MATCH` | the open-loop table |
+| `PROGRESS_CLAIM` | open loops **and** the current standing records in the trigger's domain |
+| `BELIEF_CHALLENGE` | the current beliefs in the trigger's domain |
+| `PATTERN_MENTION`, `SOMATIC_MARKER`, `IDENTITY_STATEMENT` | none — semantic answers them |
+
+**`PROGRESS_CLAIM` → "closure detection" is defined here for the first time.** The document
+named the behaviour without saying what it looks up. A claim that something has changed is a
+claim about a *specific* standing record, and the only way to judge it is to have that record
+and the questions left open beside it — so both are fetched.
+
+A trigger with no anchor half leaves this pass with nothing to run, which is recorded as *not
+having run* rather than as having run and found nothing. The distinction matters downstream:
+"the graph was asked and said nothing" and "the graph was never asked" are different facts.
 
 ### Pass C — Session Continuity Retrieval (NEW)
 
@@ -173,11 +211,52 @@ Pass C is unique to Conversational RAG Mode. It maintains a `SessionContextBuffe
 
 **Buffer management:** Max 5 nodes. Nodes not relevant for 5+ consecutive turns are evicted. Nodes with `extraction_signal_strength: CRITICAL` are never evicted mid-session.
 
+**Where the relevance number comes from.** Previously unstated, which made the `<20ms, always
+succeeds` budget unbuildable — a comparison needs something to compare. Each node caches its
+own stored vector when it enters the buffer (one index read per newly-admitted node), and each
+turn compares those against Pass A's query vector. That is arithmetic, hence the budget. When
+either side has no vector — Pass A could not run, or the node was written before the index
+existed — the comparison falls back to word overlap against the node's preview. Blunter, and
+used rather than skipped, because a conversation losing its thread is a worse failure than a
+slightly wrong relevance.
+
+**The deadlock the two rules produce together.** Five slots and "CRITICAL is never evicted"
+means a session can fill entirely with protected nodes and be unable to admit anything new.
+The shipped rule: protected entries are never removed, and a new node that cannot get a slot
+is still returned to the AI on this turn — it simply does not join the buffer. Nothing is
+lost; the buffer stops growing.
+
 ---
 
 ## Stage 3: Context Assembly
 
-Candidates from Passes A, B, C are merged and ranked. The final injection block has a hard cap of **400 tokens**. This is non-negotiable.
+Candidates from Passes A, B, C are merged and ranked.
+
+> **The 400-token cap is replaced, per explicit user decision.** It was chosen when the
+> binding constraint was a three-second wait; that constraint has been lifted (5–10 seconds
+> before a considered reply is acceptable, and recall matters more), and 400 tokens throws
+> away most of what retrieval worked to find. What ships instead is an allowance set by how
+> the person sounds:
+>
+> | Register | Tokens | Records | Quotes | Kinds |
+> |---|---|---|---|---|
+> | `CRISIS` | 0 | 0 | — | none at all |
+> | `VULNERABLE` | ~400 | 2 | no | settled records only — patterns, beliefs, lessons, principles |
+> | `STABLE` | ~800 | 4 | yes | any |
+> | `REFLECTIVE` | ~1500 | 6 | yes | any |
+>
+> The reason for varying it is not cost. A wall of history in front of a light question
+> makes the answer worse — the assistant reaches for connections nobody asked about instead
+> of answering what was said. Configurable via `LUMEN_CONTEXT_TOKENS_*` and
+> `LUMEN_CONTEXT_RECORDS_*`; there is deliberately **no** crisis setting, so that a clinical
+> decision cannot become a configuration mistake.
+>
+> Two further rules cut before the budget does. Records whose text overlaps an
+> already-chosen one by ≥0.8 are dropped as repeats — a strong theme otherwise fills the
+> whole allowance with variations on itself — and no more than three records of any one kind
+> get through, because three patterns and a belief is a more useful briefing than six
+> patterns. Everything cut is recorded with the rule that cut it, since a briefing that
+> disappoints is usually explained by what is missing.
 
 ### Ranking Formula (Conversational Mode)
 
@@ -187,9 +266,31 @@ conv_score = cosine_similarity × signal_weight × recency_weight × session_rel
 
 Where `session_relevance_boost` = 1.3× if the node is already in the `SessionContextBuffer`.
 
+> **Split by layer, as the extraction-side formula was.** Retrieval (Goal 14) produces a
+> *provisional* ordering — `cosine × signal_weight × session_relevance_boost` — used only to
+> rank and cut its own candidate list. `recency_weight` is **not** in it: temporal decay is
+> Goal 19's, and inventing a decay curve early would mean building it twice. Final ranking and
+> the ≤400-token compression are Goal 15's. A node found by an anchor carries no cosine at all
+> — an exact name match is not a measurement — so it is ordered by a configured base value
+> (`LUMEN_ANCHOR_BASE_SCORE`) while its `similarity` field stays unset, so nothing downstream
+> can mistake a policy number for a measured one.
+
 ### Node Compression Templates
 
 Nodes are not injected raw. Each is compressed to a 1–2 sentence therapeutic briefing.
+
+Three rules run through the shipped templates. **Dates are said the way people say them** —
+"yesterday", "three weeks ago", "in March" — because a timestamp in a briefing is noise the
+assistant has to translate before it can use it. **Quotes are dropped when the register is
+`VULNERABLE`**: hearing your own sentence repeated back during a bad moment lands as being
+studied rather than heard. And **a node of an unfamiliar kind still becomes a sentence**
+through a plain fallback, because losing a relevant piece of somebody's history to a missing
+row in a table would be the worse failure.
+
+A node's own capitalisation is left alone. Lowering the first letter reads slightly more
+like prose and turns "Alex called about it" into "alex called about it"; there is no
+reliable way to tell a name from an ordinary word at the start of a line, and names are
+exactly what a briefing about somebody's relationships must not mangle.
 
 | Node Type | Template |
 |---|---|
@@ -199,6 +300,19 @@ Nodes are not injected raw. Each is compressed to a 1–2 sentence therapeutic b
 | `OpenLoopNode` | *"Unresolved question from [date]: '[question]'."* |
 | `EpisodeNode` (causal chain) | *"On [date]: [TRIGGER] → [INTERNAL_STATE] → [ACTION] → [OUTCOME]."* |
 | `META_BELIEF` | *"Core self-model: '[content]'. [Active/Superseded]."* |
+
+### The system prompt around it
+
+The block does not stand alone. It is one section of an instruction with a fixed order —
+who the assistant is, how to be with them, the briefing and how to use it, where the
+conversation has got to, and what to do if they are in trouble. Sections with nothing in
+them are left out entirely rather than included as empty headings: "what you know about
+them" followed by silence reads as a claim that there is nothing to know.
+
+**In `CRISIS` the whole instruction is replaced**, not merely emptied of history. The
+ordinary one asks for curiosity and pattern-noticing, and that is the wrong thing to ask for
+at that moment even with no notes attached. The crisis form asks for presence, forbids
+analysis, and points at real help.
 
 ### Injection Format
 
@@ -225,6 +339,25 @@ Nodes with `signal_strength: CRITICAL` that cover deeply sensitive domains (e.g.
 A `CRITICAL` signal-strength node in a sensitive domain can be injected only if the user explicitly introduces that topic in the current session. The Query Formulation Layer detects this as a `CRITICAL_DOMAIN_OPENED` event. Once opened, `CRITICAL` nodes linked to that domain become eligible for injection for the rest of the session.
 
 **Example:** When the user says *"a teenager trying to figure out what is going on"* — this is `CRITICAL_DOMAIN_OPENED` for `ADOLESCENT_TRAUMA`. From that point, `CRITICAL` signal-strength nodes linked to identity confusion and adolescent isolation are unlocked for injection. The unlock expires at session end and must be re-triggered in a future session.
+
+### Which domains are sensitive, and what about nodes that have none
+
+Two rules this section needed and did not state. Both are enforced at the retrieval boundary
+(Goal 14) rather than at injection, so a gated node never leaves the search at all.
+
+**The sensitive domains are four:** `SELF_CONCEPT`, `RELATIONAL`, `HEALTH`, `SPIRITUALITY`.
+`EMOTIONAL` is deliberately excluded — in a therapeutic conversation nearly everything is
+emotional, and gating that would gate the entire graph, which is useless rather than careful.
+
+**A `CRITICAL` node with no domain at all is treated as sensitive.** This is the common case,
+not an edge case: only the standing records (patterns, beliefs, lessons, principles) carry a
+domain, while individual observations carry none. Such a node stays locked until the user has
+opened *some* sensitive domain in the session. The safe reading of "we do not know what this
+is about" is caution, since by definition it is the heaviest material in the graph.
+
+Gated nodes are **named** on the retrieval result rather than silently dropped. A system that
+quietly withholds things is one nobody can debug, and "why did it not mention the obvious
+thing?" is a question somebody will eventually ask of a graph they know holds the answer.
 
 ---
 
@@ -259,16 +392,34 @@ RAG retrieval is allowed to take up to **3 seconds** before the carry-forward po
 | Stage | Target | Notes |
 |---|---|---|
 | Query Formulation | **600ms hard deadline** (configurable) | Must complete before retrieval starts. See correction below. |
-| Pass A (Semantic) | <800ms | Can use full window if needed |
+| Context assembly + prompt | <50ms | Templates and arithmetic; no model call |
+| Conversation summary refresh | ~1 call per 8 turns | **After** the reply, never on the critical path |
+| Pass A (Semantic) | <2s (see below) | Contains a model call |
 | Pass B (Structural) | <200ms (graph lookup, no embedding) | Faster — no vector math |
 | Pass C (Buffer) | <20ms (in-memory) | Always succeeds |
 | Assembly + Compression | <200ms | |
-| **Total wait window** | **≤3 seconds** |
+| **Total wait window** | **≤3 seconds** | Enforced as a shared wall clock, not per pass |
+
+> **Correction to Pass A's budget.** `<800ms` cannot hold: Pass A contains a HyDE model call,
+> which this same document prices at 300–800ms, *plus* an embedding call and an index search.
+> The shipped budget is 2s for Pass A within the unchanged 3s total
+> (`LUMEN_PASS_A_TIMEOUT_SECONDS`), and the 3s is enforced from outside as one shared deadline
+> across A and B — three seconds means three seconds to the person waiting, not three seconds
+> each. A pass that misses it is abandoned and reported as abandoned; the pass that finished
+> still answers.
 
 > **Correction to the formulation budget.** This document previously specified `<100ms` for the formulation call. That figure is not reachable: a real call to a hosted fast model takes 300–800ms end to end, so a 100ms budget would be missed on essentially every turn and the number would describe nothing. The shipped behaviour is a **configurable hard deadline, defaulting to 600ms** (`LUMEN_FORMULATION_TIMEOUT_SECONDS`), after which the call is abandoned and the turn proceeds with no retrieval. The measured latency is recorded on every `RetrievalSignal`, so the real distribution is observable rather than assumed.
 >
 > Two consequences worth stating. The abandoned call is **not cancelled** — Python cannot stop a running thread — so it completes on its own and its answer is discarded; the thread pool is bounded and late arrivals are logged. And the formulation model is built with **retries disabled** (`max_attempts=1`), unlike every other model call in the system: a call that has already missed a sub-second deadline gains nothing from being tried again, and retrying only guarantees the wait is spent twice.
 >
+> **Correction to what the deadline covers.** The budget originally wrapped the model call and nothing else, which meant it bounded the smallest part of the stage. Grounding reads the graph on both sides of that call — the era vocabulary before it, one lookup per named person and the open-loop check after it — and since the single-writer lock landed, those reads serialise against an import's write transaction and can wait for as long as it runs. The whole stage is now one deadline-guarded unit, and **nothing inside it touches the day's session**: the work returns a reading and only the calling thread applies it, so a reading abandoned for missing its deadline cannot unlock a sensitive domain for a turn the conversation never used.
+>
+> **Correction to how the era vocabulary is cached.** A failed read used to be indistinguishable from a history that uses no eras — both were an empty list — and the empty list was then cached for the day, silently switching off every era lookup until midnight with nothing ever retrying. A failed read now returns nothing at all and only a real answer is remembered.
+
+> **Correction to what an empty search result may claim.** Each retrieval pass contains its own failures so one broken lookup does not cost the others. On its own that turned a store refusing every query into a pass reporting an empty answer — read one layer up as "this person has no such history". Each pass now counts the store calls it made and the ones refused, and reports itself unavailable when it has **nothing to show and something broke**. Not "everything broke": three searches where two refuse and the third honestly finds nothing would pass that stricter test and produce the same wrong answer. The bundle-level rule is unchanged — one search that actually consulted a store is still enough to say the graph was asked.
+>
+> The same distinction is now carried into Stage 3. `AssembledContext.search_failed` reaches the system prompt, which tells the assistant its notes could not be reached, that this does not mean there are none, and not to mention it — because an unreachable store and a person with no history otherwise produce byte-identical instructions.
+
 > A missed formulation deadline does **not** trigger the carry-forward policy. Carry-forward exists for retrieval that arrived late but is still worth having; a classification that arrived late describes a turn the conversation has already moved past. |
 
 ### Carry-Forward Policy
@@ -281,10 +432,150 @@ Context is **never discarded**. There are two outcomes:
 Carried-forward context is tagged `retrieval_source: DEFERRED` so the AI knows it is slightly stale relative to the current conversation state. Deferred context is injected at a lower priority rank than fresh retrieval (0.9× conv_score).
 
 > **Why 3 seconds?** The therapeutic conversational rhythm is preserved — the user is reading the previous AI response during this window. A 3-second retrieval window that runs in parallel with the user's reading time is effectively invisible. 5–10 seconds would exceed reading time and produce a felt pause.
+>
+> **Superseded, per explicit user decision.** The window is now **8 seconds**
+> (`LUMEN_RETRIEVAL_BUDGET_SECONDS`, with Pass A at 6s). A brief pause before a considered
+> reply is normal in this kind of conversation and reads as thought rather than lag; an
+> answer that missed the one relevant thing does not read as anything at all. Recall is
+> worth more here than the last few hundred milliseconds, and the budget is still enforced
+> as one shared wall clock so the pause has a ceiling.
+
+---
+
+## Holding the Conversation
+
+### The reply is streamed, and a streamed reply cannot be retried
+
+The assistant's reply is sent as it is written. A considered answer takes several
+seconds to produce, and the difference between watching it appear and waiting in silence
+is the difference between a pause that reads as thought and one that reads as lag.
+
+The model providers gained a `stream_text` capability for this, kept as a separate
+`StreamingLLMProvider` interface so that something which only needs a finished answer is
+not made to care about streaming.
+
+**A break partway through cannot be retried.** Every other model call in Lumen quietly
+tries again on failure, which is safe because nobody has seen the failed attempt. Once
+words are on somebody's screen they cannot be taken back, so a break ends the reply,
+reports what had already been said, and stores it — the person read those words, and a
+stored conversation that disagrees with the screen would have the next turn answered
+against a history missing half of it. A failure *before* any words is an ordinary failed
+call, because nothing reached anybody.
+
+### The reply model is configured on its own
+
+`ModelRole.CONVERSATION` joins the four existing roles (`LUMEN_CONVERSATION_PROVIDER` /
+`LUMEN_CONVERSATION_MODEL`). Writing a warm reply in under a second and doing the
+overnight extraction reasoning are different jobs with different needs; tying them
+together would mean every improvement to one is a regression to the other.
+
+### Continuity across days
+
+Today's conversation opens with what the last few days were about
+(`LUMEN_CHAT_PREVIOUS_DAYS`, default 3). Every day already writes a rolling summary of
+itself, so this costs a handful of row reads and no model call.
+
+**It counts days that hold a conversation, not squares on the calendar** — reaching back
+up to `LUMEN_CHAT_PREVIOUS_DAY_LOOKBACK` days (default 14). Somebody who writes twice a
+week would otherwise get nothing, which is the exact case the continuity is for. The days
+share one allowance (`LUMEN_CHAT_PREVIOUS_DAY_TOKENS`) and the oldest is dropped first.
+
+Crossing midnight forces one summary of the day that just ended, because a short
+conversation never accumulates enough turns to trigger one on the usual cadence — without
+it the continuity would work only for the days somebody talked a lot, which is backwards.
+
+**This does not weaken the day boundary.** The day still decides what gets extracted and
+what gets locked away again; what crosses is reading material for the assistant. The
+retrieval side's working set — the handful of records already surfaced today — still
+resets at midnight, because carrying it would narrow what the person can be reminded of
+tomorrow.
+
+A day's summary carries over even when the day was a hard one. The midnight re-lock still
+protects the heaviest *stored records*; a summary of a conversation the person themselves
+had is their own words about their own day.
+
+### A day is frozen once it has become history
+
+Editing works normally while a conversation is `OPEN`. Once it has been handed to the
+extraction pipeline it is refused, and the refusal says what to do instead: **say it again
+today.** The correction becomes a new entry, and changing your mind is something the graph
+has known how to record since reconciliation shipped.
+
+The reason is that the alternative is silently broken. An episode is stored under the day
+it happened on rather than under what it says, so a re-run of an edited day finds that
+identifier already present and skips the whole episode without a word — the conversation
+and the graph would then disagree permanently with nothing reporting it. A second guard
+covers the other roads to the same state: when the pipeline skips an already-saved
+episode it now compares the stored `raw_text_hash` against the incoming text and warns
+when they differ.
+
+### The late lookup is carried into the next turn
+
+On the rare turn where retrieval runs past its budget, that turn is answered with no
+history. The search cannot be stopped, so it is caught when it lands and held in a
+one-slot mailbox on the day's session. The next turn opens with it, ranked at
+`LUMEN_DEFERRED_PENALTY` (0.9) of a fresh result and marked as slightly behind the
+conversation.
+
+Two things make that honest. A carried result is **re-checked against the sensitivity
+gate**, not merely re-ranked — the pass it came from never finished, so it was never
+gated at all, and what the person has opened up may have changed. And it is carried at
+most `LUMEN_CARRY_FORWARD_TURNS` (1) turns: history about a question already left behind
+pulls the conversation backwards.
+
+### Voice
+
+Speaking and listening both go through the models rather than through files: a recording
+arrives as bytes and goes straight to a model, so a temporary file in between would put
+somebody's voice on the filesystem for no reason. A spoken turn is stored with
+`modality: VOICE`, which is what finally gives the pipeline's transcript cleaning
+something to read.
+
+The reply is spoken **once it is finished**, not sentence by sentence as it streams. One
+request per reply, and no sentence-boundary detection on a live stream.
+
+**Speech to text has no local option.** Every other job in Lumen can be pointed at a model
+running on your own machine; the local runtime does not do speech at all. A deployment
+that requires fully local processing has no voice input, and the error says so.
 
 ---
 
 ## Session Lifecycle
+
+### Conversations are stored, and editing branches
+
+A live chat is written into the same `session_buffers` the extraction pipeline already
+reads — the `NATIVE_CHAT` source has existed since Goal 3, and the live session's identity
+`(user_id, event_date, session_label)` was built to match. That is what makes today's
+conversation become tomorrow's graph with nothing to copy across. Note that the *identity*
+matches while the *identifier* does not: the store names a conversation itself, and only
+that name finds it again.
+
+Messages carry a `parent_message_id`, so a conversation is a tree and the visible thread is
+one path through it. Editing a message writes a sibling of the original and moves the
+buffer's `active_message_id`; the original and everything that followed stay stored and
+readable. Nothing anybody said is ever destroyed — the same instinct as the graph's
+append-only rule.
+
+**The pipeline extracts the active thread only.** A message that was edited away was said,
+but it is not what the person settled on, and letting abandoned branches become permanent
+history would record arguments they took back as things they believe.
+
+### Conversation memory: the recent turns, and a summary of the rest
+
+The `SessionContextBuffer` above is about *retrieved nodes*. This is the separate question
+of the conversation itself staying coherent after an hour.
+
+The last `LUMEN_CHAT_RECENT_TURNS` (default 12) turns are sent word for word. Everything
+older is folded into a running summary stored on the buffer (`rolling_summary`,
+`summary_through_seq`), refreshed once every `LUMEN_CHAT_SUMMARY_EVERY` (default 8) turns by
+one cheap model call. Each refresh folds *the previous summary plus the turns since it*,
+which is what keeps a long conversation costing the same as a short one.
+
+Two details matter. The refresh happens **after** a reply has gone out, never while somebody
+is waiting. And the summary is sent only when there is conversation it covers that the
+recent turns do not — otherwise the assistant reads the same stretch twice in two different
+voices.
 
 ### Session = Calendar Day
 

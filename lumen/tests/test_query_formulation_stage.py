@@ -17,7 +17,7 @@ import pytest
 from lumen.config import QueryConfig
 from lumen.providers.errors import ProviderError, ProviderTimeoutError
 from lumen.providers.fake import FakeLLMProvider
-from lumen.query.formulation.deadline import DeadlineExceeded, DeadlineRunner
+from lumen.query.deadline import DeadlineExceeded, DeadlineRunner
 from lumen.schemas.enums import (
     Domain,
     EmotionalRegister,
@@ -722,3 +722,166 @@ class TestOrderingReasons:
         assert sorted(precedence_of(kind) for kind in real) == list(
             range(len(TRIGGER_PRECEDENCE))
         )
+
+
+class SlowGraph(StubGraph):
+    """A graph whose reads take longer than the turn is willing to wait."""
+
+    def __init__(self, *, slow_eras=False, slow_people=False, delay=5.0, **kwargs):
+        super().__init__(**kwargs)
+        self.slow_eras = slow_eras
+        self.slow_people = slow_people
+        self.delay = delay
+
+    def list_era_tags(self, *, limit=50):
+        if self.slow_eras:
+            time.sleep(self.delay)
+        return super().list_era_tags(limit=limit)
+
+    def get_node(self, node_id):
+        if self.slow_people:
+            time.sleep(self.delay)
+        return super().get_node(node_id)
+
+
+class TestTheDeadlineCoversTheWholeStage:
+    """
+    The budget used to wrap the model call and nothing else.
+
+    Either side of it sits a read of an embedded graph that serialises
+    against the importer, so one of those reads can wait on a write
+    transaction for as long as that transaction takes. A budget covering
+    only the middle of the stage is a budget that describes nothing.
+    """
+
+    def test_a_slow_read_before_the_model_is_inside_the_budget(
+        self, make_formulator, make_turn, make_reply, chat_session
+    ):
+        formulator = make_formulator(
+            SlowGraph(slow_eras=True),
+            script=[make_reply()],
+            config=QueryConfig(formulation_timeout_seconds=0.2),
+        )
+
+        signal = formulator.formulate(make_turn(), chat_session)
+
+        assert signal.formulation_path is FormulationPath.TIMED_OUT
+        assert not signal.should_retrieve
+
+    def test_a_slow_check_after_the_model_is_inside_the_budget(
+        self, make_formulator, make_turn, make_reply, chat_session
+    ):
+        # Grounding runs one graph read per name the model claimed, after the
+        # model has answered. It used to sit entirely outside the deadline.
+        reply = make_reply(
+            triggers=[{"trigger_type": "NAMED_PERSON", "people": ["Alex"]}]
+        )
+        formulator = make_formulator(
+            SlowGraph(slow_people=True),
+            script=[reply],
+            config=QueryConfig(formulation_timeout_seconds=0.2),
+        )
+
+        signal = formulator.formulate(make_turn(), chat_session)
+
+        assert signal.formulation_path is FormulationPath.TIMED_OUT
+
+
+class TestWhatAnAbandonedReadingCannotDo:
+    def test_it_cannot_unlock_a_sensitive_subject(
+        self, make_formulator, make_turn, make_reply, chat_session
+    ):
+        """
+        An abandoned reading goes on running with nobody waiting for it.
+
+        Nothing it produces may reach the day — least of all the unlock,
+        which keeps the heaviest records available for the rest of the day
+        on the strength of a turn the conversation never used.
+        """
+        reply = make_reply(critical_domain_opened="HEALTH")
+        formulator = make_formulator(
+            SlowGraph(slow_eras=True),
+            script=[reply],
+            config=QueryConfig(formulation_timeout_seconds=0.2),
+        )
+
+        signal = formulator.formulate(make_turn(), chat_session)
+
+        assert signal.formulation_path is FormulationPath.TIMED_OUT
+        assert chat_session.unlocked_domains == ()
+        # And it stays that way once the abandoned call has landed.
+        time.sleep(0.3)
+        assert chat_session.unlocked_domains == ()
+
+
+class TestRememberingTheEraNames:
+    def test_they_are_read_once_a_day_rather_than_once_a_turn(
+        self, make_formulator, make_turn, make_reply, chat_session
+    ):
+        class Counting(StubGraph):
+            reads = 0
+
+            def list_era_tags(self, *, limit=50):
+                Counting.reads += 1
+                return super().list_era_tags(limit=limit)
+
+        graph = Counting()
+        formulator = make_formulator(graph, script=[make_reply(), make_reply()])
+        formulator.formulate(make_turn("first thing"), chat_session)
+        formulator.formulate(make_turn("second thing"), chat_session)
+
+        assert Counting.reads == 1
+
+    def test_a_failed_read_is_tried_again_next_turn(
+        self, make_formulator, make_turn, make_reply, chat_session
+    ):
+        """
+        A blip must not switch era lookups off until midnight.
+
+        The names were cached whatever came back, and a failed read came back
+        as an empty list — indistinguishable from a history that uses no
+        eras. Every era reason then failed its check for the rest of the day,
+        silently, with nothing ever trying again.
+        """
+
+        class Flaky(StubGraph):
+            reads = 0
+
+            def list_era_tags(self, *, limit=50):
+                Flaky.reads += 1
+                if Flaky.reads == 1:
+                    raise RuntimeError("the store is not answering")
+                return super().list_era_tags(limit=limit)
+
+        graph = Flaky()
+        formulator = make_formulator(graph, script=[make_reply(), make_reply()])
+        formulator.formulate(make_turn("first thing"), chat_session)
+        formulator.formulate(make_turn("second thing"), chat_session)
+
+        assert Flaky.reads == 2
+        assert chat_session.era_vocabulary == ("high school",)
+
+    def test_an_era_reason_grounds_again_once_the_graph_recovers(
+        self, make_formulator, make_turn, make_reply, chat_session
+    ):
+        class Flaky(StubGraph):
+            reads = 0
+
+            def list_era_tags(self, *, limit=50):
+                Flaky.reads += 1
+                if Flaky.reads == 1:
+                    raise RuntimeError("the store is not answering")
+                return super().list_era_tags(limit=limit)
+
+        era_reply = make_reply(
+            triggers=[{"trigger_type": "HISTORICAL_ERA", "era": "high school"}]
+        )
+        formulator = make_formulator(Flaky(), script=[era_reply, era_reply])
+
+        first = formulator.formulate(make_turn("back then"), chat_session)
+        second = formulator.formulate(make_turn("back then again"), chat_session)
+
+        # The first turn had no vocabulary to check against, so the reason
+        # was dropped. The second turn has one, and it grounds.
+        assert first.trigger_types == ()
+        assert second.trigger_types == (TriggerType.HISTORICAL_ERA,)

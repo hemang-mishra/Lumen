@@ -18,7 +18,7 @@ import threading
 import uuid
 from collections.abc import Generator
 from contextlib import contextmanager
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from typing import Any
 
 from sqlalchemy import Engine, delete, func, select
@@ -247,26 +247,132 @@ class SqlAlchemySessionBufferRepository:
             return _to_buffer_record(row)
 
     def append_message(self, session_id: str, message: BufferMessageRecord) -> None:
+        """
+        Add a message to the end of the conversation as it currently reads.
+
+        The reply link is filled in from wherever the conversation currently
+        ends, unless the caller named one. That makes the ordinary case —
+        somebody saying the next thing — correct without any caller having to
+        think about branches, and leaves the explicit form for editing.
+        """
+        with self._sessions.session() as db:
+            self._write_message(db, session_id, message, parent=message.parent_message_id)
+
+    def branch_from(
+        self,
+        session_id: str,
+        parent_message_id: str | None,
+        message: BufferMessageRecord,
+    ) -> BufferMessageRecord:
+        """Add a message beside an existing one and read from it instead."""
+        with self._sessions.session() as db:
+            written = self._write_message(
+                db, session_id, message, parent=parent_message_id, explicit_parent=True
+            )
+            return _to_message_record(written)
+
+    def _write_message(
+        self,
+        db: Session,
+        session_id: str,
+        message: BufferMessageRecord,
+        *,
+        parent: str | None,
+        explicit_parent: bool = False,
+    ) -> models.BufferMessage:
+        """
+        Store one message and move the live end of the conversation to it.
+
+        The buffer's counters are kept current here rather than recomputed
+        later, because the decay check reads them and counting messages on
+        every check would make it cost more the longer somebody talks.
+        """
+        buffer = self._require_buffer(db, session_id)
+        row = models.BufferMessage(
+            message_id=message.message_id,
+            session_id=session_id,
+            seq=message.seq,
+            parent_message_id=parent if (parent or explicit_parent) else buffer.active_message_id,
+            role=message.role,
+            content=message.content,
+            timestamp=message.timestamp,
+            event_date=message.event_date,
+            dialogue_act=message.dialogue_act.value if message.dialogue_act else None,
+            co_created_marker=message.co_created_marker,
+            modality=message.modality,
+        )
+        db.add(row)
+        buffer.message_count += 1
+        buffer.last_activity_at = _utcnow()
+        buffer.active_message_id = message.message_id
+        db.flush()
+        return row
+
+    def set_active(self, session_id: str, message_id: str) -> None:
         with self._sessions.session() as db:
             buffer = self._require_buffer(db, session_id)
-            db.add(
-                models.BufferMessage(
-                    message_id=message.message_id,
-                    session_id=session_id,
-                    seq=message.seq,
-                    role=message.role,
-                    content=message.content,
-                    timestamp=message.timestamp,
-                    event_date=message.event_date,
-                    dialogue_act=message.dialogue_act.value if message.dialogue_act else None,
-                    co_created_marker=message.co_created_marker,
+            known = {row.message_id for row in self._all_messages(db, session_id)}
+            if message_id not in known:
+                raise RecordNotFoundError(
+                    f"no message {message_id!r} in conversation {session_id!r}"
                 )
-            )
-            # Keeping these current is what lets the decay check work off the
-            # buffer alone, without counting messages every time it runs.
-            buffer.message_count += 1
-            buffer.last_activity_at = _utcnow()
+            buffer.active_message_id = message_id
             db.flush()
+
+    def recent_buffers(
+        self,
+        user_id: str,
+        *,
+        before: date,
+        limit: int,
+        session_label: str = "",
+        lookback_days: int = 14,
+    ) -> list[SessionBufferRecord]:
+        wanted = max(int(limit), 0)
+        if wanted == 0:
+            return []
+
+        earliest = before - timedelta(days=max(int(lookback_days), 0))
+        with self._sessions.session() as db:
+            rows = db.scalars(
+                select(models.SessionBuffer)
+                .where(
+                    models.SessionBuffer.user_id == user_id,
+                    models.SessionBuffer.session_label == session_label,
+                    models.SessionBuffer.event_date < before,
+                    models.SessionBuffer.event_date >= earliest,
+                    models.SessionBuffer.message_count > 0,
+                )
+                .order_by(models.SessionBuffer.event_date.desc())
+                .limit(wanted)
+            )
+            return [_to_buffer_record(row) for row in rows]
+
+    def save_summary(self, session_id: str, summary: str, through_seq: int) -> None:
+        with self._sessions.session() as db:
+            buffer = self._require_buffer(db, session_id)
+            buffer.rolling_summary = summary
+            buffer.summary_through_seq = max(int(through_seq), 0)
+            db.flush()
+
+    def active_thread(self, session_id: str) -> list[BufferMessageRecord]:
+        with self._sessions.session() as db:
+            buffer = self._require_buffer(db, session_id)
+            rows = self._all_messages(db, session_id)
+            return [
+                _to_message_record(row)
+                for row in _walk_back(rows, buffer.active_message_id)
+            ]
+
+    def _all_messages(self, db: Session, session_id: str) -> list[models.BufferMessage]:
+        """Every message of a conversation, in the order they arrived."""
+        return list(
+            db.scalars(
+                select(models.BufferMessage)
+                .where(models.BufferMessage.session_id == session_id)
+                .order_by(models.BufferMessage.seq)
+            ).all()
+        )
 
     def get_buffer(self, session_id: str) -> SessionBufferRecord | None:
         with self._sessions.session() as db:
@@ -297,13 +403,19 @@ class SqlAlchemySessionBufferRepository:
             return [_to_buffer_record(row) for row in rows]
 
     def build_decay_event(self, session_id: str) -> SessionDecayEvent:
+        """
+        Turn a conversation into the object the pipeline consumes.
+
+        The **active thread**, not every message. A message somebody edited
+        away was said, but it is not what they settled on, and letting
+        abandoned branches become permanent history would record arguments
+        they took back as things they believe.
+        """
         with self._sessions.session() as db:
             buffer = self._require_buffer(db, session_id)
-            messages = db.scalars(
-                select(models.BufferMessage)
-                .where(models.BufferMessage.session_id == session_id)
-                .order_by(models.BufferMessage.seq)
-            ).all()
+            messages = _walk_back(
+                self._all_messages(db, session_id), buffer.active_message_id
+            )
 
             return SessionDecayEvent(
                 session_id=buffer.session_id,
@@ -736,6 +848,16 @@ class SqlAlchemyHitlQueueRepository:
                 or 0
             )
 
+    def oldest_pending_at(self, user_id: str) -> datetime | None:
+        open_statuses = [status.value for status in OPEN_HITL_STATUSES]
+        with self._sessions.session() as db:
+            return db.scalar(
+                select(func.min(models.HitlQueueItem.created_at)).where(
+                    models.HitlQueueItem.user_id == user_id,
+                    models.HitlQueueItem.status.in_(open_statuses),
+                )
+            )
+
     def update_status(
         self,
         item_id: str,
@@ -1077,7 +1199,51 @@ def _to_buffer_record(row: models.SessionBuffer) -> SessionBufferRecord:
         last_activity_at=_aware(row.last_activity_at),
         decayed_at=_aware(row.decayed_at),
         ingested_at=_aware(row.ingested_at),
+        active_message_id=row.active_message_id,
+        rolling_summary=row.rolling_summary,
+        summary_through_seq=row.summary_through_seq,
     )
+
+
+def _walk_back(
+    rows: list[models.BufferMessage], leaf_id: str | None
+) -> list[models.BufferMessage]:
+    """
+    The thread ending at one message, oldest first.
+
+    Follows reply links back from the end rather than reading arrival order,
+    which is what leaves an edited-away message and everything after it out.
+
+    Two cases come back as the whole conversation, and both are correct. A
+    buffer with no end named has never branched — every import, and every
+    chat nobody edited. And a chain that runs into a message that is not
+    there falls back rather than returning half a conversation, because a
+    conversation silently missing its first half is worse than one carrying
+    a branch nobody wanted.
+    """
+    if leaf_id is None:
+        return rows
+
+    by_id = {row.message_id: row for row in rows}
+    thread: list[models.BufferMessage] = []
+    seen: set[str] = set()
+    at: str | None = leaf_id
+
+    while at is not None and at in by_id and at not in seen:
+        seen.add(at)
+        row = by_id[at]
+        thread.append(row)
+        at = row.parent_message_id
+
+    if at is not None and at not in by_id:
+        logger.warning(
+            "a conversation's thread ran into a message that is not there, so "
+            "the whole conversation was read instead",
+            extra={"missing": at, "found": len(thread), "held": len(rows)},
+        )
+        return rows
+
+    return list(reversed(thread))
 
 
 def _to_message_record(row: models.BufferMessage) -> BufferMessageRecord:
@@ -1091,6 +1257,8 @@ def _to_message_record(row: models.BufferMessage) -> BufferMessageRecord:
         event_date=row.event_date,
         dialogue_act=row.dialogue_act,
         co_created_marker=row.co_created_marker,
+        parent_message_id=row.parent_message_id,
+        modality=row.modality or "TEXT",
     )
 
 
@@ -1120,6 +1288,9 @@ def _to_buffer_message(row: models.BufferMessage) -> BufferMessage:
         dialogue_act=row.dialogue_act,
         co_created_marker=row.co_created_marker,
     )
+    # No reply link here on purpose: what reaches the pipeline is one
+    # already-chosen thread, in order. Branches are a fact about how the
+    # conversation was written, not about what it says.
 
 
 def _to_job_record(row: models.PipelineJob) -> PipelineJobRecord:

@@ -28,7 +28,6 @@ from lumen.config import QueryConfig
 from lumen.graph.provider import ReadOnlyGraph
 from lumen.graph.queries import era_key
 from lumen.query.formulation.contracts import RawTrigger, precedence_of
-from lumen.query.session import ChatSession
 from lumen.schemas.enums import Domain, TriggerType
 from lumen.schemas.ids import person_node_id
 from lumen.schemas.query import RetrievalTrigger
@@ -54,32 +53,32 @@ class GroundingContext:
 
 
 def era_vocabulary(
-    graph: ReadOnlyGraph, session: ChatSession, *, config: QueryConfig
-) -> tuple[str, ...]:
+    graph: ReadOnlyGraph, *, config: QueryConfig
+) -> tuple[str, ...] | None:
     """
-    The era names this person's history actually uses, fetched once a day.
+    The era names this person's history actually uses.
 
-    A graph that cannot answer gives an empty list, which makes every era
-    reason fail its check. That is the right way round: an era nobody can
-    confirm is an era no lookup will match, so acting on one buys nothing and
-    costs the turn its time.
+    Returns nothing at all when the graph could not answer, which is a
+    different thing from a history that uses no eras — and the difference
+    decides whether the answer is worth keeping for the rest of the day.
+
+    That distinction is the whole reason this returns an option. Caching an
+    empty answer that came from a failed read would switch off every era
+    lookup until midnight on the strength of one bad moment, silently, and
+    nothing would ever try again. Deciding what to keep belongs to the caller,
+    which is the only thing holding the day.
     """
-    if session.era_vocabulary is not None:
-        return session.era_vocabulary
-
     try:
         names = graph.list_era_tags(limit=config.era_vocabulary_limit)
     except Exception:
         logger.warning(
-            "could not read the known era names, so era reasons will not ground",
+            "could not read the known era names, so era reasons will not "
+            "ground on this turn",
             exc_info=True,
-            extra={"session_id": session.session_id},
         )
-        names = []
+        return None
 
-    vocabulary = tuple(name for name in names if name.strip())
-    session.remember_era_vocabulary(vocabulary)
-    return vocabulary
+    return tuple(name for name in names if name.strip())
 
 
 def ground_triggers(

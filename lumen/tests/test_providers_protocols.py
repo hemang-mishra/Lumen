@@ -93,30 +93,43 @@ class TestEmbeddingProviders:
 
 class TestTheAudioInterfaces:
     """
-    Agreed now, built later. Checking the shape means the eventual
-    implementation has something to match rather than something to invent.
+    Both take and return the audio itself rather than a path to it.
+
+    A recording arrives from a browser as bytes and is about to go straight
+    to a model. A file on the way through would put somebody's voice on the
+    filesystem and buy nothing.
     """
 
-    def test_transcription_asks_for_a_file_and_returns_text(self):
+    def test_listening_takes_the_recording_and_its_format(self):
         signature = inspect.signature(AudioTranscriptionProvider.transcribe)
-        assert list(signature.parameters) == ["self", "audio_file_path"]
 
-    def test_speech_asks_for_text_and_a_destination(self):
+        assert list(signature.parameters) == ["self", "audio", "mime_type"]
+
+    def test_speaking_takes_text_and_gives_back_a_recording(self):
         signature = inspect.signature(TTSProvider.synthesize)
-        assert list(signature.parameters) == ["self", "text", "output_path"]
 
-    def test_neither_has_an_implementation_yet(self):
-        """
-        Nothing in the package implements them, which is what the plan says and
-        what the factory's error message promises.
-        """
-        import lumen.providers.gemini as gemini
-        import lumen.providers.ollama as ollama
+        assert list(signature.parameters) == ["self", "text"]
 
-        for module in (gemini, ollama):
-            for _, member in inspect.getmembers(module, inspect.isclass):
-                assert not hasattr(member, "transcribe")
-                assert not hasattr(member, "synthesize")
+    def test_both_have_a_real_implementation_now(self):
+        from lumen.providers.audio import (
+            GeminiSpeechProvider,
+            GeminiTranscriptionProvider,
+        )
+
+        assert isinstance(GeminiTranscriptionProvider, type)
+        assert hasattr(GeminiTranscriptionProvider, "transcribe")
+        assert hasattr(GeminiSpeechProvider, "synthesize")
+
+    def test_a_scripted_stand_in_ships_for_both(self):
+        """
+        Voice is the one job with no local option at all, so without these
+        nothing about the spoken path could run on a machine with no
+        credential.
+        """
+        from lumen.providers.fake import FakeSpeechProvider, FakeTranscriptionProvider
+
+        assert isinstance(FakeTranscriptionProvider(), AudioTranscriptionProvider)
+        assert isinstance(FakeSpeechProvider(), TTSProvider)
 
 
 class TestVendorIsolation:

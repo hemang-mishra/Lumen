@@ -65,6 +65,64 @@ class LLMResult(BaseModel):
     finish_reason: str | None = None
 
 
+class TextChunk(BaseModel):
+    """
+    One piece of a reply as it is being written.
+
+    Most chunks are just text. The last one carries the totals instead —
+    token counts, why the model stopped, and two timings. It is marked
+    `final` so a caller can tell the difference without guessing.
+
+    The two timings answer different questions. first_chunk_ms is how long
+    the person stared at nothing before words started appearing, which is
+    what streaming exists to shorten. elapsed_ms is how long the whole reply
+    took to finish.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    text: str = ""
+    final: bool = False
+    usage: LLMUsage = LLMUsage()
+    finish_reason: str | None = None
+    first_chunk_ms: int | None = Field(default=None, ge=0)
+    elapsed_ms: int | None = Field(default=None, ge=0)
+
+
+class Transcript(BaseModel):
+    """
+    What somebody said, once a recording has been listened to.
+
+    The language and duration come along because the extraction pipeline has
+    fields for both — an entry that was spoken in Hindi and written down in
+    English should say so, rather than looking like it was typed in English.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    text: str
+    language: str | None = None
+    duration_seconds: float | None = Field(default=None, ge=0.0)
+    provider: str = ""
+    model: str = ""
+
+
+class Speech(BaseModel):
+    """
+    A spoken reply, as bytes ready to be played.
+
+    Carries its own format, because what comes back depends on the model and
+    a player given the wrong type produces silence rather than an error.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    audio: bytes
+    mime_type: str = "audio/wav"
+    provider: str = ""
+    model: str = ""
+
+
 class StructuredResult(LLMResult):
     """
     The outcome of a call that asked for JSON.
@@ -91,4 +149,7 @@ __all__ = [
     "LLMUsage",
     "LLMResult",
     "StructuredResult",
+    "TextChunk",
+    "Transcript",
+    "Speech",
 ]

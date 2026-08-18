@@ -23,6 +23,7 @@ from lumen.config import ProviderConfig
 from lumen.providers.base import (
     BaseEmbeddingProvider,
     BaseLLMProvider,
+    RawChunk,
     RawResponse,
     resolve_dimensions,
 )
@@ -388,6 +389,51 @@ class GeminiLLMProvider(BaseLLMProvider):
         )
         return self._call(contents=self._to_contents(messages), config=config)
 
+    def _request_stream(
+        self,
+        *,
+        messages: list[ChatMessage],
+        system_instruction: str | None,
+        temperature: float,
+    ) -> Any:
+        """Send a conversation and get the reply back as it is written."""
+        config = self._types.GenerateContentConfig(
+            temperature=temperature,
+            system_instruction=system_instruction,
+            safety_settings=_permissive_safety_settings(self._types),
+            http_options=self._http_options(),
+        )
+        try:
+            return self._clients.acquire().models.generate_content_stream(
+                model=self.model_name,
+                contents=self._to_contents(messages),
+                config=config,
+            )
+        except BaseException as exc:
+            raise _map_error(exc, model=self.model_name, role=self.model_role) from exc
+
+    def _read_chunk(self, piece: Any) -> RawChunk:
+        """
+        Take the text and any totals out of one piece of the stream.
+
+        Both refusal checks run on every piece rather than only the first.
+        The model can start answering and then be stopped by a safety filter,
+        and a reply cut off that way would otherwise be handed on as a short
+        answer with nothing saying it was cut.
+        """
+        self._raise_if_blocked(piece)
+
+        candidates = getattr(piece, "candidates", None) or []
+        finish_reason = _finish_reason(candidates[0]) if candidates else None
+        self._raise_if_refused(candidates, finish_reason)
+
+        usage_metadata = getattr(piece, "usage_metadata", None)
+        return RawChunk(
+            text=getattr(piece, "text", None) or "",
+            usage=_usage(piece) if usage_metadata is not None else None,
+            finish_reason=finish_reason,
+        )
+
     def _rate_limit_backoff_max(self) -> float:
         """
         Wait out a rate limit only when there is nothing else to try.
@@ -417,15 +463,7 @@ class GeminiLLMProvider(BaseLLMProvider):
 
         candidates = getattr(reply, "candidates", None) or []
         finish_reason = _finish_reason(candidates[0]) if candidates else None
-
-        if finish_reason in _BLOCKED_FINISH_REASONS:
-            raise ProviderContentBlockedError(
-                f"the response was refused by a safety filter ({finish_reason})",
-                blocked_categories=_blocked_categories(candidates[0]),
-                provider=self.provider_name,
-                model=self.model_name,
-                role=self.model_role,
-            )
+        self._raise_if_refused(candidates, finish_reason)
 
         text = getattr(reply, "text", None) or ""
 
@@ -446,6 +484,27 @@ class GeminiLLMProvider(BaseLLMProvider):
             )
 
         return RawResponse(text=text, usage=_usage(reply), finish_reason=finish_reason)
+
+    def _raise_if_refused(self, candidates: list, finish_reason: str | None) -> None:
+        """
+        Refuse a reply the model was stopped from finishing.
+
+        Shared by the finished form and the streamed one, because "what
+        counts as refused" must not be able to differ between them — a rule
+        that holds for one shape of reply and not the other is a rule that
+        will eventually be missing from whichever shape somebody uses.
+        """
+        if finish_reason not in _BLOCKED_FINISH_REASONS:
+            return
+        raise ProviderContentBlockedError(
+            f"the response was refused by a safety filter ({finish_reason})",
+            blocked_categories=_blocked_categories(candidates[0])
+            if candidates
+            else (),
+            provider=self.provider_name,
+            model=self.model_name,
+            role=self.model_role,
+        )
 
     def _raise_if_blocked(self, reply: Any) -> None:
         """Refuse a reply that was stopped before the model even answered."""
@@ -584,3 +643,39 @@ def _name_of(value: Any) -> str | None:
 
 
 __all__ = ["GeminiLLMProvider", "GeminiEmbeddingProvider"]
+
+
+# ---------------------------------------------------------------------------
+# Shared with the audio providers
+# ---------------------------------------------------------------------------
+#
+# The speech providers are not built on BaseLLMProvider — they neither hold a
+# conversation nor return text — but they talk to the same vendor and need
+# the same three things: the SDK's type helpers, a client, and one way of
+# turning a vendor failure into ours. These are those three, named without
+# the leading underscore so they can be used from outside this module.
+
+
+def sdk_types() -> Any:
+    """The SDK's type helpers, with a clear message when it is not installed."""
+    _, types, _ = _import_sdk()
+    return types
+
+
+def build_client(config: ProviderConfig, *, role: ModelRole) -> Any:
+    """A client built from whichever credential is configured."""
+    genai, _, _ = _import_sdk()
+    keys = config.gemini_api_keys
+    if not keys:
+        raise ProviderConfigurationError(
+            "no Gemini credential found; set GEMINI_API_KEY (or GOOGLE_API_KEY)",
+            provider="gemini",
+            role=role,
+        )
+    return genai.Client(api_key=keys[0])
+
+
+def map_error(exc: BaseException, *, model: str, role: ModelRole) -> ProviderError:
+    """Turn a vendor failure into one of ours."""
+    return _map_error(exc, model=model, role=role)
+

@@ -56,6 +56,9 @@ implementing anything, read the relevant spec:
 | Stage 3 — 8 actions, confidence thresholds, HITL | `docs/Extraction/Reconciliation.md` |
 | Validation rules, trust/recency weights, Late Binding | `docs/Extraction/Architecture.md` |
 | Query-time RAG injection | `docs/Query/Conversational_RAG_Mode.md` |
+| **Auth, identity, per-user isolation** | `docs/hld/Auth_Architecture.md` |
+| Front-end surfaces and requirements | `docs/frontend/Requirements.md` |
+| **Front-end look, tokens, component rules** | `docs/frontend/Design_Language.md` |
 | Build sequence, goal breakdown | `implementation/Master_Plan.md` |
 
 If code and docs disagree, that is a **bug report**, not license to improvise. Surface

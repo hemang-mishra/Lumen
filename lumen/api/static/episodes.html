@@ -12,6 +12,7 @@
   <nav>
     <a href="index.html">Import</a>
     <a href="episodes.html">Episodes</a>
+    <a href="reports.html">Reports</a>
     <a href="trace.html">Runs</a>
     <a href="chat.html">Turn reader</a>
   </nav>
@@ -164,7 +165,8 @@ async function openEpisode(episodeId) {
   fill("detail",
     el("h2", {}, "This episode"),
     theEpisode(detail.episode, source),
-    whatCameOfIt(detail.contents, detail.episode.node_id),
+    whatItChanged(detail.outcomes || []),
+    whatCameOfIt(detail.contents, detail.episode.node_id, detail.outcomes || []),
     howItLinksUp(detail.contents),
     whatWasWritten(source),
   );
@@ -238,8 +240,136 @@ function whatWasWritten(source) {
  * The episode's own record is left out — it is already above, and repeating
  * it inside its own contents reads as a second thing having been found.
  */
-function whatCameOfIt(slice, episodeId) {
+/*
+ * What this episode did to the history.
+ *
+ * The step that matters most and shows least. Everything before it is
+ * reading; this is where something noticed on a Tuesday becomes a belief, or
+ * joins a pattern held for years, or is held back for a person to look at.
+ * Read only as records and links, an episode that changed nothing and an
+ * episode that changed everything look the same.
+ */
+function whatItChanged(outcomes) {
+  if (!outcomes.length) {
+    return el("div", { class: "panel" },
+      el("h3", {}, "What it changed"),
+      el("div", { class: "empty" },
+        "Nothing has been decided about this episode's findings yet. That is "
+        + "how it looks when deciding was skipped, or when it failed and "
+        + "everything was left for a person."));
+  }
+
+  const byAction = new Map();
+  for (const outcome of outcomes) {
+    byAction.set(outcome.action, (byAction.get(outcome.action) || 0) + 1);
+  }
+  const waiting = outcomes.filter((outcome) => outcome.waiting_for_a_person);
+
+  return el("div", { class: "panel" },
+    el("h3", {}, "What it changed"),
+    counts([...byAction].map(([action, n]) => [action.toLowerCase(), n])),
+
+    (() => {
+      const grew = outcomes.filter((outcome) => outcome.became_node_id);
+      return grew.length
+        ? say("ok", `${grew.length} of these became a lasting record — a belief, `
+                    + "a pattern, or an open question your history now holds.")
+        : null;
+    })(),
+
+    waiting.length
+      ? say("warn", `${waiting.length} of these were recorded but not acted on — `
+                    + "they are waiting for you.")
+      : null,
+
+    el("table", {},
+      el("thead", {}, el("tr", {},
+        el("th", {}, "This finding"), el("th", {}, "Was"),
+        el("th", {}, "Became"), el("th", {}, "Compared against"),
+        el("th", {}, "Sure"))),
+      el("tbody", {}, outcomes.map((outcome) =>
+        el("tr", {},
+          el("td", { class: "mono" }, outcome.source_node_id),
+          el("td", {}, verdict(outcome)),
+          el("td", {}, became(outcome)),
+          el("td", {}, comparedAgainst(outcome)),
+          el("td", { class: "dim" }, sureness(outcome)),
+        )
+      )),
+    ),
+  );
+}
+
+/** The action, coloured by whether it actually took effect. */
+function verdict(outcome) {
+  const shade = outcome.waiting_for_a_person
+    ? "dup"
+    : outcome.status === "ROLLED_BACK" ? "bad" : "ok";
+  return el("span", { class: `tag ${shade}` }, outcome.action || "—");
+}
+
+/*
+ * What the finding turned into, if it turned into anything.
+ *
+ * The question people arrive with. Most findings become nothing more than
+ * what they already are — a thing that happened, saved with its day — and
+ * that is the common and correct outcome, not a failure. The ones that
+ * become a belief or a pattern are the history growing.
+ */
+function became(outcome) {
+  if (!outcome.became_node_id) {
+    return el("span", { class: "faint" }, "stayed with its entry");
+  }
+  return el("div", {},
+    el("div", { class: "said" }, outcome.became_preview || outcome.became_node_id),
+    el("div", { class: "stage-head" },
+      el("span", { class: "tag ok" }, KIND[outcome.became_type] || outcome.became_type || ""),
+      el("span", { class: "mono" }, outcome.became_node_id),
+      outcome.edge_type_created
+        ? el("span", { class: "faint" }, `via ${outcome.edge_type_created}`) : null,
+    ),
+  );
+}
+
+/*
+ * The existing record it was weighed against.
+ *
+ * Not the same question as what it became: a finding branches precisely
+ * because nothing already said it, and the comparison that reached that
+ * answer is how you tell a considered BRANCH from a search that found
+ * nothing.
+ */
+function comparedAgainst(outcome) {
+  if (!outcome.target_node_id) {
+    return el("span", { class: "faint" }, "nothing it had said before");
+  }
+  return el("div", {},
+    el("div", { class: "said" }, outcome.target_preview || outcome.target_node_id),
+    el("div", { class: "stage-head" },
+      el("span", { class: "faint" }, KIND[outcome.target_type] || outcome.target_type || ""),
+      el("span", { class: "mono" }, outcome.target_node_id),
+    ),
+  );
+}
+
+/** How sure it was, and what it nearly said instead. */
+function sureness(outcome) {
+  const first = outcome.confidence === null || outcome.confidence === undefined
+    ? "—" : outcome.confidence.toFixed(2);
+  if (!outcome.runner_up_action) return first;
+  const second = outcome.runner_up_confidence === null
+    || outcome.runner_up_confidence === undefined
+      ? "" : ` ${outcome.runner_up_confidence.toFixed(2)}`;
+  return `${first} · nearly ${outcome.runner_up_action}${second}`;
+}
+
+function whatCameOfIt(slice, episodeId, outcomes) {
   const made = (slice.nodes || []).filter((node) => node.node_id !== episodeId);
+  const decided = new Map();
+  for (const outcome of outcomes) {
+    if (!decided.has(outcome.source_node_id)) decided.set(outcome.source_node_id, []);
+    decided.get(outcome.source_node_id).push(outcome);
+  }
 
   if (!made.length) {
     return el("div", { class: "panel" },
@@ -260,13 +390,20 @@ function whatCameOfIt(slice, episodeId) {
     counts([...groups].map(([type, nodes]) => [KIND[type] || type, nodes.length])),
     [...groups].map(([type, nodes]) => el("div", { class: "episode" },
       el("h3", {}, KIND[type] || type, el("span", { class: "dim" }, ` — ${nodes.length}`)),
-      nodes.map(record),
+      nodes.map((node) => record(node, decided.get(node.node_id) || [])),
     )),
   );
 }
 
-/** One record: its headline, everything it holds, and the raw thing itself. */
-function record(node) {
+/**
+ * One record: its headline, what became of it, and everything it holds.
+ *
+ * The fate sits with the finding rather than only in the table above,
+ * because "what did this particular thing turn into" is the question people
+ * actually arrive with, and answering it by cross-referencing an identifier
+ * against a second table is answering it badly.
+ */
+function record(node, outcomes) {
   const it = node.properties || {};
   const heading = (HEADLINE[node.node_type] || [])
     .map((field) => it[field]).filter(Boolean).join(" — ");
@@ -280,7 +417,30 @@ function record(node) {
       it.status ? el("span", { class: `tag ${it.status === "ACTIVE" ? "ok" : "dup"}` }, it.status) : null,
       it.provenance ? el("span", { class: "faint" }, it.provenance) : null,
     ),
+    outcomes.map(fate),
     el("details", {}, el("summary", {}, "Everything it holds"), properties(it)),
+  );
+}
+
+/** One line saying what was decided about this finding. */
+function fate(outcome) {
+  return el("div", { class: "fate" },
+    verdict(outcome),
+    outcome.became_node_id
+      ? el("span", {}, "became the ",
+          el("span", { class: "faint" },
+            (KIND[outcome.became_type] || outcome.became_type || "record").toLowerCase()),
+          " ",
+          el("span", { class: "said" },
+            outcome.became_preview || outcome.became_node_id))
+      : el("span", { class: "faint" }, "stayed with its entry"),
+    outcome.target_node_id
+      ? el("span", { class: "faint" }, "· weighed against " +
+          (outcome.target_preview || outcome.target_node_id).slice(0, 60))
+      : null,
+    el("span", { class: "dim" }, sureness(outcome)),
+    outcome.waiting_for_a_person
+      ? el("span", { class: "tag dup" }, "waiting for you") : null,
   );
 }
 

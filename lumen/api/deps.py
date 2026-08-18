@@ -29,7 +29,15 @@ from lumen.config import AppConfig
 from lumen.graph.provider import ReadOnlyGraph
 from lumen.ingest import IngestWorker
 from lumen.operational.repositories import OperationalStore
-from lumen.query import QueryFormulator
+from lumen.pipeline.macroextraction.service import MacroextractionService
+from lumen.providers.errors import ProviderError
+from lumen.query import (
+    ConversationalRetriever,
+    ConversationMemory,
+    PromptComposer,
+    QueryFormulator,
+    SessionRegistry,
+)
 
 
 def get_graph(request: Request) -> ReadOnlyGraph:
@@ -73,6 +81,25 @@ def get_worker(request: Request) -> IngestWorker:
     return worker
 
 
+def get_reporter(request: Request) -> MacroextractionService:
+    """
+    The thing that builds periodic reports.
+
+    The second object in this file that can change the graph, and narrow in
+    the same way as the first: it is not a graph handle. What a route can do
+    with it is name a period and ask for it to be summarised — the store and
+    the models live inside it and are never handed out.
+
+    Built once at startup, because it holds the writable graph and caches the
+    models it eventually needs. Absent only when the application was built
+    without one, which nothing in this deployment does.
+    """
+    reporter = getattr(request.app.state, "reporter", None)
+    if reporter is None:
+        raise Unavailable("building reports", "this deployment cannot write reports")
+    return reporter
+
+
 def get_formulator(request: Request) -> QueryFormulator:
     """
     The thing that reads a conversational turn.
@@ -94,4 +121,89 @@ def get_formulator(request: Request) -> QueryFormulator:
     return formulator
 
 
-__all__ = ["get_graph", "get_ops", "get_config", "get_worker", "get_formulator"]
+def get_retriever(request: Request) -> ConversationalRetriever:
+    """
+    The thing that fetches a turn's history.
+
+    Built on the first request that needs it rather than at startup, because
+    it needs a search index and a model while every other route needs
+    neither. A deployment with nothing configured still starts, still serves
+    the graph, and refuses only this.
+
+    The graph inside it is a reader, so this whole surface remains incapable
+    of changing anything.
+    """
+    stack = getattr(request.app.state, "search", None)
+    if stack is None:
+        raise Unavailable("fetching history", "this deployment cannot search")
+    try:
+        return stack.get()
+    except ProviderError as exc:
+        raise Unavailable(
+            "fetching history", "no language model or embedder is configured"
+        ) from exc
+
+
+def get_composer(request: Request) -> PromptComposer:
+    """
+    The thing that builds what the assistant is sent.
+
+    Held on the application rather than made per request, though it would
+    cost almost nothing to build one: it carries the settings that decide how
+    much history a turn may hold, and having one copy of those means changing
+    them changes every turn rather than the next one.
+    """
+    return request.app.state.composer
+
+
+def get_memory(request: Request) -> ConversationMemory:
+    """
+    The thing that remembers the conversation itself.
+
+    Distinct from the graph, which remembers the person. This one only knows
+    about today, and it reads and writes the same store the extraction
+    pipeline eventually consumes — which is what makes a chat become history
+    rather than being a separate thing that resembles one.
+    """
+    return request.app.state.memory
+
+
+def get_chat_stack(request: Request):
+    """
+    The thing that holds a conversation, and the ear that listens to one.
+
+    Built on the first turn rather than at startup, because talking needs a
+    model and every other route here reads two local databases and needs
+    none. A deployment with nothing configured still starts, still serves the
+    graph, and refuses only this.
+    """
+    stack = getattr(request.app.state, "chat", None)
+    if stack is None:
+        raise Unavailable("talking", "this deployment cannot hold a conversation")
+    return stack
+
+
+def get_sessions(request: Request) -> SessionRegistry:
+    """
+    The live conversations this process is holding.
+
+    Kept on the application rather than made per request, because a
+    conversation that forgets itself between messages has no thread to
+    follow — and following the thread is what one of the three searches
+    does.
+    """
+    return request.app.state.sessions
+
+
+__all__ = [
+    "get_graph",
+    "get_ops",
+    "get_config",
+    "get_worker",
+    "get_formulator",
+    "get_retriever",
+    "get_composer",
+    "get_memory",
+    "get_sessions",
+    "get_chat_stack",
+]

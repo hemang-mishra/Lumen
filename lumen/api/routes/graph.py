@@ -21,6 +21,7 @@ from lumen.api.deps import get_graph
 from lumen.api.errors import NotFound
 from lumen.api.schemas import (
     DecisionHistoryView,
+    DecisionOutcomeView,
     EpisodeDetailView,
     GraphSliceView,
     GraphStatsView,
@@ -29,6 +30,8 @@ from lumen.api.schemas import (
     VersionChainView,
 )
 from lumen.graph.provider import ReadOnlyGraph
+from lumen.graph.queries import node_type_of
+from lumen.schemas.enums import DecisionStatus
 
 router = APIRouter(prefix="/graph", tags=["graph"])
 
@@ -40,6 +43,19 @@ MAX_DEPTH = 3
 # The most records one request may return. A cap rather than a suggestion,
 # because the caller drawing the result is usually a browser.
 MAX_LIMIT = 200
+
+# Where a decision stands when it was recorded but not acted on. Everything
+# in here is waiting for a person: a tie nobody could settle, or a reading
+# that was not sure enough to act on by itself. A decision in one of these
+# states has changed nothing in the history yet, which is the opposite of
+# what a note of a decision looks like at a glance.
+HELD_BACK = frozenset(
+    {
+        DecisionStatus.PENDING_HITL.value,
+        DecisionStatus.BELOW_THRESHOLD.value,
+        DecisionStatus.SUSPENDED_QUEUE_FULL.value,
+    }
+)
 
 
 @router.get("/stats", response_model=GraphStatsView)
@@ -185,7 +201,135 @@ def get_episode(
     return EpisodeDetailView(
         episode=NodeView.of(contents.nodes[0]),
         contents=GraphSliceView.of(contents),
+        outcomes=_outcomes_for(contents, store),
     )
+
+
+def _outcomes_for(contents, store: ReadOnlyGraph) -> list[DecisionOutcomeView]:
+    """
+    What was decided about each finding this episode produced.
+
+    Gathered here rather than left to the caller to fetch one record at a
+    time. The decisions are the point of the episode — a finding that became
+    a belief and a finding that was held back for a person look identical
+    without them — and a page that has to make ten requests to find that out
+    will show it late or not at all.
+
+    The record each decision was made against is looked up too, so the answer
+    can say what a finding became rather than showing an identifier and
+    leaving the reader to go and resolve it.
+    """
+    decisions: list[tuple[str, dict]] = []
+    became: dict[str, dict] = {}
+    for row in contents.nodes[1:]:
+        node_id = str(row.get("node_id") or "")
+        if not node_id:
+            continue
+        decisions.extend(
+            (node_id, audit) for audit in store.get_decision_history(node_id)
+        )
+        became.update(_what_it_became(node_id, store))
+
+    targets = _targets_of(decisions, store)
+    return [
+        _as_outcome(source_id, audit, targets, became)
+        for source_id, audit in decisions
+    ]
+
+
+def _what_it_became(node_id: str, store: ReadOnlyGraph) -> dict[str, dict]:
+    """
+    The lasting records one finding turned into, keyed by the decision that
+    made each.
+
+    Matched by the decision's own identifier, which every link a decision
+    draws carries. Guessing from the kind of link would be close but not
+    exact — one finding can be decided about more than once, and attaching
+    the wrong outcome to a decision is the sort of wrong answer that looks
+    right.
+    """
+    slice_ = store.get_neighborhood(node_id, depth=1, direction="out")
+    by_id = {str(row.get("node_id")): row for row in slice_.nodes}
+
+    found: dict[str, dict] = {}
+    for edge in slice_.edges:
+        decision_id = edge.properties.get("decision_id")
+        target = by_id.get(edge.to_node_id)
+        if decision_id and target is not None and edge.to_node_id != node_id:
+            found[str(decision_id)] = target
+    return found
+
+
+def _targets_of(
+    decisions: list[tuple[str, dict]], store: ReadOnlyGraph
+) -> dict[str, dict]:
+    """Fetch every record the decisions point at, in one go."""
+    wanted = sorted(
+        {
+            str(audit.get("target_node_id"))
+            for _, audit in decisions
+            if audit.get("target_node_id")
+        }
+    )
+    if not wanted:
+        return {}
+    return {
+        str(row.get("node_id")): row for row in store.get_nodes_by_ids(wanted)
+    }
+
+
+def _as_outcome(
+    source_id: str, audit: dict, targets: dict[str, dict], became: dict[str, dict]
+) -> DecisionOutcomeView:
+    """Shape one decision the way somebody reading it needs it."""
+    target_id = audit.get("target_node_id") or None
+    target = targets.get(str(target_id)) if target_id else None
+    status = str(audit.get("status") or "")
+    made = became.get(str(audit.get("node_id") or ""))
+
+    return DecisionOutcomeView(
+        source_node_id=source_id,
+        action=str(audit.get("action") or ""),
+        target_node_id=target_id,
+        target_type=node_type_of(target) if target else None,
+        target_preview=_preview_of(target) if target else None,
+        became_node_id=str(made.get("node_id")) if made else None,
+        became_type=node_type_of(made) if made else None,
+        became_preview=_preview_of(made) if made else None,
+        edge_type_created=audit.get("edge_type_created") or None,
+        confidence=audit.get("confidence"),
+        runner_up_action=audit.get("runner_up_action") or None,
+        runner_up_confidence=audit.get("confidence_runner_up"),
+        status=status,
+        # A decision that was recorded and a decision that was acted on look
+        # the same in the note itself. Only the status tells them apart, and
+        # it is the difference between "this is in your history now" and
+        # "somebody still has to look at this".
+        waiting_for_a_person=status in HELD_BACK,
+        model_used=audit.get("model_used") or None,
+        decided_at=str(audit["created_at"]) if audit.get("created_at") else None,
+        decision_id=str(audit.get("node_id") or ""),
+    )
+
+
+def _preview_of(row: dict) -> str:
+    """The first thing a record says that a person would recognise it by."""
+    for field in (
+        "pattern_name",
+        "belief_statement",
+        "lesson_statement",
+        "principle_name",
+        "content",
+        "event_summary",
+        "session_summary",
+        "episode_summary",
+        "loop_description",
+        "canonical_name",
+    ):
+        value = row.get(field)
+        if value:
+            return str(value)
+    return ""
 
 
 @router.get("/chains/{chain_id}", response_model=NodeListView)

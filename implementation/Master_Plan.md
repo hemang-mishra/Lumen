@@ -1,10 +1,10 @@
 # Lumen Master Implementation Plan
 
-This document outlines the systematic, stage-by-stage implementation plan for the Lumen project, broken down into 20 distinct, testable goals. The architecture is prioritized to build from the ground up: Foundation → Extraction → Graph Testing → Query → Insights. All development occurs within the `lumen/` directory as specified in [`docs/hld/Technical_HLD.md`](file:///Users/hemangmishra/Projects/Lumen/docs/hld/Technical_HLD.md).
+This document outlines the systematic, stage-by-stage implementation plan for the Lumen project, broken down into 32 distinct, testable goals. The architecture is prioritized to build from the ground up: Foundation → Extraction → Graph Testing → Query → Insights → Identity → Front End. Goals 1–22 all develop within the `lumen/` directory as specified in [`docs/hld/Technical_HLD.md`](file:///Users/hemangmishra/Projects/Lumen/docs/hld/Technical_HLD.md); Goals 23–32 build `frontend/` beside it, with Goal 24 the one backend goal among them.
 
-**Tech Stack:** Python 3.13, uv (package manager), Kuzu (graph), Qdrant (vector), SQLite (operational), FastAPI (API), Pydantic v2 (schemas).
+**Tech Stack:** Python 3.13, uv (package manager), Kuzu (graph), Qdrant (vector), SQLite (operational), FastAPI (API), Pydantic v2 (schemas). Front end: TypeScript, Tailwind, Radix primitives, types generated from the API's OpenAPI schema.
 
-**Testing:** All goals use `pytest` + `pytest-cov`. Minimum 90% coverage target for new code.
+**Testing:** All backend goals use `pytest` + `pytest-cov`. Minimum 90% coverage target for new code. Front-end goals hold the same bar on logic — API client, hooks, state, view models — with Playwright journeys carrying the surfaces, each run in both themes and at 375px. See Phase 7's testing convention.
 
 ---
 
@@ -640,31 +640,180 @@ This document outlines the systematic, stage-by-stage implementation plan for th
     `lumen/ingest/`, `lumen/api/` and `lumen/env.py`.
   - *Plan:* [`implementation/Goal_13b_Plan.md`](file:///Users/hemangmishra/Projects/Lumen/implementation/Goal_13b_Plan.md)
 
-- [ ] **Goal 14: Parallel Retrieval Passes (A, B, C)**
-  - Pass A: Qdrant hybrid search (HyDE expansion).
-  - Pass B: Kuzu structural anchor lookup (named entities, historical eras).
-  - Pass C: Session context buffer (in-memory, ephemeral per day).
-  - *Test:* Trigger `HISTORICAL_ERA` formulation, verify Pass B retrieves correct nodes.
+- [x] **Goal 14: Parallel Retrieval Passes (A, B, C)** ✅
+  - Implemented `lumen/query/retrieval/` (`stage`, `semantic`, `structural`, `continuity`,
+    `hyde`, `hydrate`, `gate`, `merge`, `contracts`, `prompts`) plus `lumen/query/buffer.py`.
+    `ConversationalRetriever` is the only public name. Input: `RetrievalSignal` +
+    `ChatSession` → Output: `RetrievalBundle`.
+  - **A and B are parallel; C is not, and cannot be** (per explicit design decision). Pass C
+    measures today's already-surfaced records against *this* turn, and the measurement it
+    needs is the one Pass A has just computed. Giving it its own embedding call would double
+    the cost of a turn to learn nothing. It runs afterwards on numbers in memory, in about a
+    millisecond. The spec called all three parallel and is corrected.
+  - **Three seconds is one shared wall clock**, enforced from outside as Goal 13's 600ms is.
+    Whatever finished is returned; whatever did not is abandoned and *reported* as abandoned.
+    A pass that fails costs that pass — losing the semantic half does not lose the anchors.
+  - **The four empty answers stay distinguishable**: nothing worth looking up, somebody in
+    acute distress, the search ran and found nothing, and the search could not run. Goal 8's
+    hardest-won lesson, restated for a layer where the wrong reading makes a system built to
+    remember behave as though it had never met anyone.
+  - **The sensitivity gate ships here**, at the retrieval boundary rather than at injection,
+    so a locked record never leaves the search. Two rules the spec left open are settled:
+    the sensitive domains are `SELF_CONCEPT`/`RELATIONAL`/`HEALTH`/`SPIRITUALITY` — **not**
+    `EMOTIONAL`, which in this kind of conversation would gate the whole graph — and a
+    CRITICAL record with **no** domain (every individual observation) is treated as
+    sensitive until the person opens some sensitive subject. Withheld ids are named on the
+    result, never silently dropped.
+  - **The buffer deadlock is settled too.** Five slots and "CRITICAL is never evicted" means
+    a day can fill with protected records and admit nothing new; a record that cannot get a
+    slot is still offered this turn and simply does not join the thread.
+  - **Ranking here is provisional and says so.** `cosine × signal_weight × session_boost`,
+    with `recency_weight` deliberately absent (Goal 19) and final ranking + the ≤400-token
+    compression left to Goal 15. An anchor match carries **no** `similarity` at all — an
+    exact name match is not a measurement — and is ordered by a configured base value.
+  - *Amends Goal 13:* `deadline.py` moved to `lumen/query/` and gained `run_all()`; both
+    halves of the query layer need it. **A real bug surfaced only by the parallel form:** one
+    `contextvars.Context` cannot be entered by two threads at once, so a single shared copy
+    made every piece after the first fail — invisibly, since it looks like a provider error.
+  - *Amends Goal 8:* row reading (`preview_of`, `signal_of`, `CONTENT_TABLES`,
+    `RETIRED_STATUSES`, `SIGNAL_WEIGHT`) moved to `lumen/graph/rows.py`, so the two retrieval
+    layers cannot drift on what a stored row says. The pipeline's modules re-export.
+  - *Amends Goal 1:* `VectorProvider.get_vectors()` — a stored record's position could not be
+    read back at all, and the continuity check needs it to compare without searching. Vectors
+    come back normalised, which is what the collection stores.
+  - *Amends Goal 13b:* `POST /query/retrieve` — the reading endpoint answers whether the
+    router is any good; this answers whether the searches find the right things, and is the
+    only way to see the continuity pass, which needs a conversation longer than one turn.
+    `LazySearchStack` shares the importer's index rather than opening a second.
+  - *Docs amended ahead of coding:* `Conversational_RAG_Mode.md` (the parallelism correction,
+    where Pass C's numbers come from, the buffer deadlock, the two sensitivity rules, the
+    score split by layer, Pass A's unreachable 800ms budget, and `PROGRESS_CLAIM`'s
+    previously-undefined "closure detection"), `Technical_HLD.md` §3.1 and §6.
+  - *Test:* Against real Kuzu and real Qdrant, seeded per test. The Master Plan's named case
+    — a `HISTORICAL_ERA` turn surfacing what is filed under that era — is asserted both at
+    the pass and through the whole component.
+  - *Result:* 3213 tests passing (2822 from Goals 1–13b + 391 new), **100% coverage** on
+    `lumen/query/`, `lumen/graph/rows.py` and `lumen/api/`.
+  - *Plan:* [`implementation/Goal_14_Plan.md`](file:///Users/hemangmishra/Projects/Lumen/implementation/Goal_14_Plan.md)
 
-- [ ] **Goal 15: Context Assembly & Pruning**
-  - Merge candidates from all passes, apply retrieval score formula (cosine × signal_weight × recency_weight).
-  - Compress to ≤400 token context block.
-  - *Test:* Verify assembler respects token budget and applies temporal decay correctly.
+- [x] **Goal 15: Context Assembly, the Voice, and Conversation Memory** ✅
+  - Implemented `lumen/query/assembly/` (the briefing), `lumen/query/prompting/` (the voice
+    and `PromptComposer`), `lumen/query/memory/` (the conversation's own memory) and
+    `lumen/query/conversation.py` (holding a chat). Output: **`ChatPrompt`** — exactly what
+    the assistant would be sent, as one inspectable object.
+  - **The ≤400-token cap is replaced by an allowance that fits the moment** (per explicit
+    user decision): nothing in crisis, ~400 tokens and no quotes when raw, ~800 ordinary,
+    ~1500 when thinking something through. Not a cost decision — a wall of history in front
+    of a light question makes the answer worse.
+  - **Retrieval's budget rises from 3s to 8s** (per explicit user decision). A brief pause
+    before a considered reply reads as thought; an answer that missed the one relevant thing
+    reads as nothing.
+  - **A chat is written into the buffer the pipeline already reads.** `NATIVE_CHAT` has been
+    a valid source since Goal 3 and the live session's identity was built to match, so
+    following it makes today's conversation become tomorrow's graph with nothing to copy
+    across.
+  - **Editing branches; nothing said is destroyed.** Messages carry a parent, the buffer
+    names the live end, and an edit writes a sibling — the graph's append-only instinct
+    applied to conversation. **The pipeline extracts the active thread only**, because a
+    message somebody took back is not what they settled on.
+  - **Memory is the recent turns verbatim plus a stored rolling summary**, refreshed every
+    few turns by one cheap call made *after* a reply goes out. Each refresh folds the
+    previous summary plus what has been said since, so a three-hour chat costs what a
+    ten-minute one does.
+  - **In crisis the instructions change, not just the context.** Withholding the history
+    while still asking for curiosity and pattern-noticing would be half a decision.
+  - *Amends Goal 13:* the query layer now writes — conversations, never the graph. Stated in
+    the package docstring and the HLD rather than glossed.
+  - *Bug caught by a test:* the briefing lowercased first words and turned "Alex called
+    about it" into "alex called about it". Records keep their own capitalisation now — names
+    are the one thing a briefing about somebody's relationships must not mangle.
+  - *Docs amended:* `Conversational_RAG_Mode.md` (the allowance table, the template rules,
+    the crisis prompt switch, conversation storage and branching, chat memory, and the
+    superseded 3-second window), `Technical_HLD.md` §3.1 and §6.
+  - *Result:* 3433 tests passing (3213 from Goals 1–14 + 220 new), **100% coverage** on
+    `lumen/query/` and `lumen/operational/`.
+  - *Plan:* [`implementation/Goal_15_Plan.md`](file:///Users/hemangmishra/Projects/Lumen/implementation/Goal_15_Plan.md)
 
-- [ ] **Goal 16: Conversational RAG End-to-End Simulation**
-  - Implement `lumen/api/routes/chat.py` with streaming WebSocket support.
-  - Wire up FormulationService → Retrieval → ContextAssembler → SystemPromptPatcher.
-  - 3-second latency budget with carry-forward policy.
-  - *Test:* CLI chat simulation, verify AI receives injected context within latency budget.
+- [x] **Goal 16: The Conversation Itself — Streaming, Voice, and Continuity Across Days** ✅
+  - Implemented `lumen/query/chat/` (`ChatEngine` and the events one turn emits),
+    `lumen/chat/` (the wiring, and `python -m lumen.chat`), `lumen/providers/audio.py`,
+    `lumen/query/memory/earlier.py`, `lumen/api/routes/chat.py`, migration `0005_voice`.
+  - **Real streaming, at the connector layer** (per explicit user decision). The
+    alternative — waiting for the finished reply and revealing it gradually — looks
+    identical and helps nobody. Ships as `StreamingLLMProvider`, a separate interface,
+    so nothing that only wants a finished answer has to care.
+  - **A streamed reply cannot be retried.** Every other call in Lumen tries again on
+    failure, which is safe because nobody saw the failed attempt. Words on a screen
+    cannot be un-said, so a break ends the reply, reports what was already said, and
+    stores it. A failure *before* any words is an ordinary failed call.
+  - **`ModelRole.CONVERSATION`** (per explicit user decision) — a fifth role, so the
+    model that writes a warm reply in under a second is configured independently of the
+    one doing overnight extraction reasoning.
+  - **Continuity across days** (per explicit user decision): the last three days'
+    own summaries, free, because every day already writes one. Counts **days that hold a
+    conversation** rather than calendar days, reaching back a fortnight — somebody who
+    journals twice a week would otherwise get nothing, which is the case it is for.
+    Crossing midnight forces one summary of the day just ended, or short days would
+    carry nothing. The day boundary is unchanged; the retrieval working set still
+    resets at midnight.
+  - **A day is frozen once it has become history** (per explicit user decision), and the
+    refusal offers the thing actually wanted: say it again today. Necessary because an
+    episode is stored under its *date*, not its content — a re-run of an edited day
+    finds it already saved and skips it, leaving the conversation and the graph
+    permanently disagreeing with nothing reporting it. A hash comparison now warns when
+    a skipped episode's words have changed, covering the other roads to that state.
+  - **Carry-forward ships**: a search that misses its budget is caught when it lands and
+    used on the next turn, ranked at 0.9× and **re-checked against the sensitivity
+    gate** — the pass that would have gated it never finished. Carried one turn only.
+  - **Voice both ways** (per explicit user decision), with the reply spoken once
+    finished rather than sentence by sentence. Both protocols now take and return audio
+    rather than file paths. Speech to text is the one job with **no local option**, and
+    the error says so.
+  - *Amends Goal 15:* **the first turn of a conversation could never be summarised** —
+    arrival numbers start at zero and so does the summary mark, and the comparison was
+    strictly greater, so every conversation's opening was excluded from its own summary.
+  - *Amends Goal 4:* a reply stopped by a safety filter **mid-stream** read as a short
+    answer; the refusal check now lives in one place both shapes of reply use.
+  - *Test:* a week built by the real pipeline, then a real conversation against it —
+    real Kuzu, real Qdrant, real engine, scripted models. Plus `python -m lumen.chat`,
+    which is where reply quality is actually judged.
+  - *Result:* 3684 tests passing (3462 after the pre-goal review + 222 new), **99%
+    coverage**; the ten uncovered lines are the `__main__` guard, three unreachable
+    defensive branches, and four that predate this goal.
+  - *Plan:* [`implementation/Goal_16_Plan.md`](file:///Users/hemangmishra/Projects/Lumen/implementation/Goal_16_Plan.md)
 
 ## Phase 5: Insights & Macro Layer (Goals 17-20)
 **Objective:** Build background intelligence processes and the unified API gateway.
 
-- [ ] **Goal 17: Periodic Macroextraction**
-  - Implement `lumen/pipeline/macroextraction.py`.
-  - Report types: SHADOW (daily), WEEKLY, MONTHLY, QUARTERLY.
-  - Write `MacroextractionReportNode` + `analyzed_in` edges.
-  - *Test:* Trigger mock "end of week" event; verify report node saved with correct episode coverage.
+- [x] **Goal 17: Periodic Macroextraction** ✅
+  - Implemented `lumen/pipeline/macroextraction/` — a package rather than one module:
+    `windows` (calendar arithmetic and what is overdue), `corpus` (the only reader),
+    `analytics`/`aging`/`shifts` (every number, pure), `narrative`/`prompts` (every
+    sentence), `assemble`, `commit` (the only writer), `runner`, and `service` (the narrow
+    surface the web layer holds). Report types SHADOW, WEEKLY, MONTHLY, QUARTERLY; each run
+    writes a `MacroextractionReportNode` plus one `analyzed_in` edge per episode read.
+  - **Python counts, the model narrates.** Every figure is computed from the graph without a
+    model, so it is reproducible and checkable by hand; the model is shown those figures and
+    asked only for phrasing. A model failure costs a report its prose, never its numbers,
+    and every reference it returns is checked against what it was shown — including a
+    refusal to let it name an archetype shift the arithmetic did not find.
+  - **A period is covered when it happened, not when it was written**, with a short grace
+    before running so late entries land first. Running the same period twice returns the
+    existing report and spends nothing; an explicit force writes a second one beside it.
+    An empty period and a quiet shadow scan write nothing at all.
+  - Also added: three store reads (`find_episodes_by_event_date`, batched
+    `find_standing_edges`, `find_reports`), `queries.date_column` so records dated by
+    creation can be bounded by date at all, `HitlQueueRepository.oldest_pending_at`,
+    `MacroConfig`, and `/reports` (list, detail, due, run) with an inspection page.
+  - *Deferred:* emotional valence, proof chains and prospective memory to Goal 19 — the
+    first needs a per-observation mood score that exists nowhere in Lumen and would have to
+    be invented; the other two are whole-history scans rather than window reads. The spec's
+    `avg_negative_emotion_intensity` is replaced by a counted
+    `negative_observation_count`, recorded as a divergence rather than a silent choice.
+    Applying the ageing multipliers to retrieval stays Goal 19's; the live scheduler and
+    feeding shadow alerts into the conversation stay Goal 20's.
+  - *Result:* 4026 tests passing (313 new), **99% coverage** on the new package.
+  - *Plan:* [`implementation/Goal_17_Plan.md`](file:///Users/hemangmishra/Projects/Lumen/implementation/Goal_17_Plan.md)
 
 - [ ] **Goal 18: HITL Queue System**
   - Implement `lumen/api/routes/hitl.py` — card-based review UI endpoints.
@@ -681,6 +830,316 @@ This document outlines the systematic, stage-by-stage implementation plan for th
   - Finalize `lumen/api/main.py` (FastAPI) tying all routes: `/chat`, `/ingest`, `/query`, `/graph`, `/hitl`, `/reports`.
   - WebSocket streaming for chat responses and pipeline progress updates.
   - *Test:* Full HTTP lifecycle: Ingest → Pipeline triggers → Query → Chat with RAG context.
+
+## Phase 6: Identity & Multi-User (Goals 21-22)
+**Objective:** Put a real person behind every request, and give each of them a graph nobody
+else can reach. Goals 1–20 build a complete product for one configured user; this phase is
+what makes that product something a second person can sign into.
+
+**Specification:** [`docs/hld/Auth_Architecture.md`](file:///Users/hemangmishra/Projects/Lumen/docs/hld/Auth_Architecture.md) — the full design, its
+decisions (DEC-A1…A7), its acceptance criteria (AUTH-1…AUTH-9), and the reasoning for each.
+Read it before starting either goal. What follows is the build order, not the design.
+
+**Why here and not earlier.** Goal 16 makes the conversation work end to end and Goal 20
+closes the API surface; auth lands immediately after, so the finished product ships with
+identity rather than acquiring it later. The accepted cost of this ordering is stated
+plainly: Goals 17–20 will each be written against `config.user_id`, and Goal 21 retrofits
+them. That retrofit is bounded on purpose — identity enters through exactly one FastAPI
+dependency and leaves through one renamed config field, so the change at every call site is
+mechanical rather than a redesign.
+
+**What is already right.** The operational database has been keyed by `user_id` since
+Goal 3 — `session_buffers`, `pipeline_jobs`, `imports`, `hitl_queue`, `user_settings` and
+`data_erasure_audit` all carry the column. No migration is needed there. The graph and the
+vector index carry no notion of a user at all, which is why Goal 22 exists and is the larger
+of the two.
+
+- [ ] **Goal 21: Identity & Access — JWT with Google Sign-In**
+  - Implement `lumen/auth/` behind Protocols like every other vendor boundary: `tokens.py`
+    (mint/verify, EdDSA, JWKS), `google.py` (the only module that knows an OAuth vendor),
+    `identity.py` (the `Identity` model and resolution), `repository.py` (users, identities,
+    refresh tokens), `routes.py`.
+  - New operational tables + Alembic migration: `users`, `user_identities`, `refresh_tokens`.
+    Every existing table already has its `user_id`.
+  - Google authorization-code flow with PKCE (DEC-A2). The client secret never leaves the
+    server; the ID token is verified against Google's JWKS — signature, `iss`, `aud`, `exp`
+    and `email_verified` — before any user row is touched.
+  - Lumen mints its own tokens (DEC-A1): a 15-minute EdDSA access token held in browser
+    memory, and an opaque 30-day refresh token in an httpOnly `SameSite=None; Secure` cookie,
+    rotated on every use with reuse detection that revokes the whole chain.
+  - `AppConfig.user_id` → `AppConfig.default_user_id`, and a test asserts nothing under
+    `lumen/api/` reads it. Routes take a request-scoped `Identity` from `get_identity`,
+    enforced as a **router-level default dependency** so a new endpoint is protected by
+    forgetting rather than exposed by it.
+  - `LUMEN_AUTH_ENABLED=false` reproduces today's behaviour exactly (AUTH-6), so the existing
+    single-user deployment and the full suite keep running unchanged.
+  - `LUMEN_SIGNUP_MODE` defaults to `allowlist` — an open Google sign-in on a reachable host
+    provisions a database and a model budget for anyone who finds the URL.
+  - *Test:* Token lifecycle against a faked Google (a local JWKS and a stub token endpoint,
+    no network). Expired, wrongly-signed, wrong-audience and stale-`token_version` tokens
+    each refused with the right reason. Refresh reuse revokes the chain. A `state` mismatch
+    is rejected. Assert no credential, code or token reaches a log line or a config snapshot.
+
+- [ ] **Goal 22: Per-User Isolation (Tenancy)**
+  - Implement a **store registry**: one Kuzu database directory and one Qdrant collection per
+    user (DEC-A5), resolved from the authenticated identity, with LRU eviction bounded by
+    `LUMEN_MAX_OPEN_GRAPHS` because Kuzu is embedded and takes an exclusive lock per handle.
+  - `LUMEN_GRAPH_DB_PATH` → `LUMEN_GRAPH_DB_ROOT`; collections become `lumen_<user_key>`.
+    `user_key` is validated against a strict pattern before it is ever concatenated into a
+    path — we generate `user_id` and it cannot contain a traversal sequence, and path
+    traversal is permanent while "cannot" is a property of today's generator.
+  - **Provisioning is explicit, ordered, idempotent and verified at first use.** A user whose
+    graph directory exists but whose collection does not is a user for whom every write
+    succeeds and nothing is ever findable — the same class of failure Goal 13b caught once
+    at the collection-width level (AUTH-8).
+  - **Settle the single-writer constraint (OQ-A2).** The API reads a user's graph and the
+    ingest worker writes to it; one process makes that safe today by accident of topology.
+    Under per-user stores it must be coordinated per user, and a worker in a separate process
+    must not open the same directory as the API.
+  - **Settle where a background run gets its identity (OQ-A1).** A pipeline job has no
+    request; it has a `user_id` column, and needs to resolve stores from it.
+  - **A tested one-time migration adopts the existing `local` data** — creates the first
+    `users` row, links a Google identity, and moves the existing graph directory and
+    collection to that user's key. There is real history on disk; stranding it is the
+    failure mode this ships to prevent.
+  - *Test:* The adversarial one is the point (AUTH-3) — two seeded users, then every read
+    endpoint in the API asked for the other user's identifiers, expecting 404 rather than a
+    leak. Plus: registry eviction and reopen under concurrency, provisioning interrupted
+    between graph and collection, and the migration run twice.
+
+## Phase 7: Front End — Foundation & Inspection (Goals 23-27)
+**Objective:** Build the real front end, starting with the surfaces that make the pipeline
+legible. At the end of this phase the `/ui` test harness has been superseded on every
+inspection surface and reconciliation is finally readable by a person.
+
+**Specification:** [`docs/frontend/Requirements.md`](file:///Users/hemangmishra/Projects/Lumen/docs/frontend/Requirements.md) — the surfaces (S1–S10), the
+requirements (`FR-*`), the API gaps (`API-1`…`API-10`) and the four settled decisions
+(DEC-1…DEC-4). [`docs/frontend/Design_Language.md`](file:///Users/hemangmishra/Projects/Lumen/docs/frontend/Design_Language.md) — the look, as rules
+(`DL-1`…`DL-58`) plus the review checklist every change is held to. Read both before
+starting any goal in this phase.
+
+**The four decisions this phase is built on.** Inspect surfaces first, because they are
+mostly buildable against today's API and they are where the known gap is (DEC-1). The
+browser calls FastAPI directly with no BFF layer, so every screen must be answerable by a
+real endpoint — which is why Goal 24 exists (DEC-2). One application with reflect and
+inspect as separated sections of one shell (DEC-3). `frontend/` beside `lumen/` in this
+repository, with its own build and deploy (DEC-4).
+
+**Testing convention for `frontend/`.** The ≥90% rule still applies, to the half of a front
+end where coverage means something: the API client, hooks, state, formatters and view-model
+logic. Pixel output is not meaningfully coverable, so the rest is carried by Playwright
+journeys, and **every journey runs in both themes and at 375px** — a screen that was only
+ever reviewed in dark at desktop width is not reviewed. Every surface gets an `axe` pass.
+This is an amendment to the project convention, not an exemption from it.
+
+- [ ] **Goal 23: Front-End Foundation & Design System**
+  - Scaffold `frontend/` — TypeScript, Tailwind, Radix primitives, its own build. No product
+    surface ships in this goal; the deliverable is the foundation everything else is built on,
+    which is what makes it worth its own goal rather than the first half of another.
+  - **Design tokens as the only styling mechanism** (DL-8…DL-10): the full light and dark
+    palettes, type scale, spacing, radii, elevation, motion and state layers. Light is the
+    base definition and dark redefines the same names, so light cannot rot.
+  - Theme switching — system, light, dark — persisted, with **no flash of the wrong theme on
+    load** (FR-XT3, FR-XT4). Both density modes (DL-40…DL-43), with compact never applying to
+    a touch screen.
+  - **A typed API client generated from the service's OpenAPI schema** (FR-XC1), with a check
+    that fails when the generated types and the running service disagree. Hand-written
+    request/response types are how two codebases drift.
+  - CORS on the FastAPI side and a configurable base URL on the client (FR-XC3) — required
+    rather than optional, since under DEC-2 the browser talks to the API cross-origin with
+    nothing in between.
+  - The primitives, each with its narrow-screen form designed at the same time: three buttons
+    (DL-44), inputs, outline chips (DL-45), the four-state list container (DL-46), the
+    table→card responsive table (DL-47), disclosure (DL-48), payload block (DL-49), one
+    overlay component that is a bottom sheet on mobile (DL-50), and the **record line**
+    (DL-52) — the pattern that answers "an id is not an answer" everywhere else in the app.
+  - The app shell: navigation that separates reflect from inspect (DEC-3, P2), a mobile
+    navigation form, and room for S7–S9 to arrive later without restructuring (FR-XL5).
+  - *Test:* A `/kitchen-sink` route rendering every primitive in every state, asserted in both
+    themes at both densities and at 375px — a foundation goal has nothing to demonstrate
+    otherwise. Plus `axe` on it, keyboard traversal, and a reduced-motion run.
+
+- [ ] **Goal 24: Inspection Reads (API-3, API-4, API-5, API-8, API-9)**
+  - A backend goal inside a front-end phase, in the manner of Goal 13b, and for the same
+    reason: DEC-2 removed the layer that could have reshaped responses, so five screens in
+    Goals 25–27 have no endpoint that can answer them.
+  - **`API-3` — a reconciliation-shaped read of an episode.** The largest gap in the
+    specification. `get_episode_contents` follows `CONTAINMENT_EDGES` only, so
+    `GET /graph/episodes/{id}` returns no `DecisionAuditNode`, no `same_as`/`reinforces`/
+    `evolved_from`/`contradicts`/`dialectic`/`regulates` edges, and **none of the historical
+    records that were connected to** — which is precisely what a person needs to see. A new
+    named traversal returns, per finding: the decision, the action, the confidence, the model,
+    the counterpart record **hydrated with its own text and date**, and what the decision
+    created. A named traversal, not a general query — Goal 11 cancelled `execute_cypher()` and
+    that stays cancelled.
+  - **`FR-S5-12` needs a decision.** The candidates retrieved and *not* chosen live in the
+    Stage 2 output payload in `pipeline_stage_runs`, not in the graph. Either this read joins
+    the run log or the surface makes two calls. Recommend the join, so one endpoint answers
+    one question.
+  - **`API-4` — trigger attribution and pending runs.** `pipeline_jobs` gains a trigger
+    (`IMPORT` / `LIVE_SESSION` / `REPLAY` / `SIMULATION`) with a migration, so one list can
+    cover every run (FR-S4-1). Pending runs need a decision: a job row created at `PENDING`
+    when a buffer opens pollutes the job table with conversations that never decay, so
+    recommend surfacing **open session buffers** as pending entries in the runs read instead.
+  - **`API-5` — batch id resolution.** A `describe` read taking many ids and returning what
+    each record says, so the run view can honour DL-52 without one request per id. Preserves
+    caller order and reads one table at a time, per the Goal 13b fix.
+  - **`API-8` — a day index.** `event_date`, its `session_label`s, message and episode counts,
+    and extraction status per day. Cheaper and more honest than filtering 200 episodes in the
+    browser.
+  - **`API-9` — text search over records.** The hybrid search already exists inside retrieval
+    and nothing exposes it; expose it behind a narrow read rather than building a second one.
+  - *Test:* The reconciliation read is asserted against a graph built by **actually running
+    the pipeline**, as Goal 11's tests are — a hand-seeded graph agrees with whatever shape the
+    test author imagined. Assert that an episode whose findings merged into older records
+    returns those older records' text, which is the one thing the current endpoint cannot do.
+
+- [ ] **Goal 25: Import & Runs Surfaces (S3, S4)**
+  - The import surface first, because its API is complete today: the pre-work receipt, live
+    progress without a manual refresh, the permanent history with failure reasons in place,
+    and the derived event date with where it came from (FR-S3-1…FR-S3-5).
+  - **The unified run interface** (FR-S4-1…FR-S4-10) — the thing the current harness gets
+    wrong by having two histories for one kind of object. One list, trigger as a filter,
+    source attribution linking back to the import row or the chat day, and a buffering
+    session visible as pending before it starts.
+  - The run story read top to bottom, stages grouped by episode rather than flat, because one
+    entry usually holds several unrelated topics decided independently (FR-S4-6).
+  - **Everything the run wrote is shown as what the record says** (FR-S4-8, DL-52), using
+    API-5. This is the specific fix for `obs_… → same_as → pat_…`.
+  - Every failure named in words, with the per-stage meaning kept distinct — a rate limit must
+    never be described as a validation problem (FR-S4-7).
+  - The re-run control is **absent, not disabled**, until `rerun_from_stage` exists (FR-S4-10).
+  - *Test:* Playwright against a real service with a real import: upload, watch it finish,
+    open the run it caused, and assert the reconciliation edges read as sentences rather than
+    ids. Both themes, 375px.
+
+- [ ] **Goal 26: Episode & Reconciliation Surface (S5)**
+  - The flagship inspect surface and the reason this phase is ordered the way it is. One
+    episode: the writing it came from, everything made of it, and — for the first time —
+    **what each finding was connected to and why**.
+  - Findings above, transcript below, because the transcript is long and everything worth
+    checking it against sits underneath it (FR-S5-1).
+  - The **decision card** (DL-53) per finding: the action spelled out, the confidence and
+    model, and the counterpart record **in its own words with its own date**. `EVOLVE` shows
+    its `delta_description` as a stated difference. Candidates considered and not chosen sit
+    behind a disclosure. A gate that fired in code after the model answered is named.
+  - What the decision created: a new pattern or belief from `BRANCH`, a new version in a chain
+    from `EVOLVE`, a contradiction, a person record (FR-S5-11).
+  - Findings that failed extraction are shown as such with the rule that refused them, never
+    hidden and never mixed in with real findings (FR-S5-6). A `SUSPENDED` episode says what is
+    outstanding.
+  - Journal text at reading size, as text and never as markup (DL-54, FR-XA5), and the
+    original language named where the entry was translated (FR-S2-5).
+  - Every property of every record survives, one disclosure away (P1) — the harness's instinct
+    that the field that matters is the one a curated view left out is correct.
+  - *Test:* Against a real pipeline run whose findings include a merge into an older record and
+    an evolve. Assert the older record's text appears, that the delta is shown as a difference,
+    and that a failed extraction is visually distinct from a finding.
+
+- [ ] **Goal 27: Graph Explorer & Search (S6)**
+  - Explore from a starting record: the slice within a few steps and the links between,
+    filters by kind, date, domain, signal and era, and the `as_of` time control that keeps
+    links a later rollback withdrew (FR-S6-1…FR-S6-5).
+  - **`truncated` is drawn on the picture** (FR-S6-6, DL-57). A partial graph drawn as a
+    complete one is a wrong answer that looks right. Depth is capped at three hops and the UI
+    does not offer more (FR-S6-7).
+  - **Node kinds are monochrome** — label plus glyph, by a rule covering all fifteen, not four
+    colours for fifteen types (FR-S6-2, DL-16).
+  - **A list/tree presentation of the same slice for phones** (FR-S6-8, FR-XL3). A shrunken
+    force-directed canvas is not a mobile design, and this is the surface where FR-D2 is
+    hardest to honour.
+  - Search over records (API-9), and the record detail panel with its version chain and
+    decision history.
+  - *Test:* A slice that hits the limit renders its truncation. The phone presentation shows
+    the same nodes and edges as the canvas for the same slice — asserted from the same
+    response, so the two cannot drift.
+
+## Phase 8: Front End — Conversation & Intelligence (Goals 28-32)
+**Objective:** The reflect half of the product, the surfaces that depend on Goals 16–21, and
+the retirement of the test harness.
+
+- [ ] **Goal 28: Today & History (S1, S2)** — *needs Goal 16*
+  - The conversation surface: streamed replies, a composer that is comfortable one-handed on a
+    phone, keyboard-aware and fixed to the bottom (FR-S1-1, FR-S1-2, DL-55).
+  - **Editing branches, and the UI has to show that.** Goal 15 made messages carry a parent so
+    an edit writes a sibling and nothing said is destroyed, with the pipeline extracting the
+    active thread only. That is a real surface: switching between versions of a turn, and
+    showing which thread is live.
+  - Session identity on screen — which session of the day this is, starting a second one
+    without merging (FR-S1-3, NN5), and an explicit **end session** (FR-S1-5, API-2).
+  - Quietly show that today's writing has not been extracted yet and roughly when it will be
+    (FR-S1-4), and the late-night nudge (FR-S1-7).
+  - **Retrieval stays invisible** (P3, NN2). Behind a marked "show the working" toggle, off by
+    default: the register, the triggers, each pass, what was withheld, and the assembled
+    `ChatPrompt` Goal 15 already makes inspectable. **The budget is 8 seconds and the context
+    allowance varies by register** — Goal 15 replaced the 3s window and the flat 400-token cap,
+    and `Requirements.md` FR-XP2 is corrected to match.
+  - **Nothing is added in crisis** (DL-58, FR-XV2). No annotations, no chips, no toggle, no
+    nudge. The most important decision on this surface is the one where it does less.
+  - History: days and their sessions, read back with what was extracted from each (S2, API-8).
+  - *Test:* A full conversation through the real service — turn sent, reply streamed, an edit
+    branched, the active thread asserted as the one the pipeline would extract. A crisis-register
+    turn asserted to render with no decoration at all.
+
+- [ ] **Goal 29: Review Queue (S7)** — *needs Goal 18*
+  - One card per item needing a person; for an `AMBIGUOUS` tie both candidate actions side by
+    side with their candidate records in their own words and dates, the specific difference,
+    and the three resolutions (FR-S7-1, FR-S7-2).
+  - **Resolvable in one tap on a phone.** This is the surface most likely to be used standing
+    up, and the roadmap has called it mobile-first and one-tap since Phase 1.
+  - Pending count visible from anywhere, snooze, visible age against the 7-day auto-resolve,
+    and the queue cap made visible rather than mysterious (FR-S7-4…FR-S7-6).
+  - Extraction failures cannot be queued at all — `hitl_queue.audit_node_id` is `NOT NULL` and
+    they have no audit node — so they stay reachable from the episode instead, never silently
+    absent (FR-S7-7).
+  - *Test:* Force an `AMBIGUOUS` reconciliation, resolve it from the queue on a 375px viewport,
+    assert the graph changed and the card left the queue.
+
+- [ ] **Goal 30: Reports & Trends (S8)** — *needs Goal 17*
+  - The report list by period, one report read with **every claim linked to the episodes and
+    records it was drawn from** (FR-S8-1, FR-S8-2) — a synthesis nobody can trace back is the
+    one output of this system that cannot be checked.
+  - Trends: pattern frequency, belief change, emotional valence (FR-S8-3), themed to DL-3 and
+    DL-15 rather than to a charting library's defaults.
+  - *Test:* A generated report renders with every citation resolving to a real record.
+
+- [ ] **Goal 31: Sign-in & Session (S11, API-11)** — *needs Goal 21*
+  - The login surface per `Requirements.md` S11 — one route outside the app shell, Google as
+    the only method, a sentence saying what Lumen is before asking anyone to sign in, and both
+    themes phone-first from the first version. The frontend `/auth/callback` route, and
+    `GET /auth/me` as the session check on load.
+  - **Built behind the same switch the service has** (FR-S11-8). Goals 23–30 are built against
+    `LUMEN_AUTH_ENABLED=false`; this goal switches the surface on. That mode is supported, not
+    scaffolding, and the single-user deployment keeps working (AUTH-6).
+  - **The access token lives in JavaScript memory only** — never `localStorage`, never
+    `sessionStorage` (Auth §4). Silent refresh through `POST /auth/refresh` on a 401, with a
+    single in-flight refresh shared across concurrent requests, and one clean fall to signed-out
+    when the refresh chain has been revoked.
+  - Sign-out, and the erasure request path, both of which end every session immediately by
+    bumping `token_version` server-side.
+  - **Every cache and query client is scoped to the signed-in person and cleared on sign-out**
+    (FR-XI6). A cache that outlives a session is how one person's history reaches another
+    person's screen, and it is the one bug in this goal that would be unrecoverable.
+  - Sign-in failures are distinguished and said in words, never "something went wrong"
+    (FR-S11-6), and where a person was going before being bounced to `/login` is remembered
+    (FR-S11-7).
+  - *Test:* Expired access token silently refreshed mid-session with no visible interruption. A
+    revoked chain lands on signed-out without a loop. Assert no token reaches `localStorage`,
+    `sessionStorage` or a log line.
+
+- [ ] **Goal 32: Retire the Harness, and the Close-Out Audits (resolves OQ-7)**
+  - **Delete `lumen/api/static/` and the `/ui` mount.** Goal 13b shipped it explicitly meant
+    to be deleted rather than grown into a product; the condition is parity on S4 and S5, met
+    by Goals 25 and 26. Naming the goal that deletes it is how it actually happens.
+  - Full-app audits: `axe` across every surface, contrast in both themes, keyboard traversal,
+    reduced motion, and the DL-58 checklist applied surface by surface.
+  - Performance against FR-XP1…FR-XP4 on a real graph with real history, not a seeded fixture.
+  - **Decide PWA and offline** (deferred in `Requirements.md` §8 and `Technical_HLD.md` §11
+    decision 4). Either it becomes a goal or the deferral becomes permanent.
+  - Settle `Requirements.md` **OQ-4** — how far "show the working" goes — with the answer the
+    built product actually wants rather than the one guessed before it existed.
+  - *Test:* The suite still passes with `static/` gone, and no test, route or doc references
+    `/ui`.
 
 ---
 
@@ -712,4 +1171,43 @@ graph TD
     G15 --> G19[Goal 19: Temporal Decay]
     G16 --> G20[Goal 20: BFF Gateway]
     G18 --> G20
+    G20 --> G21[Goal 21: Identity & Access]
+    G3 --> G21
+    G21 --> G22[Goal 22: Per-User Isolation]
+    G1 --> G22
+    G19 --> G22
+    G23[Goal 23: FE Foundation] --> G25[Goal 25: Import & Runs]
+    G11 --> G24[Goal 24: Inspection Reads]
+    G24 --> G25
+    G23 --> G26[Goal 26: Episode & Reconciliation]
+    G24 --> G26
+    G23 --> G27[Goal 27: Graph Explorer]
+    G24 --> G27
+    G23 --> G28[Goal 28: Today & History]
+    G16 --> G28
+    G23 --> G29[Goal 29: Review Queue]
+    G18 --> G29
+    G23 --> G30[Goal 30: Reports & Trends]
+    G17 --> G30
+    G23 --> G31[Goal 31: Sign-in & Session]
+    G21 --> G31
+    G25 --> G32[Goal 32: Retire the Harness]
+    G26 --> G32
 ```
+
+Goal 21 depends on Goal 3 for the operational store its three new tables join, and Goal 22
+on Goal 1 for the `GraphProvider`/`VectorProvider` Protocols the store registry resolves
+behind. The Goal 19 → Goal 22 edge is the erasure procedure: account deletion (AUTH-9) has
+somewhere to route only once erasure exists.
+
+**The front end's dependencies are unusually loose, and that is useful.** Goal 23 depends on
+nothing at all — no endpoint, no schema, no pipeline stage — so it can be built at any point
+from now on, including alongside Goal 16. It is the only goal in the plan with that property,
+and it is also the one every other front-end goal needs, which makes starting it early almost
+free. Goal 24 needs only Goal 11's traversal work, which shipped.
+
+Everything in Phase 8 is gated on a backend goal that is not the one before it in the
+numbering — 28 on 16, 29 on 18, 30 on 17, 31 on 21 — so the numbering is a build order rather
+than a dependency chain. Any of them may be pulled earlier the moment its backend goal lands.
+Goal 32 is last on purpose: it deletes the harness, and the harness is what we inspect the
+pipeline with until Goals 25 and 26 replace it.

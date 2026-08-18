@@ -127,6 +127,80 @@ class TestStartingAndStopping:
         assert provider.conn is None
 
 
+class TestTheSchemaTheServiceStartsWith:
+    """
+    Starting up runs the migrations rather than creating tables.
+
+    The difference is invisible on day one and decides everything after it.
+    A database built by creating tables carries no record of which
+    migrations it represents, so the next column added to a model never
+    reaches it — and the failure surfaces much later as `no such column`
+    from whichever query touches it first, with nothing pointing back at a
+    schema that was never migrated. That happened here, on real data.
+    """
+
+    def _config(self, tmp_path) -> AppConfig:
+        return AppConfig(
+            graph=GraphConfig(db_path=str(tmp_path / "graph")),
+            operational=OperationalConfig(db_url=f"sqlite:///{tmp_path / 'ops.db'}"),
+        )
+
+    def test_a_fresh_database_comes_up_fully_migrated(self, tmp_path):
+        from fastapi.testclient import TestClient
+        from sqlalchemy import create_engine, inspect
+
+        from lumen.operational.migrator import detect_schema_drift
+
+        config = self._config(tmp_path)
+        with TestClient(create_app(config)):
+            pass
+
+        engine = create_engine(config.operational.db_url)
+        try:
+            assert "alembic_version" in set(inspect(engine).get_table_names())
+            assert detect_schema_drift(engine) == []
+        finally:
+            engine.dispose()
+
+    def test_a_database_with_tables_but_no_history_is_refused(self, tmp_path):
+        """
+        The state the old path left behind, and the one state that cannot be
+        resolved by guessing: which migration those tables represent is a
+        question for a person.
+        """
+        from fastapi.testclient import TestClient
+        from sqlalchemy import create_engine
+
+        from lumen.operational import models
+
+        config = self._config(tmp_path)
+        engine = create_engine(config.operational.db_url)
+        models.Base.metadata.create_all(engine)
+        engine.dispose()
+
+        with pytest.raises(RuntimeError, match="no migration history"):
+            with TestClient(create_app(config)):
+                pass
+
+    def test_the_refusal_says_how_to_get_out_of_it(self, tmp_path):
+        from fastapi.testclient import TestClient
+        from sqlalchemy import create_engine
+
+        from lumen.operational import models
+
+        config = self._config(tmp_path)
+        engine = create_engine(config.operational.db_url)
+        models.Base.metadata.create_all(engine)
+        engine.dispose()
+
+        with pytest.raises(RuntimeError) as raised:
+            with TestClient(create_app(config)):
+                pass
+
+        assert "alembic stamp" in str(raised.value)
+        assert "alembic upgrade head" in str(raised.value)
+
+
 class TestHealth:
     def test_a_working_service_says_so(self, api_client):
         body = api_client.get("/health").json()
@@ -217,8 +291,8 @@ class TestTheApiCannotWrite:
         }
         assert used == {"GET"}
 
-    def test_every_post_is_one_of_the_three_that_have_earned_it(self, api_client):
-        # An allow-list rather than a count, so that adding a fourth is a
+    def test_every_post_is_one_that_has_earned_it(self, api_client):
+        # An allow-list rather than a count, so that adding another is a
         # deliberate act with a reason written next to it.
         #
         #   /query/formulate — changes nothing, but what it is given is
@@ -226,10 +300,38 @@ class TestTheApiCannotWrite:
         #     in the URL, and from there into every access log it passes
         #     through.
         #
+        #   /query/retrieve — the same sentence, and the same reason. It
+        #     reads the graph and the search index and writes to neither;
+        #     the only thing it changes is one in-memory conversation's
+        #     memory of itself, which is gone at midnight and never stored.
+        #
+        #   /query/prompt — the same sentence again, and the same reason.
+        #     It shows exactly what the assistant would be sent and writes
+        #     nothing anywhere; it does not even generate a reply.
+        #
         #   /ingest/file, /ingest/json — the one way in. Both hand what they
         #     receive to the importer and put an identifier on a queue;
         #     neither can reach the graph, which is what the two tests above
         #     check by type and by name.
+        #
+        #   /chat/transcribe — a recording of somebody's voice, which has
+        #     even less business in a URL than a sentence does. It writes
+        #     nothing; the words come back and are sent on as an ordinary
+        #     turn.
+        #
+        #   /chat/messages/{message_id}/revise — the one POST here that
+        #     really does change something, and what it changes is the
+        #     conversation, never the graph. It writes the rewrite beside the
+        #     original rather than over it, and refuses outright once the day
+        #     has been processed.
+        #
+        #   /reports/run — writes a periodic report to the graph, and is the
+        #     second route here that can. It is narrow in the same way the
+        #     uploads are: what it holds is not a graph handle but the thing
+        #     that builds reports, and all it can say to that is which period
+        #     to summarise. Reports are new nodes about existing history; no
+        #     path through this route can change or retire a record of
+        #     something the person actually wrote.
         spec = api_client.get("/openapi.json").json()
 
         posts = {
@@ -237,7 +339,16 @@ class TestTheApiCannotWrite:
             for path, operations in spec["paths"].items()
             if "post" in operations
         }
-        assert posts == {"/query/formulate", "/ingest/file", "/ingest/json"}
+        assert posts == {
+            "/query/formulate",
+            "/query/retrieve",
+            "/query/prompt",
+            "/ingest/file",
+            "/ingest/json",
+            "/chat/transcribe",
+            "/chat/messages/{message_id}/revise",
+            "/reports/run",
+        }
 
     def test_the_upload_routes_cannot_reach_the_graph_themselves(self):
         # The importer is the only thing in the process that writes, and the

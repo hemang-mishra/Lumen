@@ -28,7 +28,12 @@ from typing import Any
 
 from lumen.config import AppConfig, ProviderConfig
 from lumen.providers.errors import ProviderConfigurationError
-from lumen.providers.protocols import EmbeddingProvider, LLMProvider
+from lumen.providers.protocols import (
+    AudioTranscriptionProvider,
+    EmbeddingProvider,
+    LLMProvider,
+    TTSProvider,
+)
 from lumen.schemas.enums import ModelRole
 
 logger = logging.getLogger(__name__)
@@ -40,13 +45,13 @@ EmbeddingBuilder = Callable[[str, ProviderConfig], EmbeddingProvider]
 
 # The roles that mean "a model that generates text". Asking for one of the
 # others here is a mistake in the calling code, not a configuration problem.
-_TEXT_ROLES = frozenset({ModelRole.LIGHTWEIGHT, ModelRole.THINKING})
+_TEXT_ROLES = frozenset(
+    {ModelRole.LIGHTWEIGHT, ModelRole.THINKING, ModelRole.CONVERSATION}
+)
 
-# Roles that exist but have no implementation yet, and what will bring them.
-_NOT_YET_IMPLEMENTED = {
-    ModelRole.TRANSCRIPTION: "speech to text arrives with voice input",
-    ModelRole.TTS: "text to speech arrives with voice output",
-}
+# How to build a voice provider once the name has been resolved.
+TranscriptionBuilder = Callable[[str, ProviderConfig], AudioTranscriptionProvider]
+SpeechBuilder = Callable[[str, ProviderConfig], TTSProvider]
 
 # What the stand-in embedding provider falls back to when nothing else says.
 # Both real default models are this wide.
@@ -54,6 +59,8 @@ _COMMON_VECTOR_WIDTH = 768
 
 _llm_builders: dict[str, LLMBuilder] = {}
 _embedding_builders: dict[str, EmbeddingBuilder] = {}
+_transcription_builders: dict[str, TranscriptionBuilder] = {}
+_speech_builders: dict[str, SpeechBuilder] = {}
 
 # Built providers, kept so a new network client is not made for every call.
 _cache: dict[tuple[str, str, str, str], Any] = {}
@@ -68,6 +75,65 @@ def register_llm_provider(name: str, builder: LLMBuilder) -> None:
 def register_embedding_provider(name: str, builder: EmbeddingBuilder) -> None:
     """Make an embedding provider available under a name."""
     _embedding_builders[name] = builder
+
+
+def register_transcription_provider(name: str, builder: TranscriptionBuilder) -> None:
+    """Make a speech-to-text provider available under a name."""
+    _transcription_builders[name] = builder
+
+
+def register_speech_provider(name: str, builder: SpeechBuilder) -> None:
+    """Make a text-to-speech provider available under a name."""
+    _speech_builders[name] = builder
+
+
+def get_transcription_provider(
+    config: AppConfig | None = None,
+) -> AudioTranscriptionProvider:
+    """
+    The provider that turns a recording into words.
+
+    This is the one job with no local option. The local runtime everything
+    else can fall back to does not do speech at all, so a deployment that
+    must keep everything on its own machine has no voice input — and the
+    error says exactly that rather than listing names that would not help.
+    """
+    settings = config or AppConfig()
+    name, model = settings.providers.resolve(ModelRole.TRANSCRIPTION)
+    builder = _transcription_builders.get(name)
+    if builder is None:
+        raise ProviderConfigurationError(
+            f"{name!r} cannot turn speech into text. Available: "
+            f"{sorted(_transcription_builders)}. There is no local option for "
+            f"this one job, so a deployment that requires local processing "
+            f"has no voice input.",
+            provider=name,
+            model=model,
+            role=ModelRole.TRANSCRIPTION,
+        )
+    return _cached(
+        key=("transcription", ModelRole.TRANSCRIPTION.value, name, model),
+        build=lambda: builder(model, settings.providers),
+    )
+
+
+def get_speech_provider(config: AppConfig | None = None) -> TTSProvider:
+    """The provider that says a reply out loud."""
+    settings = config or AppConfig()
+    name, model = settings.providers.resolve(ModelRole.TTS)
+    builder = _speech_builders.get(name)
+    if builder is None:
+        raise ProviderConfigurationError(
+            f"{name!r} cannot turn text into speech. Available: "
+            f"{sorted(_speech_builders)}",
+            provider=name,
+            model=model,
+            role=ModelRole.TTS,
+        )
+    return _cached(
+        key=("speech", ModelRole.TTS.value, name, model),
+        build=lambda: builder(model, settings.providers),
+    )
 
 
 def get_llm_provider(role: ModelRole, config: AppConfig | None = None) -> LLMProvider:
@@ -220,16 +286,20 @@ def _require_text_role(role: ModelRole) -> None:
     if role in _TEXT_ROLES:
         return
 
-    if role in _NOT_YET_IMPLEMENTED:
+    somewhere_else = {
+        ModelRole.EMBEDDING: "get_embedding_provider()",
+        ModelRole.TRANSCRIPTION: "get_transcription_provider()",
+        ModelRole.TTS: "get_speech_provider()",
+    }
+    if role in somewhere_else:
         raise ProviderConfigurationError(
-            f"the {role.value} role has no implementation yet — "
-            f"{_NOT_YET_IMPLEMENTED[role]}",
+            f"the {role.value} role does not name a text model — "
+            f"use {somewhere_else[role]} instead",
             role=role,
         )
 
     raise ProviderConfigurationError(
-        f"the {role.value} role does not name a text model. Use "
-        f"get_embedding_provider() for embeddings, or ask for "
+        f"the {role.value} role does not name a text model. Ask for "
         f"{sorted(item.value for item in _TEXT_ROLES)}.",
         role=role,
     )
@@ -261,6 +331,38 @@ def _build_ollama_embedding(model: str, config: ProviderConfig) -> EmbeddingProv
     from lumen.providers.ollama import OllamaEmbeddingProvider
 
     return OllamaEmbeddingProvider(model, config)
+
+
+def _build_gemini_transcription(
+    model: str, config: ProviderConfig
+) -> AudioTranscriptionProvider:
+    """Build a Gemini listener, importing the SDK only now."""
+    from lumen.providers.audio import GeminiTranscriptionProvider
+
+    return GeminiTranscriptionProvider(model, config)
+
+
+def _build_gemini_speech(model: str, config: ProviderConfig) -> TTSProvider:
+    """Build a Gemini voice, importing the SDK only now."""
+    from lumen.providers.audio import GeminiSpeechProvider
+
+    return GeminiSpeechProvider(model, config)
+
+
+def _build_fake_transcription(
+    model: str, config: ProviderConfig
+) -> AudioTranscriptionProvider:
+    """A listener that answers from a script, for tests and offline runs."""
+    from lumen.providers.fake import FakeTranscriptionProvider
+
+    return FakeTranscriptionProvider(model=model)
+
+
+def _build_fake_speech(model: str, config: ProviderConfig) -> TTSProvider:
+    """A voice that returns silence, for tests and offline runs."""
+    from lumen.providers.fake import FakeSpeechProvider
+
+    return FakeSpeechProvider(model=model)
 
 
 def _build_fake_llm(model: str, role: ModelRole, config: ProviderConfig) -> LLMProvider:
@@ -305,6 +407,12 @@ register_llm_provider("gemini", _build_gemini_llm)
 register_llm_provider("ollama", _build_ollama_llm)
 register_llm_provider("fake", _build_fake_llm)
 
+register_transcription_provider("gemini", _build_gemini_transcription)
+register_transcription_provider("fake", _build_fake_transcription)
+
+register_speech_provider("gemini", _build_gemini_speech)
+register_speech_provider("fake", _build_fake_speech)
+
 register_embedding_provider("gemini", _build_gemini_embedding)
 register_embedding_provider("ollama", _build_ollama_embedding)
 register_embedding_provider("fake", _build_fake_embedding)
@@ -317,5 +425,9 @@ __all__ = [
     "close_all_providers",
     "reset_provider_cache",
     "register_llm_provider",
+    "register_transcription_provider",
+    "register_speech_provider",
+    "get_transcription_provider",
+    "get_speech_provider",
     "register_embedding_provider",
 ]

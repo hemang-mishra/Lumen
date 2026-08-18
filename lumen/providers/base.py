@@ -19,6 +19,7 @@ import json
 import logging
 import time
 from abc import ABC, abstractmethod
+from collections.abc import Iterator
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from typing import Any, ClassVar
@@ -26,8 +27,18 @@ from typing import Any, ClassVar
 from pydantic import BaseModel
 
 from lumen.config import ProviderConfig
-from lumen.providers.errors import ProviderConfigurationError, ProviderError
-from lumen.providers.results import ChatMessage, LLMResult, LLMUsage, StructuredResult
+from lumen.providers.errors import (
+    ProviderConfigurationError,
+    ProviderError,
+    StreamInterrupted,
+)
+from lumen.providers.results import (
+    ChatMessage,
+    LLMResult,
+    LLMUsage,
+    StructuredResult,
+    TextChunk,
+)
 from lumen.providers.retry import call_with_retry
 from lumen.providers.telemetry import log_embedding_call, log_llm_call
 from lumen.schemas.enums import EmbeddingTaskType, ModelRole
@@ -99,6 +110,20 @@ class RawResponse:
 
     text: str
     usage: LLMUsage = field(default_factory=LLMUsage)
+    finish_reason: str | None = None
+
+
+@dataclass
+class RawChunk:
+    """
+    One piece of a streamed reply, once the vendor wrapping is off.
+
+    Token counts and a stop reason usually only arrive on the last piece, so
+    both are optional and the pieces that have them win.
+    """
+
+    text: str = ""
+    usage: LLMUsage | None = None
     finish_reason: str | None = None
 
 
@@ -218,6 +243,28 @@ class BaseLLMProvider(ABC):
             finish_reason=raw.finish_reason,
         )
 
+    def stream_text(
+        self,
+        messages: list[ChatMessage],
+        *,
+        system_instruction: str | None = None,
+        temperature: float | None = None,
+    ) -> Iterator[TextChunk]:
+        """
+        Hold a conversation and hand the reply back as it is written.
+
+        Checks its arguments straight away but sends nothing until the caller
+        starts reading, so a caller that changes its mind pays for nothing.
+        """
+        if not messages:
+            raise ValueError("messages must not be empty")
+
+        return self._stream(
+            messages=messages,
+            system_instruction=system_instruction,
+            temperature=self._temperature(temperature),
+        )
+
     def close(self) -> None:
         """
         Release anything held open.
@@ -248,6 +295,29 @@ class BaseLLMProvider(ABC):
         temperature: float,
     ) -> Any:
         """Send a conversation and return the vendor's reply."""
+
+    def _request_stream(
+        self,
+        *,
+        messages: list[ChatMessage],
+        system_instruction: str | None,
+        temperature: float,
+    ) -> Iterator[Any]:
+        """
+        Send a conversation and hand back the vendor's stream of pieces.
+
+        Not abstract, because a provider that cannot stream is a real thing
+        and should say so plainly rather than be impossible to write.
+        """
+        raise NotImplementedError(
+            f"{self.provider_name} cannot send a reply as it writes it"
+        )
+
+    def _read_chunk(self, piece: Any) -> RawChunk:
+        """Pull the text and any totals out of one piece of a vendor stream."""
+        raise NotImplementedError(
+            f"{self.provider_name} cannot send a reply as it writes it"
+        )
 
     @abstractmethod
     def _read_response(self, reply: Any) -> RawResponse:
@@ -309,6 +379,100 @@ class BaseLLMProvider(ABC):
                 error_detail=str(failure) if failure else None,
                 prompt=prompt_text,
                 completion=raw.text if raw else None,
+                log_prompts=self._config.log_prompts,
+            )
+
+    def _stream(
+        self,
+        *,
+        messages: list[ChatMessage],
+        system_instruction: str | None,
+        temperature: float,
+    ) -> Iterator[TextChunk]:
+        """
+        Read the vendor's pieces and hand them on, then log the whole call.
+
+        **Nothing here retries, and that is deliberate.** Every other call in
+        Lumen tries again when it fails, which is safe because nobody has seen
+        the failed attempt. Once words are on somebody's screen they cannot be
+        taken back, so a break partway through ends the reply and says what
+        had already been said.
+
+        Exactly one log line is written whichever way it ends, so a stream
+        that broke is as visible as one that finished.
+        """
+        started = time.perf_counter()
+        first_chunk_ms: int | None = None
+        said: list[str] = []
+        usage = LLMUsage()
+        finish_reason: str | None = None
+        failure: BaseException | None = None
+
+        try:
+            for piece in self._request_stream(
+                messages=messages,
+                system_instruction=system_instruction,
+                temperature=temperature,
+            ):
+                chunk = self._read_chunk(piece)
+                if chunk.usage is not None:
+                    usage = chunk.usage
+                if chunk.finish_reason is not None:
+                    finish_reason = chunk.finish_reason
+                if not chunk.text:
+                    continue
+
+                if first_chunk_ms is None:
+                    first_chunk_ms = _ms_since(started)
+                said.append(chunk.text)
+                yield TextChunk(text=chunk.text)
+
+            yield TextChunk(
+                final=True,
+                usage=usage,
+                finish_reason=finish_reason,
+                first_chunk_ms=first_chunk_ms or _ms_since(started),
+                elapsed_ms=_ms_since(started),
+            )
+        except GeneratorExit:
+            # The caller stopped reading. Not a failure of the model, and
+            # re-raising anything else here would mask why they stopped.
+            raise
+        except NotImplementedError:
+            # This provider cannot stream at all. That is a statement about
+            # what it is, not about this call, and dressing it up as a reply
+            # that broke would send somebody looking for a network problem.
+            raise
+        except BaseException as exc:
+            failure = exc
+            if not said:
+                # Nothing reached anybody, so this is an ordinary failed
+                # call. Only a break *after* words are on the screen is the
+                # special kind that cannot be tried again.
+                raise
+            raise StreamInterrupted(
+                f"the reply broke off after {len(''.join(said))} characters",
+                said="".join(said),
+                provider=self.provider_name,
+                model=self.model_name,
+                role=self.model_role,
+            ) from exc
+        finally:
+            log_llm_call(
+                provider=self.provider_name,
+                model=self.model_name,
+                role=self.model_role,
+                operation="stream_text",
+                outcome="COMPLETE" if failure is None else "FAILED",
+                latency_ms=first_chunk_ms or _ms_since(started),
+                elapsed_ms=_ms_since(started),
+                attempts=1,
+                usage=usage,
+                finish_reason=finish_reason,
+                error_type=type(failure).__name__ if failure else None,
+                error_detail=str(failure) if failure else None,
+                prompt="\n".join(f"{m.role}: {m.content}" for m in messages),
+                completion="".join(said),
                 log_prompts=self._config.log_prompts,
             )
 
@@ -515,6 +679,7 @@ def _attempts_of(error: BaseException | None) -> int:
 __all__ = [
     "KNOWN_EMBEDDING_DIMENSIONS",
     "RawResponse",
+    "RawChunk",
     "BaseLLMProvider",
     "BaseEmbeddingProvider",
     "normalise_model_name",

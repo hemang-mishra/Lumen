@@ -24,41 +24,19 @@ import logging
 
 from lumen.config import PipelineConfig
 from lumen.graph.provider import GraphProvider
-from lumen.pipeline.retrieval.hydrate import preview_of, signal_of
-from lumen.schemas.enums import CandidateRetrievalSource, SignalStrength
+from lumen.graph.rows import (
+    CONTENT_TABLES,
+    RETIRED_STATUSES,
+    SIGNAL_WEIGHT,
+    is_live_content,
+    preview_of,
+    signal_of,
+)
+from lumen.schemas.enums import CandidateRetrievalSource
 from lumen.schemas.pipeline import CandidateNode
 from lumen.vector.provider import ScoredHit, VectorProvider
 
 logger = logging.getLogger(__name__)
-
-# How much more a weighty node is worth when ranking. A realisation that
-# changed how someone sees themselves earns its place in a short candidate
-# list ahead of a routine note that happens to be worded alike.
-SIGNAL_WEIGHT: dict[SignalStrength, float] = {
-    SignalStrength.STANDARD: 1.0,
-    SignalStrength.HIGH: 1.5,
-    SignalStrength.CRITICAL: 2.0,
-}
-
-# Kinds of node worth reconciling against. Everything else in the graph —
-# audit records, decisions, reports — is machinery, not history.
-CONTENT_TABLES: frozenset[str] = frozenset(
-    {
-        "ObservationNode",
-        "EventNode",
-        "SessionNode",
-        "PatternNode",
-        "BeliefNode",
-        "LessonNode",
-        "AdoptedPrincipleNode",
-        "OpenLoopNode",
-    }
-)
-
-# Statuses that mean a node is no longer part of the live picture.
-RETIRED_STATUSES: frozenset[str] = frozenset(
-    {"SUPERSEDED", "SUSPENDED", "EXTRACTION_FAILED"}
-)
 
 
 def find_by_resemblance(
@@ -142,9 +120,7 @@ def _is_usable(row: dict, exclude_episode: str) -> bool:
     a node offered as a candidate for itself reconciles as a perfect match
     with total confidence — quietly merging something with itself.
     """
-    if row.get("_label") not in CONTENT_TABLES:
-        return False
-    if (row.get("status") or "") in RETIRED_STATUSES:
+    if not is_live_content(row):
         return False
     return row.get("episode_id") != exclude_episode
 

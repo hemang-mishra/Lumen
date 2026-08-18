@@ -199,6 +199,7 @@ The personal version runs all services as Python modules in a single process. Th
 | Service | Responsibility | Personal | Production |
 |---|---|---|---|
 | **BFF / API Gateway** | Single entry point for all client requests, auth, rate limiting | FastAPI process on port 8000 | FastAPI + Nginx + TLS |
+| **Identity Service** | Google sign-in, token issue/refresh/revoke, JWKS, user records | `lumen/auth/`, a module in the BFF [Goal 21] | Separate FastAPI service; every other service verifies against its JWKS and none can mint |
 | **Ingestion Service** | Receive messages, voice uploads, external log imports → write to Session Buffer | Module in BFF | Separate FastAPI service |
 | **Pipeline Orchestrator** | Watch Session Buffer for decayed sessions → dispatch pipeline jobs | Background thread in BFF | Dedicated Celery beat scheduler |
 | **Extraction Worker** | Steps 0 + 1 (Preprocessing + Microextraction) | Python-RQ worker | Celery worker, N replicas |
@@ -210,8 +211,12 @@ The personal version runs all services as Python modules in a single process. Th
 | **HITL Service** | Review queue management, one-tap decisions | Module in BFF | Separate FastAPI service |
 | **Scheduler** | Trigger Macroextraction jobs on schedule | APScheduler in BFF | Kubernetes CronJob |
 | **Formulation Service** | Query Formulation Layer (Conversational RAG) — classifies turn, emits RetrievalSignal | `lumen/query/formulation/`, a synchronous call in the Query Service | Sidecar in Query Service |
+| **Conversational Retrieval** | Passes A/B/C for a live turn under one shared budget, plus the sensitivity gate | `lumen/query/retrieval/`, a synchronous call in the Query Service | Sidecar in Query Service |
+| **Context Assembly & Prompting** | Compresses retrieved nodes into a briefing, builds the system prompt, keeps the conversation's own memory | `lumen/query/{assembly,prompting,memory}/`, `lumen/query/conversation.py` | Module in Query Service |
 
-**Note on `lumen/query/`.** The query layer is a top-level package, not a member of `lumen/pipeline/`. Two rules that protect the pipeline do not apply to it and would read as violations if it lived there: it reads and never writes, and it holds per-conversation state for the length of a session. The pipeline's stages may do neither.
+**Note on `lumen/query/`.** The query layer is a top-level package, not a member of `lumen/pipeline/`. Two rules that protect the pipeline do not apply to it and would read as violations if it lived there: it never writes to the graph, and it holds per-conversation state for the length of a session. The pipeline's stages may do neither.
+
+Since Goal 15 it does write *conversations* — the turns themselves and a running summary — into the operational store. That is not a graph write and does not weaken the guarantee that matters: nothing on this side can create, change or retire a record of somebody's history.
 
 ### 3.2 Personal Project Topology
 
@@ -292,6 +297,7 @@ Lumen uses **three separate data stores**, each optimized for its access pattern
 │  hitl_queue: decisions pending human review             │
 │  user_settings: key/value config overrides              │
 │  data_erasure_audit: erasure records (no user content)  │
+│  users / user_identities / refresh_tokens  [Goal 21]    │
 │  Access pattern: standard CRUD, status polling          │
 └─────────────────────────────────────────────────────────┘
 
@@ -313,7 +319,20 @@ Notes on the table set (resolved in Goal 3):
   variables and are never persisted by the application — no encrypted secrets store,
   no key management, no settings row that can supply a key. Goal 3 listed this table as
   deferred to Goal 4; Goal 4 cancelled it (see `implementation/Goal_4_Plan.md` A2-4).
+- **`users`, `user_identities` and `refresh_tokens` arrive in Goal 21** and are the only
+  new tables multi-user needs here. Every other table has carried `user_id` since Goal 3,
+  so tenancy in this store is already correct and needs no migration. The graph and vector
+  stores carry no notion of a user at all, which is why they are split per user rather than
+  filtered — see [`Auth_Architecture.md`](file:///Users/hemangmishra/Projects/Lumen/docs/hld/Auth_Architecture.md) §6.
+  Note what `refresh_tokens` stores: a hash, never the token, and a hashed IP rather than an
+  IP — the same rule the rest of this store already follows.
 ```
+
+**Multi-user splits two of these three, and not the third.** Each user gets their own Kuzu
+database directory and their own Qdrant collection, resolved from the authenticated identity
+by a store registry (Goal 22). The operational database stays shared — it holds no graph
+content, it is already keyed by `user_id` everywhere, and splitting it would fragment the one
+place that can answer a question about the deployment as a whole.
 
 ### 4.2 Node ID as the Universal Key
 
@@ -466,17 +485,28 @@ User turn arrives (WebSocket message)
         │
         ├─ NO_TRIGGER → pass to AI immediately (no wait)
         │
-        └─ TRIGGER → dispatch retrieval (async, 3s budget)
+        └─ TRIGGER → ConversationalRetriever.retrieve(signal, session)
+               │            one shared 3s wall clock, enforced from outside
                │
-               ├─ PassA: qdrant.hybrid_search(hyde_expansion)
-               ├─ PassB: graph.anchor_lookup(named_entities, historical_era)
-               └─ PassC: session_buffer.get_relevant(session_context_buffer)
+               ├─ PassA ─┐ qdrant.hybrid_search(hyde_expansion), ≤2s
+               ├─ PassB ─┘ graph anchors, chosen per trigger — run side by side
+               │
+               └─ PassC: session buffer, after A, on A's query vector
                          │
                          ▼
-                  ContextAssembler.rank_and_compress(candidates, max_tokens=400)
+                  sensitivity gate: CRITICAL nodes in unopened domains withheld
                          │
                          ▼
-                  SystemPromptPatcher.inject(ai_context, compressed_context)
+                  merge: dedupe (anchor copy wins), rank, cut
+                         │
+                         ▼
+                  ContextAssembler.assemble(bundle, signal)
+                         │   allowance set by register: 0 / 400 / 800 / 1500 tokens
+                         │   repeats collapsed, no more than 3 of any one kind
+                         ▼
+                  PromptComposer.compose(...) → ChatPrompt
+                         │   persona + briefing + rolling summary + recent turns
+                         │   a different, shorter instruction entirely in CRISIS
                          │
                          ▼
                   AI generates response (streaming)
@@ -484,7 +514,25 @@ User turn arrives (WebSocket message)
 
 The `SessionContextBuffer` lives in memory per-session (Zustand on frontend, Python dict in Query Service). It is NOT persisted to the graph — it is ephemeral per calendar day.
 
-That ephemeral day-state is `lumen.query.session.ChatSession`, held by a `SessionRegistry` keyed on `(user_id, session_label)`. Asking for a session on a date the held one does not cover replaces it — that is the entire midnight rule, with no timer and no sweep. It currently holds the recent turns and the sensitive domains the user has opened themselves; Goal 14 adds the retrieval buffer to the same object. Its identity `(user_id, event_date, session_label)` matches the operational `session_buffers` key, so a live conversation and the buffer that will later be ingested are recognisably the same thing.
+That ephemeral day-state is `lumen.query.session.ChatSession`, held by a `SessionRegistry` keyed on `(user_id, session_label)`. Asking for a session on a date the held one does not cover replaces it — that is the entire midnight rule, with no timer and no sweep. It holds the recent turns, the sensitive domains the user has opened themselves, and (since Goal 14) the `SessionContextBuffer` itself. Its identity `(user_id, event_date, session_label)` matches the operational `session_buffers` key, so a live conversation and the buffer that will later be ingested are recognisably the same thing.
+
+**Passes A and B are parallel; Pass C is not, and cannot be.** Pass C measures the buffer against the current turn using the query vector Pass A has just computed. Running it alongside A would mean either measuring against nothing or paying for a second embedding of the same sentence. It runs afterwards, on numbers already in memory, in about a millisecond. Each buffered node caches its own stored vector on admission (`VectorProvider.get_vectors`, added in Goal 14), so no per-turn search is needed; where a vector is missing the comparison falls back to word overlap.
+
+**The retrieval result reports each pass separately**, including whether it ran at all. A pass that failed, a pass that found nothing, and a pass with nothing to look up are three different facts, and the layer above answers all three identically unless it is told which one happened.
+
+### 6.1 What the assistant is actually sent
+
+`ChatPrompt` is the single object every earlier stage feeds: the system instruction, the recent turns, and the briefing that went into the instruction with a record of what was cut. It is a pure function of its inputs, which is what makes `POST /query/prompt` able to print exactly what the model would receive before any chat surface exists.
+
+The instruction has a fixed order — identity, how to be, the briefing and how to use it, where the conversation has got to, safety — and empty sections are omitted rather than left as headings. In `CRISIS` the whole instruction is replaced by a shorter one; withholding the history while still asking for curiosity and pattern-noticing would be half a decision.
+
+### 6.2 Conversation storage and memory
+
+**The query layer now writes, and the distinction matters.** It never writes to the graph — that guarantee is unchanged and is what `ReadOnlyGraph` enforces by type. What it writes is the conversation itself, into the same `session_buffers` the extraction pipeline consumes. A chat held anywhere else would be a chat that never becomes history.
+
+Messages carry `parent_message_id` and the buffer carries `active_message_id`, so a conversation is a tree and the readable thread is one path through it. Editing writes a sibling and moves the pointer; nothing is destroyed. `build_decay_event` follows the active thread, so an abandoned branch never becomes graph history.
+
+Memory is the recent turns verbatim plus a `rolling_summary` stored on the buffer, refreshed every few turns by one cheap call made *after* the reply goes out. Each refresh folds the previous summary plus what has been said since, so a three-hour conversation costs what a ten-minute one does.
 
 The formulation model is resolved through the `LIGHTWEIGHT` role but built with `max_attempts=1`. Every other call in the system retries with backoff, which is correct for work nobody is waiting on; this one has a sub-second deadline that a retry has already missed.
 
@@ -497,7 +545,8 @@ The formulation model is resolved through the `LIGHTWEIGHT` role but built with 
 ```
 app/
 ├── (auth)/
-│   └── login/
+│   ├── login/              ← Continue with Google. The only public route.
+│   └── callback/           ← receives ?code&state, posts it to the API
 ├── (app)/
 │   ├── layout.tsx          ← App shell: sidebar nav, session indicator
 │   ├── chat/
@@ -521,6 +570,16 @@ app/
     ├── ingest/route.ts     ← BFF: receive external log import
     └── graph/route.ts      ← BFF: graph data for explorer
 ```
+
+**The `(auth)` group is real** as of Goals 21–22. It was drawn here before anything backed
+it, and `docs/frontend/Requirements.md` correctly flagged it as a route with no system behind
+it. That is now settled the other way: Lumen is multi-user, sign-in is Google, and `(auth)`
+is the only route group reachable without a token. What each screen must do is S11 in that
+document; what the service must provide is `Auth_Architecture.md`.
+
+Everything under `(app)` requires an identity. Under DEC-2 in the frontend requirements
+there is no BFF to enforce that, so the enforcement is the API's own — a router-level default
+dependency, not a per-route decorator.
 
 ### 7.2 Key UI Surfaces
 
@@ -637,12 +696,13 @@ Phase 1: Personal → packaged
   Deploy to personal cloud VM (Hetzner CX22 = €4/month)
 
 Phase 2: Multi-user alpha
+  Add auth layer — own JWTs (EdDSA + JWKS), Google as identity provider [Goal 21]
+  Each user gets their own Kuzu database and Qdrant collection,
+    resolved from the authenticated identity through a store registry [Goal 22]
   Extract Graph Service (FastAPI) — swap Kuzu → Neo4j
   Extract Query Service (FastAPI)
-  Add auth layer (Clerk or custom JWT)
   PostgreSQL replaces SQLite
   Qdrant Cloud replaces local Qdrant
-  Each user gets isolated graph namespace (user_id prefix on node_ids)
 
 Phase 3: Scale
   Pipeline Workers → Celery + Kafka
@@ -728,4 +788,4 @@ separately, and the difference between the two lists is the repair set.
 | 2 | **RQ vs. Celery for personal?** | RQ. It's 10× simpler. The `OrchestratorProvider` Protocol abstracts the queue. Celery is a 2-hour migration when needed. |
 | 3 | **Voice-first or text-first UI?** | Text-first MVP. Voice input as progressive enhancement (Whisper.cpp local, browser MediaRecorder API). |
 | 4 | **Offline-first frontend?** | Not for MVP. PWA with service worker caching is a Phase 1 addition. |
-| 5 | **Multi-user auth strategy?** | Clerk (turnkey, supports social login, good DX) for Phase 2. Current personal build has no auth — local-only access. |
+| 5 | ~~**Multi-user auth strategy?**~~ **Decided.** | ~~Clerk (turnkey, supports social login, good DX) for Phase 2.~~ **Withdrawn.** Lumen issues its own JWTs (EdDSA, published JWKS) and uses Google purely as an identity provider, with one Kuzu database and one Qdrant collection per user. Reasoning — including why not Clerk — is in [`Auth_Architecture.md`](file:///Users/hemangmishra/Projects/Lumen/docs/hld/Auth_Architecture.md); the build is Goals 21–22. The current personal build still has no auth: `AppConfig.user_id` is an env var and every request is the same person. |

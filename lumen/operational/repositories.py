@@ -101,7 +101,80 @@ class SessionBufferRepository(Protocol):
         ...
 
     def get_messages(self, session_id: str) -> list[BufferMessageRecord]:
-        """Fetch a buffer's messages in the order they were added."""
+        """
+        Fetch every message a buffer holds, in the order they arrived.
+
+        Everything, including branches the person moved away from. Anything
+        that wants what the conversation actually says wants `active_thread`
+        instead.
+        """
+        ...
+
+    def active_thread(self, session_id: str) -> list[BufferMessageRecord]:
+        """
+        Fetch the conversation as the person would read it, oldest first.
+
+        Follows the reply links back from whichever message the buffer names
+        as current, so a message that was edited away is left out along with
+        everything that followed from it. A conversation that has never
+        branched — every import, and every chat nobody edited — comes back
+        exactly as `get_messages` would return it.
+        """
+        ...
+
+    def branch_from(
+        self, session_id: str, parent_message_id: str | None, message: BufferMessageRecord
+    ) -> BufferMessageRecord:
+        """
+        Add a message as a reply to a particular earlier one, and make that
+        the live thread.
+
+        This is what editing is. Passing the parent of the message being
+        rewritten puts the new one beside it rather than after it; the
+        original and everything that followed stay stored and are simply no
+        longer the thread being read.
+        """
+        ...
+
+    def set_active(self, session_id: str, message_id: str) -> None:
+        """
+        Point the conversation at a different branch.
+
+        How somebody moves back to a version they had left — nothing is
+        rewritten, only which end is being read from.
+        """
+        ...
+
+    def recent_buffers(
+        self,
+        user_id: str,
+        *,
+        before: date,
+        limit: int,
+        session_label: str = "",
+        lookback_days: int = 14,
+    ) -> list[SessionBufferRecord]:
+        """
+        This person's last few conversations before a given day, newest first.
+
+        "The last three days" means the last three days that hold a
+        conversation, not the last three squares on the calendar — somebody
+        who writes twice a week would otherwise get nothing. The lookback is
+        how far back it is willing to reach to find them.
+
+        Days with nothing in them are left out, so an empty one does not take
+        a slot from a day that has something to say.
+        """
+        ...
+
+    def save_summary(self, session_id: str, summary: str, through_seq: int) -> None:
+        """
+        Record what this conversation has been about so far.
+
+        `through_seq` is how much of it the summary covers, so the next
+        refresh reads only what has been said since rather than the whole
+        conversation again.
+        """
         ...
 
     def find_decayed(self, cutoff: datetime, limit: int = 50) -> list[SessionBufferRecord]:
@@ -284,6 +357,17 @@ class HitlQueueRepository(Protocol):
 
     def count_pending(self, user_id: str) -> int:
         """Count unresolved items, which is what the queue cap is measured against."""
+        ...
+
+    def oldest_pending_at(self, user_id: str) -> datetime | None:
+        """
+        When the longest-waiting unresolved item was raised, or None if there
+        are none.
+
+        A count on its own does not say whether a queue is being kept up
+        with. Three items raised this morning and three raised five weeks ago
+        are the same number and completely different situations.
+        """
         ...
 
     def update_status(
