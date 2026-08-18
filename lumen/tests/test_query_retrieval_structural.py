@@ -16,6 +16,7 @@ import pytest
 
 from lumen.config import QueryConfig
 from lumen.query.retrieval import structural
+from lumen.query.retrieval.contracts import SearchUnavailable
 from lumen.schemas.enums import Domain, StructuralAnchorType, TriggerType
 
 
@@ -256,10 +257,22 @@ class TestReasonsWithNoAnchor:
 
 
 class TestWhenTheGraphMisbehaves:
-    def test_one_broken_lookup_does_not_cost_the_others(
+    def test_a_broken_lookup_and_nothing_found_is_reported_as_unable_to_look(
         self, graph_store, seed_pattern, seed_open_loop, make_trigger, monkeypatch
     ):
-        # Anchors are additive. Losing one should cost one.
+        """
+        The failure is why there is nothing, so it must not read as nothing.
+
+        There *is* an unfinished question here. The lookup that would have
+        found it was refused, and the other anchor honestly found nothing —
+        so an empty list would tell the layer above that this person has no
+        unfinished questions, which is the opposite of true and permanent
+        until they say something that asks again.
+
+        Containment is still doing its job: the era lookup ran, and nothing
+        propagated out of the lookup that broke. What changed is only what
+        an empty result is allowed to claim.
+        """
         seed_open_loop("loop_1")
 
         def broken(*args, **kwargs):
@@ -267,32 +280,64 @@ class TestWhenTheGraphMisbehaves:
 
         monkeypatch.setattr(graph_store, "find_nodes", broken)
 
-        found = structural.find_by_anchors(
-            (
-                make_trigger(TriggerType.HISTORICAL_ERA, era="hostel"),
-                make_trigger(TriggerType.OPEN_LOOP_MATCH),
-            ),
-            graph=graph_store,
-            config=QueryConfig(),
-        )
+        with pytest.raises(SearchUnavailable):
+            structural.find_by_anchors(
+                (
+                    make_trigger(TriggerType.HISTORICAL_ERA, era="hostel"),
+                    make_trigger(TriggerType.OPEN_LOOP_MATCH),
+                ),
+                graph=graph_store,
+                config=QueryConfig(),
+            )
 
-        assert found == []
-
-    def test_an_unreadable_person_record_is_treated_as_unknown(
+    def test_an_unreadable_person_record_is_a_failed_lookup_not_an_absent_one(
         self, graph_store, make_trigger, monkeypatch
     ):
+        """
+        A graph that refuses to read a person is not a person with no history.
+
+        This read happens *before* the anchor lookup it feeds, so a graph
+        refusing everything fails here first — and if it were not counted the
+        pass would report having asked nothing at all, which reads downstream
+        as "there was nothing to find".
+        """
+
         def broken(*args, **kwargs):
             raise RuntimeError("the store said no")
 
         monkeypatch.setattr(graph_store, "get_node", broken)
 
-        found = structural.find_by_anchors(
-            (make_trigger(TriggerType.NAMED_PERSON, person_node_ids=("person_x",)),),
-            graph=graph_store,
-            config=QueryConfig(),
-        )
+        with pytest.raises(SearchUnavailable):
+            structural.find_by_anchors(
+                (
+                    make_trigger(
+                        TriggerType.NAMED_PERSON, person_node_ids=("person_x",)
+                    ),
+                ),
+                graph=graph_store,
+                config=QueryConfig(),
+            )
 
-        assert found == []
+    def test_one_failing_anchor_still_leaves_the_others_answering(
+        self, graph_store, anchors, make_trigger, seed_pattern, monkeypatch
+    ):
+        """One broken lookup costs one anchor — the rest of the pass answers."""
+        seed_pattern(node_id="pat_live")
+        real = graph_store.find_nodes
+
+        def flaky(node_types, **kwargs):
+            if node_types == structural.OPEN_LOOP_TYPES:
+                raise RuntimeError("the store said no")
+            return real(node_types, **kwargs)
+
+        monkeypatch.setattr(graph_store, "find_nodes", flaky)
+
+        # PROGRESS_CLAIM runs two lookups. Only the unfinished-questions one
+        # is broken, so the standing records still come back and the pass is
+        # not reported as unable to look.
+        found = anchors(make_trigger(TriggerType.PROGRESS_CLAIM))
+
+        assert [node.node_id for node in found] == ["pat_live"]
 
     def test_a_person_record_with_no_name_is_skipped(
         self, graph_store, make_trigger, monkeypatch

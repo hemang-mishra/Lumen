@@ -166,3 +166,66 @@ class TestTheBlockItself:
         # Without that, the assistant can quote a pattern back as though it
         # had been mentioned this turn.
         assert "not from this chat" in block.OPENING
+
+
+class TestWhenTheHistoryCouldNotBeReached:
+    """
+    A store that refused and a person with no history produce the same empty
+    briefing, and the assistant's honest reading of an empty briefing is that
+    it has never met this person.
+
+    That is the failure the whole retrieval layer is built to avoid, and it
+    was being reintroduced at the very last step — so the difference has to
+    survive into the words the assistant actually reads.
+    """
+
+    def test_the_assistant_is_told_rather_than_left_to_infer(self):
+        prompt = build_system_prompt(context(search_failed=True))
+
+        assert block.UNAVAILABLE_HEADING in prompt
+
+    def test_it_is_told_not_to_conclude_they_are_a_stranger(self):
+        prompt = build_system_prompt(context(search_failed=True))
+
+        assert "does not mean there is nothing in it" in prompt
+
+    def test_it_is_told_not_to_mention_it(self):
+        # An operator's problem. Repeating it mid-conversation would be
+        # alarming and would help nobody.
+        prompt = build_system_prompt(context(search_failed=True))
+
+        assert "do not mention that anything is unavailable" in prompt
+
+    def test_a_search_that_ran_and_found_nothing_says_nothing_at_all(self):
+        # The honest empty case is still silent: there genuinely is nothing
+        # to say, and a heading with nothing under it reads as a claim.
+        prompt = build_system_prompt(context())
+
+        assert block.UNAVAILABLE_HEADING not in prompt
+        assert persona.HOW_TO_USE_THE_NOTES not in prompt
+
+    def test_the_instruction_for_using_notes_is_left_out(self):
+        # There are none to use. What is being corrected is a conclusion the
+        # assistant would otherwise draw from the silence, not its handling
+        # of material it does not have.
+        prompt = build_system_prompt(context(search_failed=True))
+
+        assert persona.HOW_TO_USE_THE_NOTES not in prompt
+
+    def test_a_briefing_that_arrived_is_unaffected(self):
+        # Partial failure still produced something, so there is nothing to
+        # correct and the ordinary handling applies.
+        prompt = build_system_prompt(context(item(), search_failed=True))
+
+        assert block.UNAVAILABLE_HEADING not in prompt
+        assert persona.HOW_TO_USE_THE_NOTES in prompt
+
+    def test_somebody_in_crisis_is_never_told(self):
+        # The crisis instruction replaces everything. Somebody in the middle
+        # of a bad ten minutes does not need a note about system state.
+        prompt = build_system_prompt(
+            context(search_failed=True, emotional_register=EmotionalRegister.CRISIS),
+            in_crisis=True,
+        )
+
+        assert block.UNAVAILABLE_HEADING not in prompt

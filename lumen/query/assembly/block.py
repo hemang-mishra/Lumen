@@ -34,6 +34,15 @@ DEFERRED_NOTE = (
     "message. Treat them as slightly behind the conversation."
 )
 
+UNAVAILABLE_HEADING = "[YOUR NOTES ARE UNAVAILABLE THIS TURN]"
+
+UNAVAILABLE_NOTE = (
+    "Your record of this person could not be reached for this message. This "
+    "does not mean there is nothing in it. Carry on normally from what has "
+    "been said in this conversation, do not assume you are meeting them for "
+    "the first time, and do not mention that anything is unavailable."
+)
+
 
 def render(context: AssembledContext) -> str:
     """
@@ -43,9 +52,14 @@ def render(context: AssembledContext) -> str:
     with nothing under it. An assistant shown "here is what you know about
     them" followed by silence reads it as the person having no history,
     which is a much stronger claim than "nothing came up this turn".
+
+    Unless the reason it is empty is that the history could not be reached
+    at all — and then saying so is the whole point. Silence and "the store
+    refused every query" produce an identical empty briefing, and the
+    assistant's honest reading of silence is that this person is a stranger.
     """
     if context.is_empty:
-        return ""
+        return _unavailable() if context.search_failed else ""
 
     lines = [OPENING, GUIDANCE]
     if context.deferred:
@@ -56,4 +70,24 @@ def render(context: AssembledContext) -> str:
     return "\n".join(lines)
 
 
-__all__ = ["render", "OPENING", "CLOSING", "GUIDANCE", "DEFERRED_NOTE"]
+def _unavailable() -> str:
+    """
+    What the assistant is told when the history could not be reached.
+
+    Written to change how it *reasons* rather than what it says. It must not
+    conclude that a person with years of history is somebody it has never
+    met, and it must not tell them their file is down — that is an operator's
+    problem and repeating it mid-conversation would be alarming and useless.
+    """
+    return f"{UNAVAILABLE_HEADING}\n{UNAVAILABLE_NOTE}"
+
+
+__all__ = [
+    "render",
+    "OPENING",
+    "CLOSING",
+    "GUIDANCE",
+    "DEFERRED_NOTE",
+    "UNAVAILABLE_HEADING",
+    "UNAVAILABLE_NOTE",
+]

@@ -20,7 +20,11 @@ import pytest
 from lumen.config import ChatConfig
 from lumen.query.assembly import ContextAssembler, select
 from lumen.query.assembly.budget import estimate_tokens, policy_for
-from lumen.query.retrieval.contracts import RetrievalBundle, RetrievedNode
+from lumen.query.retrieval.contracts import (
+    PassReport,
+    RetrievalBundle,
+    RetrievedNode,
+)
 from lumen.schemas.enums import EmotionalRegister, RetrievalPass, RetrievalOutcome
 from lumen.schemas.query import RetrievalSignal
 
@@ -349,3 +353,48 @@ class TestComparingTwoBriefings:
 
     def test_two_empty_lines_do_not_count_as_the_same_thing(self):
         assert select.overlap("", "") == 0.0
+
+
+class TestCarryingTheFailureForward:
+    """
+    Retrieval keeps four empty answers apart and this is where they were
+    being collapsed back into one. The briefing is empty in all of them; only
+    one of them means the person has no such history.
+    """
+
+    @staticmethod
+    def _unreachable(which=RetrievalPass.SEMANTIC) -> RetrievalBundle:
+        return RetrievalBundle(
+            session_id="tester_2026_08_17",
+            turn_index=0,
+            outcome=RetrievalOutcome.UNAVAILABLE,
+            passes=(PassReport(which=which, ran=True, failure="SearchUnavailable"),),
+        )
+
+    @staticmethod
+    def _assembled(bundle_in, register=EmotionalRegister.STABLE):
+        return ContextAssembler(config=ChatConfig()).assemble(
+            bundle_in, signal(register), now=NOW
+        )
+
+    def test_a_failed_search_is_marked_as_one(self):
+        context = self._assembled(self._unreachable())
+
+        assert context.search_failed is True
+        assert context.is_empty
+
+    def test_a_search_that_found_nothing_is_not(self):
+        assert self._assembled(bundle()).search_failed is False
+
+    def test_a_search_that_found_something_is_not(self):
+        assert self._assembled(bundle(found())).search_failed is False
+
+    def test_it_survives_the_crisis_path_too(self):
+        # Crisis returns early on a different branch, and the fact still has
+        # to be recorded — the prompt decides separately not to act on it.
+        context = self._assembled(
+            self._unreachable(RetrievalPass.STRUCTURAL), EmotionalRegister.CRISIS
+        )
+
+        assert context.search_failed is True
+        assert context.suppressed is True

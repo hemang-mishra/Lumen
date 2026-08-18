@@ -322,6 +322,17 @@ class QueryConfig:
     session_boost_multiplier: float = _env_float("LUMEN_SESSION_BOOST", 1.3)
     session_boost_threshold: float = _env_float("LUMEN_SESSION_BOOST_THRESHOLD", 0.35)
 
+    # The same question asked of the stand-in measurement, and deliberately a
+    # harder bar. When a record has no position in the index, relevance falls
+    # back to counting how many of the turn's words appear in its text — and
+    # a third of them appearing is something that happens by accident, where
+    # a third of the way between two positions in the index does not. One
+    # number for both scales makes the fallback wave through everything held,
+    # on exactly the turns where the search was already in trouble.
+    session_boost_keyword_threshold: float = _env_float(
+        "LUMEN_SESSION_BOOST_KEYWORD_THRESHOLD", 0.6
+    )
+
     # What an exact anchor match counts as when ordering a mixed list. It is
     # a policy number, not a measurement — a record found because a name
     # matched has no similarity score, and never gets given one.

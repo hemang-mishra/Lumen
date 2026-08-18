@@ -385,20 +385,68 @@ class TestWhenNothingCanBeSearched:
                 config=QueryConfig(),
             )
 
-    def test_an_index_that_fails_costs_that_search_and_not_the_turn(
+    def test_one_failing_search_costs_that_reason_and_not_the_others(
+        self, search, seed_observation, vector_store, make_trigger, monkeypatch
+    ):
+        seed_observation("obs_second", "the second invented record")
+        real = vector_store.hybrid_search
+        calls = {"n": 0}
+
+        def flaky(*args, **kwargs):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise RuntimeError("the index said no")
+            return real(*args, **kwargs)
+
+        monkeypatch.setattr(vector_store, "hybrid_search", flaky)
+
+        found = search(
+            make_trigger(TriggerType.PATTERN_MENTION),
+            make_trigger(TriggerType.BELIEF_CHALLENGE),
+            texts=["the first invented record", "the second invented record"],
+        )
+
+        # The second reason still answered, which is the whole point of
+        # containing a failure where it happens rather than raising.
+        assert [node.node_id for node in found.candidates] == ["obs_second"]
+
+    def test_an_index_that_refuses_everything_is_not_an_empty_history(
         self, search, vector_store, make_trigger, monkeypatch
     ):
+        """
+        Every search failing must raise, not return nothing.
+
+        Containing each failure where it happens is right, and on its own it
+        turns a dead index into a pass that reports an empty answer. The
+        layer above reads that as "this person has no such history" and the
+        assistant behaves as though it has never met them — which is the one
+        failure this whole layer exists to prevent.
+        """
+
         def broken(*args, **kwargs):
             raise RuntimeError("the index said no")
 
         monkeypatch.setattr(vector_store, "hybrid_search", broken)
 
-        found = search(make_trigger(TriggerType.PATTERN_MENTION), texts=["anything"])
+        with pytest.raises(SearchUnavailable):
+            search(make_trigger(TriggerType.PATTERN_MENTION), texts=["anything"])
 
-        assert found.candidates == ()
-        # The vector still comes back, because the continuity check can use
-        # it even when the index could not.
-        assert found.query_vector is not None
+    def test_a_graph_that_refuses_every_read_back_is_reported_the_same_way(
+        self, search, seed_observation, graph_store, make_trigger, monkeypatch
+    ):
+        """The index answering is no use if the graph will not say what it found."""
+        seed_observation("obs_1", "the invented record")
+
+        def broken(*args, **kwargs):
+            raise RuntimeError("the graph said no")
+
+        monkeypatch.setattr(graph_store, "get_nodes_by_ids", broken)
+
+        with pytest.raises(SearchUnavailable):
+            search(
+                make_trigger(TriggerType.PATTERN_MENTION),
+                texts=["the invented record"],
+            )
 
 
 class TestTheVectorItHandsBack:

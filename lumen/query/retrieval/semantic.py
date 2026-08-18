@@ -31,7 +31,12 @@ from lumen.graph.provider import ReadOnlyGraph
 from lumen.graph.rows import is_live_content
 from lumen.providers.protocols import EmbeddingProvider, LLMProvider
 from lumen.query.retrieval import hyde
-from lumen.query.retrieval.contracts import PassAResult, RetrievedNode
+from lumen.query.retrieval.contracts import (
+    PassAResult,
+    RetrievedNode,
+    SearchUnavailable,
+    Tally,
+)
 from lumen.query.retrieval.hydrate import has_id, to_node
 from lumen.schemas.enums import ObservationType, RetrievalPass, TriggerType
 from lumen.schemas.query import RetrievalTrigger
@@ -130,10 +135,12 @@ def find_by_resemblance(
     text = hyde.write_search_text(turn_text, triggers, provider=llm)
     embedded, failed = hyde.to_vectors(text, embedder=embedder)
     if failed or not embedded:
-        # Nothing was searched. Said out loud by raising, so the caller
+        # Nothing was searched at all. Said out loud by raising, so the caller
         # reports "could not look" rather than "found nothing".
         raise SearchUnavailable("the search text could not be turned into vectors")
 
+
+    tally = Tally()
     found: dict[str, RetrievedNode] = {}
     seen = 0
     for position, trigger in enumerate(triggers):
@@ -141,14 +148,24 @@ def find_by_resemblance(
             embedded[position],
             vectors=vectors,
             limit=max(config.conversational_pass_a_overfetch, 1),
+            tally=tally,
         )
         seen += len(hits)
-        for node in _read_back(hits, trigger, graph=graph, config=config):
+        for node in _read_back(hits, trigger, graph=graph, tally=tally):
             held = found.get(node.node_id)
             # One record can answer two reasons. It is offered once, under
             # whichever reason matched it more closely.
             if held is None or node.rank_score > held.rank_score:
                 found[node.node_id] = node
+
+    if tally.came_up_short(found=len(found)):
+        # Nothing to show, and something refused along the way. An empty
+        # answer here is indistinguishable from a person with no history, and
+        # the layer above answers those two identically unless it is told.
+        raise SearchUnavailable(
+            f"{tally.failed} of {tally.attempted} searches failed and nothing "
+            "was found, so nothing could be looked up"
+        )
 
     ranked = sorted(found.values(), key=lambda node: node.rank_score, reverse=True)
     kept = tuple(ranked[: max(config.conversational_pass_a_keep, 0)])
@@ -161,26 +178,35 @@ def find_by_resemblance(
     )
 
 
-class SearchUnavailable(RuntimeError):
-    """The search could not be carried out at all, as opposed to finding nothing."""
-
-
 def _read_back(
     hits: list[ScoredHit],
     trigger: RetrievalTrigger,
     *,
     graph: ReadOnlyGraph,
-    config: QueryConfig,
+    tally: Tally,
 ) -> list[RetrievedNode]:
-    """Read the matches out of the graph and keep the ones worth offering."""
+    """
+    Read the matches out of the graph and keep the ones worth offering.
+
+    A graph that refuses this read costs one reason its results rather than
+    the whole pass — but it is counted, because a graph refusing every read
+    is a turn that could not look rather than a turn that found nothing.
+    """
     if not hits:
         return []
 
-    rows = {
-        row["node_id"]: row
-        for row in graph.get_nodes_by_ids([hit.node_id for hit in hits])
-        if has_id(row)
-    }
+    tally.ran()
+    try:
+        fetched = graph.get_nodes_by_ids([hit.node_id for hit in hits])
+    except Exception as exc:  # noqa: BLE001 — one failed read must not lose the rest
+        tally.broke()
+        logger.warning(
+            "could not read a set of matches out of the graph",
+            extra={"reason": type(exc).__name__, "wanted": len(hits)},
+        )
+        return []
+
+    rows = {row["node_id"]: row for row in fetched if has_id(row)}
     wanted = WANTED.get(trigger.trigger_type, UNRESTRICTED)
 
     kept: list[RetrievedNode] = []
@@ -204,18 +230,20 @@ def _read_back(
 
 
 def _search(
-    vector: Sequence[float], *, vectors: VectorProvider, limit: int
+    vector: Sequence[float], *, vectors: VectorProvider, limit: int, tally: Tally
 ) -> list[ScoredHit]:
     """
     Ask the index for its closest matches.
 
     A failure here is contained rather than raised, because one reason
-    failing should not cost the others. A turn where every search failed is
-    a different matter, and the caller reports that from the counts.
+    failing should not cost the others — and counted, because a turn where
+    every search failed is a different matter and nothing else can see that.
     """
+    tally.ran()
     try:
         return vectors.hybrid_search(list(vector), limit=limit)
     except Exception as exc:  # noqa: BLE001 — one failed search must not lose the rest
+        tally.broke()
         logger.warning(
             "a similarity search failed and was skipped",
             extra={"reason": type(exc).__name__},

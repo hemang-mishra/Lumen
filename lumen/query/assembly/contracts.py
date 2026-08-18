@@ -77,6 +77,12 @@ class AssembledContext(BaseModel):
             in acute distress — as opposed to there being nothing to offer.
         deferred: True when this arrived too late for the turn it was fetched
             for and is being carried into the next one.
+        search_failed: True when the history could not be looked up at all —
+            as opposed to being looked up and coming back empty. Carried this
+            far because those two produce the same empty briefing, and an
+            assistant handed one with no way to tell them apart behaves as
+            though the person has no history, which is the failure this whole
+            layer exists to avoid.
     """
 
     model_config = ConfigDict(extra="forbid", frozen=True)
@@ -88,6 +94,7 @@ class AssembledContext(BaseModel):
     estimated_tokens: int = Field(default=0, ge=0)
     suppressed: bool = False
     deferred: bool = False
+    search_failed: bool = False
 
     @property
     def is_empty(self) -> bool:

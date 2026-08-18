@@ -31,8 +31,9 @@ import logging
 import math
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, field
+from datetime import datetime
 
-from lumen.schemas.enums import SignalStrength
+from lumen.schemas.enums import Domain, SignalStrength
 
 logger = logging.getLogger(__name__)
 
@@ -56,6 +57,15 @@ class BufferEntry:
         node_type: What kind of record.
         preview: Its readable text, used for the word-overlap fallback.
         signal_strength: How much it weighs. CRITICAL is protected.
+        domain: The area of life it belongs to. Held because the sensitivity
+            gate reads it, and a record re-offered from here goes through
+            that gate again — without this it would arrive claiming to
+            belong nowhere, and be judged by a different rule than it was
+            the first time.
+        era_tag: The period of life it belongs to.
+        occurred_at: When it happened. Held because a briefing says its dates
+            in words, and a record with no date reads as though it had never
+            happened and loses every tie it should have won.
         first_seen_turn: The turn it was first surfaced on.
         last_relevant_turn: The last turn it still applied to.
         vector: Its position in the search index, if that could be read.
@@ -67,6 +77,9 @@ class BufferEntry:
     node_type: str
     preview: str
     signal_strength: SignalStrength = SignalStrength.STANDARD
+    domain: Domain | None = None
+    era_tag: str | None = None
+    occurred_at: datetime | None = None
     first_seen_turn: int = 0
     last_relevant_turn: int = 0
     vector: tuple[float, ...] | None = None
@@ -224,6 +237,7 @@ class SessionContextBuffer:
         vector: Sequence[float] | None,
         keywords: Sequence[str],
         threshold: float,
+        keyword_threshold: float | None = None,
     ) -> list[tuple[BufferEntry, float]]:
         """
         Which of today's records still apply, and how strongly.
@@ -235,12 +249,26 @@ class SessionContextBuffer:
         record. That is a much blunter instrument and it is used rather than
         skipped, because a conversation losing its thread is a worse failure
         than a slightly wrong measure of relevance.
+
+        **The two measurements get two thresholds, because they are not the
+        same scale.** A cosine of 0.35 between a question and a stored record
+        is a real resemblance; a word overlap of 0.35 means a third of the
+        turn's keywords appear somewhere in the text, which happens by
+        accident. Holding both to one number quietly makes the fallback far
+        more permissive than the measurement it stands in for — so the whole
+        of today's thread comes back as relevant on exactly the turns where
+        the search was already struggling.
         """
+        fallback = threshold if keyword_threshold is None else keyword_threshold
         scored = [
-            (entry, self._closeness(entry, vector, keywords))
+            (entry, *self._closeness(entry, vector, keywords))
             for entry in self._entries.values()
         ]
-        kept = [(entry, score) for entry, score in scored if score >= threshold]
+        kept = [
+            (entry, score)
+            for entry, score, measured in scored
+            if score >= (threshold if measured else fallback)
+        ]
         return sorted(kept, key=lambda pair: pair[1], reverse=True)
 
     def _closeness(
@@ -248,11 +276,17 @@ class SessionContextBuffer:
         entry: BufferEntry,
         vector: Sequence[float] | None,
         keywords: Sequence[str],
-    ) -> float:
-        """How much this held record has to do with what was just said."""
+    ) -> tuple[float, bool]:
+        """
+        How much this held record has to do with what was just said, and
+        whether that is a real measurement or the word-counting stand-in.
+
+        The caller needs both. The number alone cannot say which scale it is
+        on, and the two are compared against different bars.
+        """
         if vector is not None and entry.vector is not None:
-            return cosine(vector, entry.vector)
-        return word_overlap(keywords, entry.preview)
+            return cosine(vector, entry.vector), True
+        return word_overlap(keywords, entry.preview), False
 
 
 def cosine(left: Sequence[float], right: Sequence[float]) -> float:

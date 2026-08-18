@@ -26,12 +26,16 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 from lumen.config import QueryConfig
 from lumen.graph.provider import ReadOnlyGraph
-from lumen.query.retrieval.contracts import RetrievedNode
+from lumen.query.retrieval.contracts import (
+    RetrievedNode,
+    SearchUnavailable,
+    Tally,
+)
 from lumen.query.retrieval.hydrate import has_id, to_node
 from lumen.schemas.enums import (
     RetrievalPass,
@@ -77,11 +81,16 @@ class AnchorContext:
         limit: How many records one anchor may contribute.
         base_score: What an exact anchor match counts as when ordering a
             list that also holds measured matches.
+        tally: How many reads this pass made and how many refused. Mutable
+            and shared by every lookup, because "all of them failed" is not
+            a fact any single lookup can see — each one only knows about its
+            own empty list.
     """
 
     graph: ReadOnlyGraph
     limit: int
     base_score: float
+    tally: Tally = field(default_factory=Tally)
 
 
 Lookup = Callable[[RetrievalTrigger, AnchorContext], list[RetrievedNode]]
@@ -123,6 +132,16 @@ def find_by_anchors(
     for trigger in triggers:
         for lookup in LOOKUPS.get(trigger.trigger_type, ()):
             found.extend(lookup(trigger, context))
+
+    if context.tally.came_up_short(found=len(found)):
+        # Nothing found, and the graph refused at least one anchor. Each
+        # refusal was contained where it happened, which is right — but an
+        # empty list says "no such history" to the layer above, and what
+        # actually happened is that something could not be asked at all.
+        raise SearchUnavailable(
+            f"{context.tally.failed} of {context.tally.attempted} anchor "
+            "lookups failed and nothing was found, so nothing could be looked up"
+        )
     return found
 
 
@@ -147,7 +166,7 @@ def _by_person(
     """
     found: list[RetrievedNode] = []
     for person_id in trigger.person_node_ids:
-        name = _canonical_name(person_id, context.graph)
+        name = _canonical_name(person_id, context)
         if name is None:
             continue
         rows = _attempt(
@@ -155,6 +174,7 @@ def _by_person(
             lambda name=name: context.graph.find_linked_to_person(
                 name, node_types=PERSON_LINKED_TYPES, limit=context.limit
             ),
+            context.tally,
         )
         found.extend(
             _as_nodes(
@@ -183,6 +203,7 @@ def _by_era(trigger: RetrievalTrigger, context: AnchorContext) -> list[Retrieved
         lambda: context.graph.find_by_era(
             trigger.era or "", node_types=ERA_TAGGED_TYPES, limit=context.limit
         ),
+        context.tally,
     )
     return _as_nodes(
         rows,
@@ -206,6 +227,7 @@ def _open_questions(
     rows = _attempt(
         "open_loops",
         lambda: context.graph.find_nodes(OPEN_LOOP_TYPES, limit=context.limit),
+        context.tally,
     )
     return _as_nodes(
         rows,
@@ -255,6 +277,7 @@ def _find_standing(
         lambda: context.graph.find_nodes(
             node_types, domain=domain, active_only=True, limit=context.limit
         ),
+        context.tally,
     )
     return _as_nodes(
         rows,
@@ -290,11 +313,19 @@ LOOKUPS: dict[TriggerType, tuple[Lookup, ...]] = {
 # ---------------------------------------------------------------------------
 
 
-def _canonical_name(person_id: str, graph: ReadOnlyGraph) -> str | None:
-    """The name a person's record is filed under, if the record can be read."""
+def _canonical_name(person_id: str, context: AnchorContext) -> str | None:
+    """
+    The name a person's record is filed under, if the record can be read.
+
+    Counted like any other read. This one happens before the anchor lookup
+    it feeds, so a graph refusing everything fails here first — and without
+    counting it the pass would report having asked nothing at all.
+    """
+    context.tally.ran()
     try:
-        row = graph.get_node(person_id)
+        row = context.graph.get_node(person_id)
     except Exception:
+        context.tally.broke()
         logger.warning(
             "could not read a person's record", exc_info=True,
             extra={"node_id": person_id},
@@ -329,18 +360,23 @@ def _as_nodes(
     ]
 
 
-def _attempt(anchor: str, lookup: Callable[[], list[dict[str, Any]]]) -> list[dict[str, Any]]:
+def _attempt(
+    anchor: str, lookup: Callable[[], list[dict[str, Any]]], tally: Tally
+) -> list[dict[str, Any]]:
     """
     Run one anchor lookup and let it fail on its own.
 
     A graph that refuses one query should cost that anchor and nothing else.
-    An empty list is safe here in a way it would not be for the search as a
-    whole, because the caller reports each pass separately and a turn where
-    every one of them failed is reported as a turn that could not look.
+    An empty list is only safe here because it is *counted*: containment
+    without counting is what turns a store refusing every query into a pass
+    reporting an empty answer, and the caller cannot tell those apart from
+    the outside.
     """
+    tally.ran()
     try:
         return lookup()
     except Exception as exc:  # noqa: BLE001 — one broken anchor must not stop the rest
+        tally.broke()
         logger.warning(
             "an anchor lookup failed and was skipped",
             extra={"anchor": anchor, "reason": type(exc).__name__},

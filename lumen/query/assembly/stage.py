@@ -68,9 +68,15 @@ class ContextAssembler:
         """
         moment = now or datetime.now(UTC)
         policy = policy_for(signal.emotional_register, self._config)
+        unreachable = bundle.search_failed
 
         if not policy.injects_anything:
-            return self._nothing(signal, policy.max_tokens, deferred=deferred)
+            return self._nothing(
+                signal,
+                policy.max_tokens,
+                deferred=deferred,
+                search_failed=unreachable,
+            )
 
         ordered = _ordered(bundle.candidates, moment)
         rendered = [
@@ -91,12 +97,18 @@ class ContextAssembler:
             token_budget=policy.max_tokens,
             estimated_tokens=sum(item.tokens for item in kept),
             deferred=deferred,
+            search_failed=unreachable,
         )
         _log(context, signal, offered=len(bundle.candidates))
         return context
 
     def _nothing(
-        self, signal: RetrievalSignal, budget: int, *, deferred: bool
+        self,
+        signal: RetrievalSignal,
+        budget: int,
+        *,
+        deferred: bool,
+        search_failed: bool,
     ) -> AssembledContext:
         """
         The empty briefing, for somebody who should not be handed one.
@@ -120,6 +132,7 @@ class ContextAssembler:
             token_budget=budget,
             suppressed=suppressed,
             deferred=deferred,
+            search_failed=search_failed,
         )
 
 
@@ -175,6 +188,7 @@ def _log(context: AssembledContext, signal: RetrievalSignal, *, offered: int) ->
             "tokens": context.estimated_tokens,
             "budget": context.token_budget,
             "deferred": context.deferred,
+            "search_failed": context.search_failed,
         },
     )
 

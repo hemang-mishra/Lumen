@@ -80,72 +80,44 @@ def context_for(graph, *, eras=(), keyword_limit=6) -> GroundingContext:
 
 
 class TestTheEraVocabulary:
-    def test_it_reads_the_names_the_graph_really_uses(
-        self, graph_store, chat_session, seed_pattern
-    ):
+    def test_it_reads_the_names_the_graph_really_uses(self, graph_store, seed_pattern):
         seed_pattern(node_id="pat_a", era_tag="high school years")
 
-        assert era_vocabulary(graph_store, chat_session, config=QueryConfig()) == (
+        assert era_vocabulary(graph_store, config=QueryConfig()) == (
             "high school years",
         )
 
-    def test_an_empty_graph_has_no_eras(self, graph_store, chat_session):
-        assert era_vocabulary(graph_store, chat_session, config=QueryConfig()) == ()
+    def test_an_empty_graph_has_no_eras(self, graph_store):
+        assert era_vocabulary(graph_store, config=QueryConfig()) == ()
 
-    def test_it_is_read_once_a_day_rather_than_once_a_turn(
-        self, graph_store, chat_session, seed_pattern
-    ):
-        seed_pattern(node_id="pat_a", era_tag="first job")
-        era_vocabulary(graph_store, chat_session, config=QueryConfig())
+    def test_a_graph_that_cannot_answer_says_so_rather_than_saying_none(self):
+        """
+        A failed read and a history with no eras are different answers.
 
-        # Anything written afterwards is deliberately not picked up: the
-        # pipeline cannot write while somebody is mid-conversation, and a
-        # lookup per turn would be a database read on every message.
-        seed_pattern(node_id="pat_b", era_tag="university")
+        Nothing separates them once both are an empty tuple — and the caller
+        keeps whatever it is given for the rest of the day, so collapsing the
+        two switches off every era lookup until midnight on the strength of
+        one bad moment.
+        """
 
-        assert era_vocabulary(graph_store, chat_session, config=QueryConfig()) == (
-            "first job",
-        )
-
-    def test_a_graph_that_cannot_answer_leaves_the_list_empty(self, chat_session):
         class Broken:
             def list_era_tags(self, *, limit=50):
                 raise RuntimeError("the store is not answering")
 
-        assert era_vocabulary(Broken(), chat_session, config=QueryConfig()) == ()
+        assert era_vocabulary(Broken(), config=QueryConfig()) is None
 
-    def test_a_failed_read_is_not_retried_every_turn(self, chat_session):
-        class CountingBroken:
-            calls = 0
-
-            def list_era_tags(self, *, limit=50):
-                CountingBroken.calls += 1
-                raise RuntimeError("still not answering")
-
-        graph = CountingBroken()
-        era_vocabulary(graph, chat_session, config=QueryConfig())
-        era_vocabulary(graph, chat_session, config=QueryConfig())
-
-        assert CountingBroken.calls == 1
-
-    def test_blank_names_never_reach_the_vocabulary(self, chat_session):
+    def test_blank_names_never_reach_the_vocabulary(self):
         class Messy:
             def list_era_tags(self, *, limit=50):
                 return ["high school", "   ", ""]
 
-        assert era_vocabulary(Messy(), chat_session, config=QueryConfig()) == (
-            "high school",
-        )
+        assert era_vocabulary(Messy(), config=QueryConfig()) == ("high school",)
 
-    def test_how_many_are_offered_is_configurable(
-        self, graph_store, chat_session, seed_pattern
-    ):
+    def test_how_many_are_offered_is_configurable(self, graph_store, seed_pattern):
         for index in range(4):
             seed_pattern(node_id=f"pat_{index}", era_tag=f"era {index}")
 
-        names = era_vocabulary(
-            graph_store, chat_session, config=QueryConfig(era_vocabulary_limit=2)
-        )
+        names = era_vocabulary(graph_store, config=QueryConfig(era_vocabulary_limit=2))
 
         assert len(names) == 2
 

@@ -279,3 +279,110 @@ class TestTheMeasures:
     def test_word_overlap_with_nothing_to_compare_is_zero(self):
         assert word_overlap((), "anything at all") == 0.0
         assert word_overlap(("   ",), "anything at all") == 0.0
+
+
+class TestTheTwoMeasurementsAreNotOneScale:
+    """
+    Relevance is measured two ways and they do not mean the same thing at the
+    same number. A cosine of 0.4 between a question and a record is a real
+    resemblance; a word overlap of 0.4 means two of five keywords appear
+    somewhere in the text, which happens by accident.
+
+    Held to one threshold, the stand-in waves through everything the buffer
+    holds — on exactly the turns where the search had already failed to
+    produce a vector, so the conversation is least able to afford it.
+    """
+
+    def test_the_stand_in_is_held_to_its_own_harder_bar(self):
+        buffer = SessionContextBuffer()
+        buffer.remember(
+            [
+                BufferEntry(
+                    node_id="pat_1",
+                    node_type="PatternNode",
+                    preview="counting hours instead of counting progress",
+                )
+            ],
+            turn_index=0,
+        )
+
+        # Two of five words appear: enough for a lenient bar, not for this one.
+        assert (
+            buffer.relevant_to(
+                vector=None,
+                keywords=("counting", "hours", "sleep", "money", "family"),
+                threshold=0.35,
+                keyword_threshold=0.6,
+            )
+            == []
+        )
+
+    def test_a_real_overlap_still_gets_through(self):
+        buffer = SessionContextBuffer()
+        buffer.remember(
+            [
+                BufferEntry(
+                    node_id="pat_1",
+                    node_type="PatternNode",
+                    preview="counting hours instead of counting progress",
+                )
+            ],
+            turn_index=0,
+        )
+
+        found = buffer.relevant_to(
+            vector=None,
+            keywords=("counting", "hours", "progress"),
+            threshold=0.35,
+            keyword_threshold=0.6,
+        )
+
+        assert [entry.node_id for entry, _ in found] == ["pat_1"]
+
+    def test_the_measured_comparison_keeps_the_measured_bar(self):
+        # A record with a position in the index is judged on distance, and
+        # the harder bar for the stand-in must not leak onto it.
+        buffer = SessionContextBuffer()
+        buffer.remember(
+            [
+                BufferEntry(
+                    node_id="pat_1",
+                    node_type="PatternNode",
+                    preview="nothing in common with the words asked about",
+                    vector=(1.0, 0.0),
+                )
+            ],
+            turn_index=0,
+        )
+
+        found = buffer.relevant_to(
+            vector=[0.8, 0.6],  # cosine 0.8 — comfortably relevant
+            keywords=("nothing", "shared"),
+            threshold=0.35,
+            keyword_threshold=0.95,
+        )
+
+        assert [entry.node_id for entry, _ in found] == ["pat_1"]
+
+    def test_one_threshold_is_still_allowed_and_applies_to_both(self):
+        # The second bar is optional, so nothing that only knows about one
+        # threshold has to be changed to keep working.
+        buffer = SessionContextBuffer()
+        buffer.remember(
+            [
+                BufferEntry(
+                    node_id="pat_1",
+                    node_type="PatternNode",
+                    preview="counting hours instead of counting progress",
+                )
+            ],
+            turn_index=0,
+        )
+
+        found = buffer.relevant_to(
+            vector=None,
+            keywords=("counting", "hours", "sleep", "money", "family"),
+            threshold=0.35,
+        )
+
+        assert [entry.node_id for entry, _ in found] == ["pat_1"]

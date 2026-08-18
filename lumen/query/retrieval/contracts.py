@@ -173,6 +173,64 @@ def consulted_nothing(reports: tuple[PassReport, ...]) -> bool:
     )
 
 
+class SearchUnavailable(RuntimeError):
+    """
+    The search could not be carried out at all, as opposed to finding nothing.
+
+    Raised by a pass when *every* store call it made failed. Each individual
+    call is still contained where it happens — one broken anchor must not cost
+    the other three — but containment alone turns a store that is refusing
+    every query into a pass that quietly reports an empty answer, which the
+    layer above reads as "this person has no such history".
+
+    So the counting is the point: a pass that tried and failed at everything
+    says so by raising, and only then can the turn tell an empty history from
+    an unreachable one.
+    """
+
+
+class Tally:
+    """
+    How many store calls one pass made, and how many of them refused.
+
+    Deliberately mutable and passed down into the individual lookups, because
+    the fact worth reporting is not visible at any one of them. Each lookup
+    sees only its own failure and returns an empty list, which is
+    indistinguishable from an answer.
+
+    The rule the counting exists for is `came_up_short`, and it is
+    deliberately not "every call failed". A pass with three searches where
+    two refuse and the third honestly finds nothing would pass that stricter
+    test and be reported as "this person has no such history" — which is the
+    same wrong answer, just harder to reach.
+    """
+
+    def __init__(self) -> None:
+        self.attempted = 0
+        self.failed = 0
+
+    def ran(self) -> None:
+        """Record that a store was asked something."""
+        self.attempted += 1
+
+    def broke(self) -> None:
+        """Record that asking it did not work."""
+        self.failed += 1
+
+    def came_up_short(self, *, found: int) -> bool:
+        """
+        Whether an empty answer from this pass is a failure rather than a fact.
+
+        True when the pass has nothing to show *and* something refused it.
+        Nobody can say whether the call that failed would have found
+        something, so the honest report is that the history could not be
+        looked up — and being wrong in that direction costs one turn a
+        briefing, where being wrong the other way tells an assistant that
+        somebody with years of history is a stranger.
+        """
+        return found == 0 and self.failed > 0
+
+
 class PassAResult(BaseModel):
     """
     What the meaning-based search produced, plus the vector it used.
@@ -253,6 +311,8 @@ __all__ = [
     "RetrievedNode",
     "PassReport",
     "RetrievalBundle",
+    "SearchUnavailable",
+    "Tally",
     "PassAResult",
     "Hypothetical",
     "HydeReply",

@@ -57,6 +57,7 @@ def revisit(
         vector=query_vector,
         keywords=keywords,
         threshold=config.session_boost_threshold,
+        keyword_threshold=config.session_boost_keyword_threshold,
     )
     if not relevant:
         return [], {}
@@ -91,6 +92,13 @@ def _as_candidate(
     because being part of today's conversation is the reason it is here at
     all — and somebody reading the list afterwards should be able to see
     that this one was carried rather than found.
+
+    It also keeps what the record *is* — its area of life, its period, its
+    date. Those are not decoration: the sensitivity gate runs again on
+    whatever comes out of here, and a record arriving with no area of life
+    is judged by the rule for records that have none rather than by its own.
+    A record offered on one turn would then be withheld on the next, for no
+    reason the person could see.
     """
     return RetrievedNode(
         node_id=entry.node_id,
@@ -99,6 +107,9 @@ def _as_candidate(
         found_by=RetrievalPass.CONTINUITY,
         similarity=_clamped(closeness),
         signal_strength=entry.signal_strength,
+        domain=entry.domain,
+        era_tag=entry.era_tag,
+        occurred_at=entry.occurred_at,
         boosted=True,
         rank_score=_clamped(closeness) * config.session_boost_multiplier,
         properties=dict(entry.properties),
@@ -124,6 +135,9 @@ def to_entries(
             node_type=candidate.node_type,
             preview=candidate.preview,
             signal_strength=candidate.signal_strength,
+            domain=candidate.domain,
+            era_tag=candidate.era_tag,
+            occurred_at=candidate.occurred_at,
             vector=_as_tuple(vectors.get(candidate.node_id)),
             properties=dict(candidate.properties),
         )

@@ -60,10 +60,17 @@ def _notes(context: AssembledContext) -> str:
     Both or neither. Telling the assistant how to handle notes it does not
     have wastes its attention on a rule with nothing to apply to, and — worse
     — implies there were notes and they were withheld.
+
+    The one exception is a briefing that is empty because the history could
+    not be reached. That renders on its own, without the instruction for
+    using notes: there are none to use, and the thing being corrected is a
+    conclusion the assistant would otherwise draw from the silence.
     """
     rendered = block.render(context)
     if not rendered:
         return ""
+    if context.is_empty:
+        return rendered
     return f"{persona.HOW_TO_USE_THE_NOTES}\n\n{rendered}"
 
 

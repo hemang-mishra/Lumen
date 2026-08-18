@@ -187,9 +187,9 @@ class TestWhenOneSearchFails:
             raise RuntimeError("the store said no")
 
         monkeypatch.setattr(graph_store, "find_nodes", broken)
-        # The anchor half contains its own failures, so the pass still
-        # reports success having found nothing — which is the honest
-        # description of what happened.
+        # The anchor half contains each failure where it happens, and counts
+        # them. When every lookup it made was refused, that is a pass that
+        # could not look — not a pass that looked and found nothing.
         bundle = make_retriever(llm=hyde_replies()).retrieve(
             make_signal(make_trigger(TriggerType.OPEN_LOOP_MATCH)), chat_session
         )
@@ -199,7 +199,7 @@ class TestWhenOneSearchFails:
             for report in bundle.passes
             if report.which is RetrievalPass.STRUCTURAL
         )
-        assert structural.failure is None
+        assert structural.failure == "SearchUnavailable"
         assert structural.kept == 0
 
 
@@ -408,3 +408,111 @@ def _seed_critical(seed_pattern, index_node):
         domain="SELF_CONCEPT",
     )
     index_node("pat_critical", "the invented record", node_type="PatternNode")
+
+
+class TestADeadStoreIsNotAnEmptyHistory:
+    """
+    The failure this whole layer exists to prevent, asserted from the outside.
+
+    Each pass contains its own failures so one broken lookup does not cost
+    the others. Containment without counting turns a store that refuses every
+    query into a pass that reports an empty answer — and the layer above
+    reads an empty answer as "this person has no such history", so a system
+    built to remember behaves as though it had never met anybody, one turn at
+    a time, with nothing failing and no test going red.
+    """
+
+    def test_an_index_that_refuses_everything_says_so(
+        self,
+        make_retriever,
+        chat_session,
+        make_signal,
+        make_trigger,
+        vector_store,
+        hyde_replies,
+        monkeypatch,
+    ):
+        def broken(*args, **kwargs):
+            raise RuntimeError("the index said no")
+
+        monkeypatch.setattr(vector_store, "hybrid_search", broken)
+
+        bundle = make_retriever(llm=hyde_replies()).retrieve(
+            make_signal(make_trigger(TriggerType.PATTERN_MENTION)), chat_session
+        )
+
+        assert bundle.outcome is RetrievalOutcome.UNAVAILABLE
+        assert bundle.search_failed is True
+
+    def test_both_stores_refusing_says_so(
+        self,
+        make_retriever,
+        chat_session,
+        make_signal,
+        make_trigger,
+        graph_store,
+        vector_store,
+        hyde_replies,
+        monkeypatch,
+    ):
+        def broken(*args, **kwargs):
+            raise RuntimeError("the store said no")
+
+        monkeypatch.setattr(graph_store, "find_nodes", broken)
+        monkeypatch.setattr(vector_store, "hybrid_search", broken)
+
+        bundle = make_retriever(llm=hyde_replies()).retrieve(
+            make_signal(make_trigger(TriggerType.OPEN_LOOP_MATCH)), chat_session
+        )
+
+        assert bundle.outcome is RetrievalOutcome.UNAVAILABLE
+        assert bundle.search_failed is True
+
+    def test_one_half_refusing_is_recorded_without_condemning_the_turn(
+        self,
+        make_retriever,
+        chat_session,
+        make_signal,
+        make_trigger,
+        graph_store,
+        hyde_replies,
+        monkeypatch,
+    ):
+        """
+        The anchors were refused; the meaning-based search genuinely ran.
+
+        The bundle still says NOTHING, because one search that actually
+        consulted a store is enough to say the graph was asked — that rule is
+        deliberate. What changed is that the refusal is now visible on the
+        pass instead of being indistinguishable from an empty answer, which
+        is what any aggregate judgement has to be built on.
+        """
+
+        def broken(*args, **kwargs):
+            raise RuntimeError("the store said no")
+
+        monkeypatch.setattr(graph_store, "find_nodes", broken)
+
+        bundle = make_retriever(llm=hyde_replies()).retrieve(
+            make_signal(make_trigger(TriggerType.OPEN_LOOP_MATCH)), chat_session
+        )
+
+        anchors = next(
+            report
+            for report in bundle.passes
+            if report.which is RetrievalPass.STRUCTURAL
+        )
+        assert anchors.failure == "SearchUnavailable"
+        assert bundle.outcome is RetrievalOutcome.NOTHING
+
+    def test_a_working_search_that_finds_nothing_still_says_nothing(
+        self, make_retriever, chat_session, make_signal, make_trigger, hyde_replies
+    ):
+        # The other half of the distinction. Both stores answered; this
+        # person genuinely has nothing filed that matches.
+        bundle = make_retriever(llm=hyde_replies()).retrieve(
+            make_signal(make_trigger(TriggerType.PATTERN_MENTION)), chat_session
+        )
+
+        assert bundle.outcome is RetrievalOutcome.NOTHING
+        assert bundle.search_failed is False
