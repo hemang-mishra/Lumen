@@ -1,0 +1,272 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Lumen — Reports</title>
+  <link rel="stylesheet" href="app.css">
+</head>
+<body>
+<header>
+  <h1>Lumen</h1>
+  <nav>
+    <a href="index.html">Import</a>
+    <a href="episodes.html">Episodes</a>
+    <a href="reports.html">Reports</a>
+    <a href="trace.html">Runs</a>
+    <a href="chat.html">Turn reader</a>
+  </nav>
+  <span class="note">test harness — not the product UI</span>
+</header>
+
+<main>
+  <section>
+    <h2>Periodic reports</h2>
+    <p class="lede">
+      What kept happening, rather than what happened. Every figure below was
+      counted from the graph; only the sentences came from a model, and each
+      report says which of the two it is missing when a model was unreachable.
+    </p>
+
+    <div class="panel">
+      <div class="row" style="margin-bottom:12px">
+        <select id="kind">
+          <option value="WEEKLY">Weekly</option>
+          <option value="MONTHLY" selected>Monthly</option>
+          <option value="QUARTERLY">Quarterly</option>
+          <option value="SHADOW">Shadow (last 48h)</option>
+        </select>
+        <input type="date" id="day" title="any day inside the period">
+        <label class="row" style="gap:6px">
+          <input type="checkbox" id="force"> rebuild if it exists
+        </label>
+        <button id="run">Build now</button>
+      </div>
+      <div id="result"></div>
+    </div>
+  </section>
+
+  <section>
+    <h2>Overdue</h2>
+    <div class="panel" id="due"><div class="empty">Loading…</div></div>
+  </section>
+
+  <section>
+    <h2>Everything written so far</h2>
+    <div class="panel" id="list"><div class="empty">Loading…</div></div>
+  </section>
+
+  <section id="detail"></section>
+</main>
+
+<script src="app.js"></script>
+<script>
+/*
+ * The reports page.
+ *
+ * Three lists and a detail view. The lists are cheap because the API returns
+ * envelopes; the whole document is only fetched when a report is opened, since
+ * a quarter's report is long and nobody wants twenty of them at once.
+ *
+ * The detail view prints the report section by section rather than as one blob
+ * of JSON. The sections are the report — a reader checking whether a claim is
+ * true needs to see which section it came from and how many episodes stood
+ * behind it.
+ */
+
+const kindPicker = document.getElementById("kind");
+
+document.getElementById("run").addEventListener("click", build);
+document.getElementById("list").addEventListener("click", (event) => {
+  const row = event.target.closest("[data-report]");
+  if (row) open(row.getAttribute("data-report"));
+});
+
+/** Ask for one report to be built, and say plainly what came of it. */
+async function build() {
+  const body = {
+    report_type: kindPicker.value,
+    force: document.getElementById("force").checked,
+  };
+  const day = document.getElementById("day").value;
+  if (day) body.period_start = day;
+
+  fill("result", say("ok", "Building…"));
+
+  let outcome;
+  try {
+    outcome = await api("/reports/run", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+  } catch (error) {
+    fill("result", say("bad", String(error.message)));
+    return;
+  }
+
+  fill("result", say(outcome.report_id ? "ok" : "warn", explain(outcome)));
+  refresh();
+  if (outcome.report_id) open(outcome.report_id);
+}
+
+/* Every outcome is an ordinary answer, including the ones that wrote nothing.
+ * "Already covered" and "nothing to cover" are the two most common results of
+ * pressing this button, and neither is a failure. */
+function explain(outcome) {
+  const period = `${outcome.period_start.slice(0, 10)} → ${outcome.period_end.slice(0, 10)}`;
+  return {
+    WRITTEN: `Wrote ${outcome.report_id} over ${outcome.episodes_analyzed} episode(s)` +
+      (outcome.narrative_status === "OK" ? "." : ` — wording ${outcome.narrative_status.toLowerCase()}.`),
+    SKIPPED_EXISTING: `${period} already has a report (${outcome.report_id}). Tick rebuild to write another.`,
+    EMPTY_WINDOW: `Nothing was written about ${period}, so there is no report to make.`,
+    NOT_DETECTED: "Nothing shifted in the last couple of days.",
+    FAILED: outcome.error || "The report could not be built.",
+  }[outcome.status] || outcome.status;
+}
+
+/** What a schedule would run if it woke up now. */
+async function refreshDue() {
+  let due;
+  try {
+    due = await api("/reports/due");
+  } catch (error) {
+    fill("due", say("bad", String(error.message)));
+    return;
+  }
+  if (!due.length) {
+    fill("due", el("div", { class: "empty" }, "Every period is covered."));
+    return;
+  }
+  fill("due", el("table", {},
+    el("thead", {}, el("tr", {},
+      el("th", {}, "Kind"), el("th", {}, "From"), el("th", {}, "To"))),
+    el("tbody", {}, due.map((window) =>
+      el("tr", {},
+        el("td", {}, tag(window.report_type)),
+        el("td", { class: "mono" }, window.period_start.slice(0, 10)),
+        el("td", { class: "mono" }, window.period_end.slice(0, 10)),
+      )
+    )),
+  ));
+}
+
+/** Every report ever written, newest first. */
+async function refresh() {
+  refreshDue();
+
+  let page;
+  try {
+    page = await api("/reports?limit=100");
+  } catch (error) {
+    fill("list", say("bad", String(error.message)));
+    return;
+  }
+
+  if (!page.reports.length) {
+    fill("list", el("div", { class: "empty" }, "No reports have been written yet."));
+    return;
+  }
+
+  fill("list", el("table", {},
+    el("thead", {}, el("tr", {},
+      el("th", {}, "Kind"), el("th", {}, "Period"), el("th", {}, "Episodes"),
+      el("th", {}, "Wording"), el("th", {}, "Shift"), el("th", {}, "Headline"))),
+    el("tbody", {}, page.reports.map((report) =>
+      el("tr", { "data-report": report.report_id, style: "cursor:pointer" },
+        el("td", {}, tag(report.report_type)),
+        el("td", { class: "mono" },
+          `${report.period_start.slice(0, 10)} → ${report.period_end.slice(0, 10)}`),
+        el("td", {}, String(report.episodes_analyzed)),
+        el("td", {}, report.narrative_status
+          ? tag(report.narrative_status)
+          : el("span", { class: "faint" }, "—")),
+        el("td", {}, report.archetype_shift_detected
+          ? tag("DETECTED")
+          : el("span", { class: "faint" }, "—")),
+        el("td", { class: "dim" }, report.headline || "—"),
+      )
+    )),
+  ));
+}
+
+/** One report, section by section. */
+async function open(reportId) {
+  let detail;
+  try {
+    detail = await api(`/reports/${encodeURIComponent(reportId)}`);
+  } catch (error) {
+    fill("detail", say("bad", String(error.message)));
+    return;
+  }
+
+  const content = detail.content || {};
+  const meta = content.meta || {};
+
+  const blocks = [
+    el("h2", {}, detail.report.report_id),
+    el("div", { class: "panel" },
+      el("p", { class: "lede" }, content.headline || "(no wording was written)"),
+      el("div", { class: "row" },
+        tag(detail.report.report_type),
+        el("span", { class: "dim" },
+          ` ${detail.report.episodes_analyzed} episode(s) · model ${detail.report.model_used}` +
+          ` · wording ${meta.narrative_status || "unknown"}` +
+          (meta.truncated ? " · the period was longer than one report reads" : "")),
+      ),
+      meta.deferred_sections && meta.deferred_sections.length
+        ? el("p", { class: "faint" },
+            `Not produced yet: ${meta.deferred_sections.join(", ")}.`)
+        : null,
+    ),
+  ];
+
+  for (const [heading, value] of sections(content)) {
+    if (!value || (Array.isArray(value) && !value.length)) continue;
+    blocks.push(el("div", { class: "panel" },
+      el("h3", {}, heading),
+      el("pre", {}, pretty(value)),
+    ));
+  }
+
+  blocks.push(el("div", { class: "panel" },
+    el("h3", {}, "Read from"),
+    el("div", { class: "mono dim" }, detail.episode_ids.join("  ") || "—"),
+  ));
+
+  fill("detail", blocks);
+  document.getElementById("detail").scrollIntoView({ behavior: "smooth" });
+}
+
+/* Printed in the order a person reads them, which is not the order they are
+ * stored in. What recurred comes first; the bookkeeping comes last. */
+function sections(content) {
+  return [
+    ["Patterns that recurred", content.top_patterns],
+    ["Seen for the first time", content.emerging_patterns],
+    ["Did not appear this time", content.disappearing_patterns],
+    ["Beliefs that changed shape", content.belief_changes],
+    ["Lessons arrived at repeatedly", content.repeated_lessons],
+    ["Lessons going unmentioned", content.ignored_lessons],
+    ["Where there was progress", content.biggest_growth_area],
+    ["What took up the most room", content.biggest_struggle],
+    ["Shift across a longer stretch", content.archetype_shift],
+    ["People", content.key_relational_dynamics],
+    ["Relationships over time", content.relationship_arcs],
+    ["Places leaned on", content.key_environmental_dependencies],
+    ["Tensions held", content.active_contradictions],
+    ["Questions still open", content.unresolved_open_loops],
+    ["Gaps in the story", content.biographical_gaps_raised],
+    ["Weighty moments", content.high_signal_observations],
+    ["Themes not yet taken hold of", content.motif_of_unprocessed_depth],
+    ["Patterns going quiet", content.pattern_aging],
+    ["Two-day scan", content.shadow_micro_shift],
+    ["Waiting on you", content.pending_hitl_decisions],
+    ["How often each pattern fired", content.pattern_frequency],
+  ];
+}
+
+refresh();
+</script>
+</body>
+</html>

@@ -29,6 +29,7 @@ from lumen.config import AppConfig
 from lumen.graph.provider import ReadOnlyGraph
 from lumen.ingest import IngestWorker
 from lumen.operational.repositories import OperationalStore
+from lumen.pipeline.macroextraction.service import MacroextractionService
 from lumen.providers.errors import ProviderError
 from lumen.query import (
     ConversationalRetriever,
@@ -78,6 +79,25 @@ def get_worker(request: Request) -> IngestWorker:
     if worker is None:
         raise Unavailable("importing", "this deployment does not accept uploads")
     return worker
+
+
+def get_reporter(request: Request) -> MacroextractionService:
+    """
+    The thing that builds periodic reports.
+
+    The second object in this file that can change the graph, and narrow in
+    the same way as the first: it is not a graph handle. What a route can do
+    with it is name a period and ask for it to be summarised — the store and
+    the models live inside it and are never handed out.
+
+    Built once at startup, because it holds the writable graph and caches the
+    models it eventually needs. Absent only when the application was built
+    without one, which nothing in this deployment does.
+    """
+    reporter = getattr(request.app.state, "reporter", None)
+    if reporter is None:
+        raise Unavailable("building reports", "this deployment cannot write reports")
+    return reporter
 
 
 def get_formulator(request: Request) -> QueryFormulator:

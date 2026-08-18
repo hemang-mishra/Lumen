@@ -785,11 +785,35 @@ This document outlines the systematic, stage-by-stage implementation plan for th
 ## Phase 5: Insights & Macro Layer (Goals 17-20)
 **Objective:** Build background intelligence processes and the unified API gateway.
 
-- [ ] **Goal 17: Periodic Macroextraction**
-  - Implement `lumen/pipeline/macroextraction.py`.
-  - Report types: SHADOW (daily), WEEKLY, MONTHLY, QUARTERLY.
-  - Write `MacroextractionReportNode` + `analyzed_in` edges.
-  - *Test:* Trigger mock "end of week" event; verify report node saved with correct episode coverage.
+- [x] **Goal 17: Periodic Macroextraction** ✅
+  - Implemented `lumen/pipeline/macroextraction/` — a package rather than one module:
+    `windows` (calendar arithmetic and what is overdue), `corpus` (the only reader),
+    `analytics`/`aging`/`shifts` (every number, pure), `narrative`/`prompts` (every
+    sentence), `assemble`, `commit` (the only writer), `runner`, and `service` (the narrow
+    surface the web layer holds). Report types SHADOW, WEEKLY, MONTHLY, QUARTERLY; each run
+    writes a `MacroextractionReportNode` plus one `analyzed_in` edge per episode read.
+  - **Python counts, the model narrates.** Every figure is computed from the graph without a
+    model, so it is reproducible and checkable by hand; the model is shown those figures and
+    asked only for phrasing. A model failure costs a report its prose, never its numbers,
+    and every reference it returns is checked against what it was shown — including a
+    refusal to let it name an archetype shift the arithmetic did not find.
+  - **A period is covered when it happened, not when it was written**, with a short grace
+    before running so late entries land first. Running the same period twice returns the
+    existing report and spends nothing; an explicit force writes a second one beside it.
+    An empty period and a quiet shadow scan write nothing at all.
+  - Also added: three store reads (`find_episodes_by_event_date`, batched
+    `find_standing_edges`, `find_reports`), `queries.date_column` so records dated by
+    creation can be bounded by date at all, `HitlQueueRepository.oldest_pending_at`,
+    `MacroConfig`, and `/reports` (list, detail, due, run) with an inspection page.
+  - *Deferred:* emotional valence, proof chains and prospective memory to Goal 19 — the
+    first needs a per-observation mood score that exists nowhere in Lumen and would have to
+    be invented; the other two are whole-history scans rather than window reads. The spec's
+    `avg_negative_emotion_intensity` is replaced by a counted
+    `negative_observation_count`, recorded as a divergence rather than a silent choice.
+    Applying the ageing multipliers to retrieval stays Goal 19's; the live scheduler and
+    feeding shadow alerts into the conversation stay Goal 20's.
+  - *Result:* 4026 tests passing (313 new), **99% coverage** on the new package.
+  - *Plan:* [`implementation/Goal_17_Plan.md`](file:///Users/hemangmishra/Projects/Lumen/implementation/Goal_17_Plan.md)
 
 - [ ] **Goal 18: HITL Queue System**
   - Implement `lumen/api/routes/hitl.py` — card-based review UI endpoints.

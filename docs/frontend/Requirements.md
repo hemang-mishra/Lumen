@@ -1,8 +1,9 @@
 # Lumen Front End — Requirements Specification
 
-**Status:** draft 1, requirements only. No design, no component choices, no goal breakdown.
-This document says *what the front end must do and be*. The follow-up documents say
-*how* (`Design.md`) and *in what order* (`implementation/Goal_N_Plan.md`).
+**Status:** requirements. This document says *what the front end must do and be*.
+[`Design_Language.md`](Design_Language.md) says *how it looks and behaves* (rules `DL-*`
+and the review checklist). `implementation/Master_Plan.md` Phases 7–8 (Goals 23–32) say
+*in what order*.
 
 **This document will grow.** It is expected to be amended as we think of more. Every
 requirement carries an id so that later documents, goals and discussions can point at
@@ -16,6 +17,7 @@ one line instead of re-describing it.
 | DEC-2 | **The front end calls FastAPI directly.** There is no Next.js BFF layer. |
 | DEC-3 | **One application**, with reflect and inspect as separated sections of the same shell. |
 | DEC-4 | **Same repository, its own directory** — `frontend/` beside `lumen/`, with its own build and deploy. |
+| DEC-5 | **There is a login, and it is Google.** Lumen is multi-user by design. Sign-in is a real surface (S11), the app is unusable without it, and every screen shows one person's data. See [`docs/hld/Auth_Architecture.md`](file:///Users/hemangmishra/Projects/Lumen/docs/hld/Auth_Architecture.md). |
 
 ---
 
@@ -52,11 +54,19 @@ This front end replaces it, and has to be two things at once:
 
 ## 2. Who uses it, and on what
 
-One person: the author of the journal. There is no multi-user product yet, no login, no
-sharing, no roles. (`Technical_HLD.md` §7.1 shows an `(auth)/login` route; nothing in the
-system implements auth. Flagged in §9, OQ-1.)
+**One person at a time, but not only ever one person** (DEC-5). Each user signs in with
+Google, and everything on every screen belongs to whoever is signed in. There is still no
+sharing, no roles, no teams and no second-person view of anyone's history — those stay out
+of scope (§8). What changed is that "which person" is now an answered question rather than
+an assumed one.
 
-That one person uses it in two postures, and both are first-class:
+The backend for this does not exist yet: `AppConfig.user_id` is an environment variable and
+every request is the same person. It is specified in `Auth_Architecture.md` and owned by
+Goals 21 and 22. Until Goal 21 lands, the front end builds against a service with auth
+disabled — which is a deliberate mode (`LUMEN_AUTH_ENABLED=false`), not a workaround. See
+FR-S11-8.
+
+That person uses it in two postures, and both are first-class:
 
 - **Phone, one hand, short sessions.** Capturing a thought, reading a reply, clearing the
   review queue while walking. This is the *majority* posture for the reflect surfaces.
@@ -120,9 +130,12 @@ See §5.1.
 
 ## 4. Required surfaces
 
-Ten surfaces. For each: what it is for, what it must show, what it must let you do, and
+Eleven surfaces. For each: what it is for, what it must show, what it must let you do, and
 what backs it. "**Needs API**" marks something no current endpoint can answer — collected
 in §6.
+
+S11 is numbered last and reached first — the ids follow the order these were written, not
+the order a person meets them (§10: never renumber).
 
 ### S1 — Today (the chat surface)
 
@@ -141,12 +154,18 @@ on an explicit "end session".
 endpoint exists. **Needs API.**
 **FR-S1-6** Nothing about retrieval appears here by default (P3). Behind the "show the
 working" toggle: the turn's register, its triggers, what each pass returned, what was
-withheld and why, and the latency against the 3s budget.
+withheld and why, the context allowance the register earned, the assembled `ChatPrompt`, and
+the latency against the **8-second** budget.
 **FR-S1-7** Late-night nudge: if the user is active after a configurable hour and writes
 something reflective, gently offer to capture anything left before tomorrow.
 **FR-S1-8** Voice input is a placeholder in the layout, not a feature yet — the
 transcription provider is a Protocol with no implementation. The composer must have room
 for it without a redesign.
+**FR-S1-9** Editing a turn **branches** rather than overwrites. Goal 15 gave messages a
+parent, so an edit writes a sibling and nothing said is destroyed, and the pipeline extracts
+the active thread only. The UI must let a turn be edited, let the versions of it be moved
+between, and make plain which thread is the live one — otherwise a person cannot tell what
+tomorrow's graph will be built from.
 
 **Backed by:** nothing yet for the reply itself (Goal 16). `POST /query/formulate` and
 `POST /query/retrieve` back the "show the working" mode today. **Needs API** for sending a
@@ -347,6 +366,46 @@ deployment property read from the environment at process start, never a user set
 
 **Backed by:** `GET /health`, and `config_snapshot` on each run. Complete enough today.
 
+### S11 — Sign in
+
+The first screen anybody sees, and the only one reachable without an identity. It is small,
+and it is not unimportant: it is the whole first impression of a product whose pitch is that
+it can be trusted with the things you would not say out loud.
+
+**FR-S11-1** One route, `/login`, outside the app shell — no sidebar, no navigation, no
+review count. A person who is not signed in has nothing to navigate.
+**FR-S11-2** **Continue with Google** is the only sign-in method (DEC-A7). No password
+field, no email field, no "or sign up with". A second method is a second thing to explain
+and there is only one.
+**FR-S11-3** Say what Lumen is in a sentence before asking anyone to sign in. A bare Google
+button on an unexplained page is where a person stops.
+**FR-S11-4** Both themes, phone-first, from the first version. This is the one screen
+guaranteed to be seen on an unknown device (FR-XT2, FR-D1).
+**FR-S11-5** The round trip to Google and back has a visible in-between state. It is a full
+page redirect and a token exchange, and on a slow connection the callback screen is blank
+for long enough to look broken.
+**FR-S11-6** Sign-in failures are distinguished and said in words, never as "something went
+wrong": the person cancelled at Google; Google returned an error; the email is not on the
+allowlist (`LUMEN_SIGNUP_MODE`); the `state` did not match; the service is unreachable.
+Being turned away by an allowlist is the one most likely to happen and the one a generic
+message serves worst — it is not a failure, and it must not read as one.
+**FR-S11-7** Where a person was going before being bounced to `/login` is remembered and
+returned to after sign-in. **Never** as a URL that carries anything from the journal
+(FR-XV3) — a deep link into an episode is fine, a query string with text in it is not.
+**FR-S11-8** The whole surface is behind a build-time switch matching the service's
+`LUMEN_AUTH_ENABLED`. With auth off, the app opens straight into the shell as it does today.
+This is what lets the front end be built before Goal 21 exists, and it must be a real
+supported mode rather than dead code — a switch nobody exercises is a switch that does not
+work.
+**FR-S11-9** Signed in, the current person is visible and unambiguous — name or email in
+the shell, not only an avatar. On a system where every screen is one person's private
+history, "whose data am I looking at" may never require a hover.
+**FR-S11-10** **Sign out** is reachable from the shell, ends the session at the service and
+not only in the browser, and clears every cached response on the way out. A cached episode
+surviving a sign-out on a shared laptop is the failure this exists to prevent.
+
+**Backed by:** nothing. Entirely **Needs API** (API-11, Goal 21).
+
 ---
 
 ## 5. Cross-cutting requirements
@@ -416,8 +475,11 @@ this well. Live updates must degrade to polling rather than breaking.
 ### 5.6 Performance
 
 **FR-XP1** First meaningful paint fast enough to open on a phone and start writing.
-**FR-XP2** The 3-second retrieval budget is the backend's; the UI must not add a felt pause
-of its own to a turn.
+**FR-XP2** The retrieval budget is the backend's — **8 seconds** since Goal 15, which raised
+it from 3 deliberately: a brief pause before a considered reply reads as thought, while an
+answer that missed the one relevant thing reads as nothing. The UI must not add a felt pause
+of its own on top of it, and must make an 8-second wait feel like the assistant thinking
+rather than like the app having stalled.
 **FR-XP3** Lists are paginated against the API's 200-record cap, never fetched whole.
 **FR-XP4** The graph explorer stays interactive at the scale a few years of journalling
 produces.
@@ -441,7 +503,38 @@ edge.
 inferred or reconstructed client-side.
 **FR-XC3** CORS on the service and a configurable base URL in the client are both firm
 requirements, not niceties — under DEC-2 the browser talks to FastAPI directly from a
-different origin, and nothing sits in between to paper over it.
+different origin, and nothing sits in between to paper over it. DEC-5 sharpens this: the
+refresh cookie is cross-origin, so requests carrying it must be sent with credentials and
+the service must name exact origins. A wildcard is not merely lax in this combination —
+browsers reject it outright.
+
+### 5.9 Identity and session
+
+**FR-XI1** The access token lives in memory only. Never `localStorage`, never
+`sessionStorage`, never a non-httpOnly cookie. Anything a script on the page can read is
+readable by any script that gets onto the page.
+**FR-XI2** The refresh token is never touched by application code at all. It is an httpOnly
+cookie; the front end's only involvement is sending credentials with requests to `/auth/*`.
+**FR-XI3** A `401` triggers exactly one silent refresh attempt, and concurrent requests that
+all `401` at once wait on that single attempt rather than each starting their own. If it
+fails, the session ends and the person is sent to `/login` — once, not once per in-flight
+request.
+**FR-XI4** An expiring token must never interrupt writing. A refresh that lands mid-message
+is invisible; a composer that loses a half-written entry to a token expiry is the worst
+possible moment for this to be noticeable.
+**FR-XI5** Session loss during a streamed reply is handled, not ignored — a WebSocket
+outliving its token is a live case (OQ-A3), and the reply must not simply stop with no
+explanation.
+**FR-XI6** Every cache, store and query client is scoped to the signed-in user and cleared
+on sign-out and on user change. Two accounts on one browser may never see each other's
+records, including for the fraction of a second before a refetch lands.
+**FR-XI7** Signed out — deliberately, or by an expired session — no journal content remains
+in memory, in a cache, or in the DOM.
+**FR-XI8** Being signed out mid-session is explained. "Your session expired, sign in again"
+is a different message from "we could not reach the service", and a person who has just lost
+what they were reading deserves to know which.
+**FR-XI9** No token, code or `state` value appears in a URL, a log, or an error surface
+(FR-XV3).
 
 ---
 
@@ -461,6 +554,8 @@ Ordered by how much they block. Each needs a decision about which goal owns it.
 | API-8 | A day/calendar index | S2 | Cheaper and more honest than filtering episode lists client-side. |
 | API-9 | Text search over records | S6 | Hybrid search exists inside retrieval; nothing exposes it. |
 | API-10 | Re-run a stage | S4 | `rerun_from_stage` is unimplemented. Until then the button is absent, not dead. |
+| API-11 | Sign in, refresh, sign out, current user | S11, all | Goal 21. `/auth/google/start`, `/auth/google/callback`, `/auth/refresh`, `/auth/logout`, `GET /auth/me`. Specified in `Auth_Architecture.md` §3.1. |
+| API-12 | Every other endpoint scoped to the signed-in user | all | Goal 22. Not a new endpoint — a change to all of them. Today every response is the single configured user's, whoever asked. |
 
 ---
 
@@ -491,11 +586,11 @@ specific look, not inheriting a library's.
    directly; the `app/api/` route handlers in §7.1 are dropped. `Technical_HLD.md` §7.1
    needs amending to match — a doc still describing a layer we have decided not to build
    is the kind of discrepancy this project treats as a bug report.
-2. **Auth that does not exist.** §7.1 has `(auth)/login`. There is no auth anywhere in the
-   system and no user-facing settings. Either the route goes, or auth becomes a real
-   requirement with an owning goal. Note that DEC-2 sharpens this: with no BFF in front of
-   it, anything protecting the service has to be the service's own concern. Still open
-   (OQ-1).
+2. ~~**Auth that does not exist.**~~ **Resolved by DEC-5.** §7.1's `(auth)/login` route
+   stays, and becomes real: S11, backed by API-11, owned by Goal 21, specified in
+   `Auth_Architecture.md`. DEC-2 was the sharpening argument — with no BFF in front of it,
+   protecting the service is the service's own concern, which is exactly what
+   Goals 21 and 22 build. `Technical_HLD.md` §11 decision 5 (Clerk) is withdrawn.
 3. **Four node colours for fifteen node kinds** (§7.2). Needs a rule, not a list.
 4. **`react-force-graph` on a phone.** Named as the graph choice with no mobile story.
 5. **Voice.** §11 decision 3 says text-first with voice as progressive enhancement; the
@@ -508,10 +603,14 @@ specific look, not inheriting a library's.
 ## 8. Out of scope for now
 
 Named so they are decisions rather than omissions: offline use and PWA installation;
-multi-user, accounts, sharing or export-to-others; editing or deleting graph content
-directly; changing provider or model configuration from the UI (FR-S10-5); voice input and
-spoken replies beyond layout space; native mobile apps; anything that writes to the graph
-outside the review queue.
+sharing a graph with another person, or export-to-others; roles, permissions, teams or any
+admin surface; a second sign-in method, password reset or MFA (DEC-A7); session and device
+management beyond sign-out; editing or deleting graph content directly; changing provider or
+model configuration from the UI (FR-S10-5); voice input and spoken replies beyond layout
+space; native mobile apps; anything that writes to the graph outside the review queue.
+
+*Withdrawn from this list by DEC-5:* multi-user and accounts. They were out of scope when
+this document was drafted and are now S11, §5.9, API-11 and API-12.
 
 ---
 
@@ -547,12 +646,22 @@ separate codebase in every sense that matters — but one commit can change an e
 its caller together, and generated OpenAPI types (FR-XC1) need no publishing step.
 `Technical_HLD.md` §3.2 already sketches exactly this layout.
 
-### 9.2 Still open
+**OQ-1 → DEC-5. There is a login, and Lumen is multi-user by design.** Not a login bolted
+onto a single-user app — a real identity per person, with a graph and a vector collection
+per person behind it. Google is the only sign-in method; Lumen issues its own JWTs and
+treats Google purely as an identity provider. The full design, including why Clerk was
+withdrawn, is `docs/hld/Auth_Architecture.md`; the build is Goals 21 and 22.
 
-**OQ-1 — Auth.** Single-user with no login, or a login even for one person? DEC-2 makes this
-the service's own concern, since nothing sits in front of it. Affects the shell, the routes,
-and whether the API changes at all. Default if unanswered: no auth, and the `(auth)/login`
-route is struck from `Technical_HLD.md` §7.1.
+Consequences for this document: a new surface (S11), a new cross-cutting section (§5.9),
+two new backend requirements (API-11, API-12), and two removals from §8. Consequence for the
+design document: the shell now has a signed-out state and a signed-in identity in it, and
+every list, cache and query client is scoped to a person rather than to the process
+(FR-XI6). The sequencing is worth stating — auth lands at Goal 21, *after* the surfaces that
+consume it, so the front end is built against `LUMEN_AUTH_ENABLED=false` and the login screen
+is switched on when the service can answer it (FR-S11-8). That switch is a supported mode,
+not scaffolding.
+
+### 9.2 Still open
 
 **OQ-4 — How far does "show the working" go?** A marked developer toggle on the chat
 surface, or strictly confined to the inspect surfaces? P3 leans toward the toggle. DEC-3

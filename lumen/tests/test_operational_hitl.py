@@ -230,3 +230,34 @@ class TestUpdateStatus:
     def test_updating_an_unknown_item_is_refused(self, ops_store):
         with pytest.raises(RecordNotFoundError, match="no review item"):
             ops_store.hitl.update_status("ghost", HitlItemStatus.RESOLVED)
+
+
+class TestHowLongTheQueueHasBeenWaiting:
+    def test_an_empty_queue_has_nothing_waiting(self, ops_store):
+        assert ops_store.hitl.oldest_pending_at("local") is None
+
+    def test_the_longest_waiting_item_is_the_one_reported(self, ops_store):
+        # A count alone does not say whether a queue is being kept up with.
+        # Three items raised this morning and three raised five weeks ago are
+        # the same number and completely different situations.
+        ops_store.hitl.enqueue(_item("recent", created_at=BASE_TIME))
+        ops_store.hitl.enqueue(
+            _item("old", created_at=BASE_TIME - timedelta(days=12))
+        )
+
+        oldest = ops_store.hitl.oldest_pending_at("local")
+
+        assert oldest.replace(tzinfo=UTC) == BASE_TIME - timedelta(days=12)
+
+    def test_a_settled_item_is_no_longer_waiting(self, ops_store):
+        ops_store.hitl.enqueue(_item("a"))
+        ops_store.hitl.update_status(
+            "a", HitlItemStatus.RESOLVED, HitlResolutionChoice.ACTION_A
+        )
+
+        assert ops_store.hitl.oldest_pending_at("local") is None
+
+    def test_another_persons_queue_is_not_counted(self, ops_store):
+        ops_store.hitl.enqueue(_item("a", user_id="someone_else"))
+
+        assert ops_store.hitl.oldest_pending_at("local") is None

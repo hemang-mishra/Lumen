@@ -848,6 +848,16 @@ class SqlAlchemyHitlQueueRepository:
                 or 0
             )
 
+    def oldest_pending_at(self, user_id: str) -> datetime | None:
+        open_statuses = [status.value for status in OPEN_HITL_STATUSES]
+        with self._sessions.session() as db:
+            return db.scalar(
+                select(func.min(models.HitlQueueItem.created_at)).where(
+                    models.HitlQueueItem.user_id == user_id,
+                    models.HitlQueueItem.status.in_(open_statuses),
+                )
+            )
+
     def update_status(
         self,
         item_id: str,

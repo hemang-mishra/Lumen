@@ -199,6 +199,7 @@ The personal version runs all services as Python modules in a single process. Th
 | Service | Responsibility | Personal | Production |
 |---|---|---|---|
 | **BFF / API Gateway** | Single entry point for all client requests, auth, rate limiting | FastAPI process on port 8000 | FastAPI + Nginx + TLS |
+| **Identity Service** | Google sign-in, token issue/refresh/revoke, JWKS, user records | `lumen/auth/`, a module in the BFF [Goal 21] | Separate FastAPI service; every other service verifies against its JWKS and none can mint |
 | **Ingestion Service** | Receive messages, voice uploads, external log imports → write to Session Buffer | Module in BFF | Separate FastAPI service |
 | **Pipeline Orchestrator** | Watch Session Buffer for decayed sessions → dispatch pipeline jobs | Background thread in BFF | Dedicated Celery beat scheduler |
 | **Extraction Worker** | Steps 0 + 1 (Preprocessing + Microextraction) | Python-RQ worker | Celery worker, N replicas |
@@ -296,6 +297,7 @@ Lumen uses **three separate data stores**, each optimized for its access pattern
 │  hitl_queue: decisions pending human review             │
 │  user_settings: key/value config overrides              │
 │  data_erasure_audit: erasure records (no user content)  │
+│  users / user_identities / refresh_tokens  [Goal 21]    │
 │  Access pattern: standard CRUD, status polling          │
 └─────────────────────────────────────────────────────────┘
 
@@ -317,7 +319,20 @@ Notes on the table set (resolved in Goal 3):
   variables and are never persisted by the application — no encrypted secrets store,
   no key management, no settings row that can supply a key. Goal 3 listed this table as
   deferred to Goal 4; Goal 4 cancelled it (see `implementation/Goal_4_Plan.md` A2-4).
+- **`users`, `user_identities` and `refresh_tokens` arrive in Goal 21** and are the only
+  new tables multi-user needs here. Every other table has carried `user_id` since Goal 3,
+  so tenancy in this store is already correct and needs no migration. The graph and vector
+  stores carry no notion of a user at all, which is why they are split per user rather than
+  filtered — see [`Auth_Architecture.md`](file:///Users/hemangmishra/Projects/Lumen/docs/hld/Auth_Architecture.md) §6.
+  Note what `refresh_tokens` stores: a hash, never the token, and a hashed IP rather than an
+  IP — the same rule the rest of this store already follows.
 ```
+
+**Multi-user splits two of these three, and not the third.** Each user gets their own Kuzu
+database directory and their own Qdrant collection, resolved from the authenticated identity
+by a store registry (Goal 22). The operational database stays shared — it holds no graph
+content, it is already keyed by `user_id` everywhere, and splitting it would fragment the one
+place that can answer a question about the deployment as a whole.
 
 ### 4.2 Node ID as the Universal Key
 
@@ -530,7 +545,8 @@ The formulation model is resolved through the `LIGHTWEIGHT` role but built with 
 ```
 app/
 ├── (auth)/
-│   └── login/
+│   ├── login/              ← Continue with Google. The only public route.
+│   └── callback/           ← receives ?code&state, posts it to the API
 ├── (app)/
 │   ├── layout.tsx          ← App shell: sidebar nav, session indicator
 │   ├── chat/
@@ -554,6 +570,16 @@ app/
     ├── ingest/route.ts     ← BFF: receive external log import
     └── graph/route.ts      ← BFF: graph data for explorer
 ```
+
+**The `(auth)` group is real** as of Goals 21–22. It was drawn here before anything backed
+it, and `docs/frontend/Requirements.md` correctly flagged it as a route with no system behind
+it. That is now settled the other way: Lumen is multi-user, sign-in is Google, and `(auth)`
+is the only route group reachable without a token. What each screen must do is S11 in that
+document; what the service must provide is `Auth_Architecture.md`.
+
+Everything under `(app)` requires an identity. Under DEC-2 in the frontend requirements
+there is no BFF to enforce that, so the enforcement is the API's own — a router-level default
+dependency, not a per-route decorator.
 
 ### 7.2 Key UI Surfaces
 
@@ -670,12 +696,13 @@ Phase 1: Personal → packaged
   Deploy to personal cloud VM (Hetzner CX22 = €4/month)
 
 Phase 2: Multi-user alpha
+  Add auth layer — own JWTs (EdDSA + JWKS), Google as identity provider [Goal 21]
+  Each user gets their own Kuzu database and Qdrant collection,
+    resolved from the authenticated identity through a store registry [Goal 22]
   Extract Graph Service (FastAPI) — swap Kuzu → Neo4j
   Extract Query Service (FastAPI)
-  Add auth layer (Clerk or custom JWT)
   PostgreSQL replaces SQLite
   Qdrant Cloud replaces local Qdrant
-  Each user gets isolated graph namespace (user_id prefix on node_ids)
 
 Phase 3: Scale
   Pipeline Workers → Celery + Kafka
@@ -761,4 +788,4 @@ separately, and the difference between the two lists is the repair set.
 | 2 | **RQ vs. Celery for personal?** | RQ. It's 10× simpler. The `OrchestratorProvider` Protocol abstracts the queue. Celery is a 2-hour migration when needed. |
 | 3 | **Voice-first or text-first UI?** | Text-first MVP. Voice input as progressive enhancement (Whisper.cpp local, browser MediaRecorder API). |
 | 4 | **Offline-first frontend?** | Not for MVP. PWA with service worker caching is a Phase 1 addition. |
-| 5 | **Multi-user auth strategy?** | Clerk (turnkey, supports social login, good DX) for Phase 2. Current personal build has no auth — local-only access. |
+| 5 | ~~**Multi-user auth strategy?**~~ **Decided.** | ~~Clerk (turnkey, supports social login, good DX) for Phase 2.~~ **Withdrawn.** Lumen issues its own JWTs (EdDSA, published JWKS) and uses Google purely as an identity provider, with one Kuzu database and one Qdrant collection per user. Reasoning — including why not Clerk — is in [`Auth_Architecture.md`](file:///Users/hemangmishra/Projects/Lumen/docs/hld/Auth_Architecture.md); the build is Goals 21–22. The current personal build still has no auth: `AppConfig.user_id` is an env var and every request is the same person. |

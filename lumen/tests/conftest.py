@@ -1564,12 +1564,25 @@ def api_client(graph_store, ops_store):
     """A client for the web API, wired to the test databases."""
     from fastapi.testclient import TestClient
 
-    from lumen.api.deps import get_graph, get_ops
+    from lumen.api.deps import get_graph, get_ops, get_reporter
     from lumen.api.main import create_app
+    from lumen.config import AppConfig
+    from lumen.pipeline.macroextraction.service import MacroextractionService
 
     app = create_app()
     app.dependency_overrides[get_graph] = lambda: graph_store
     app.dependency_overrides[get_ops] = lambda: ops_store
+
+    # The report builder is wired to the same test databases. It is given no
+    # model, which is a supported way to run — a report carries its counts
+    # without one — so the route can be exercised without a stand-in model
+    # having to answer for it.
+    reporter = MacroextractionService(
+        config=AppConfig(), graph=graph_store, ops=ops_store
+    )
+    reporter._models = {ModelRole.THINKING: None, ModelRole.LIGHTWEIGHT: None}
+    app.dependency_overrides[get_reporter] = lambda: reporter
+    app.state.reporter = reporter
 
     # The stores are supplied directly, so the application's own startup —
     # which would open a second pair against the configured paths — is
@@ -1888,3 +1901,263 @@ def make_retriever(graph_store, vector_store, embedder):
     for retriever in built:
         retriever.close()
     runner.close()
+
+
+# ---------------------------------------------------------------------------
+# Periodic reports
+#
+# Two kinds of fixture, because the package has two kinds of code. The
+# arithmetic works on a corpus object and is tested with hand-built ones, so
+# every count in a test can be checked by eye. The reading and the writing
+# work on a real embedded graph, because what they do *is* the queries.
+# ---------------------------------------------------------------------------
+
+MACRO_MAY = datetime(2026, 5, 1, tzinfo=UTC)
+MACRO_JUNE = datetime(2026, 6, 1, tzinfo=UTC)
+
+
+@pytest.fixture
+def make_window():
+    """Build one period for a report to cover."""
+    from lumen.pipeline.macroextraction.contracts import MacroWindow
+
+    def _make(
+        report_type: ReportType = ReportType.MONTHLY,
+        *,
+        start: datetime | None = None,
+        end: datetime | None = None,
+    ) -> MacroWindow:
+        return MacroWindow(
+            report_type=report_type,
+            period_start=start or MACRO_MAY,
+            period_end=end or MACRO_JUNE,
+        )
+
+    return _make
+
+
+@pytest.fixture
+def make_observation_facts():
+    """Build one noticing as a report sees it."""
+    from lumen.pipeline.macroextraction.contracts import ObservationFacts
+
+    def _make(
+        node_id: str,
+        *,
+        observation_type: ObservationType | str = ObservationType.EMOTION,
+        content: str = "felt behind everyone again",
+        signal: SignalStrength | str = SignalStrength.STANDARD,
+        people: tuple[str, ...] = (),
+        episode_id: str = "ep_1",
+    ) -> ObservationFacts:
+        return ObservationFacts(
+            node_id=node_id,
+            type=str(getattr(observation_type, "value", observation_type)),
+            content=content,
+            signal_strength=str(getattr(signal, "value", signal)),
+            person_refs=people,
+            episode_id=episode_id,
+        )
+
+    return _make
+
+
+@pytest.fixture
+def make_episode_facts():
+    """Build one piece of writing as a report sees it, with what it produced."""
+    from lumen.pipeline.macroextraction.contracts import EpisodeFacts
+
+    def _make(
+        episode_id: str,
+        *,
+        day: int = 4,
+        month: int = 5,
+        summary: str = "an ordinary evening",
+        observations: tuple = (),
+        extra_findings: tuple[str, ...] = (),
+        era: str | None = None,
+    ) -> EpisodeFacts:
+        when = datetime(2026, month, day, 20, 0, tzinfo=UTC)
+        return EpisodeFacts(
+            episode_id=episode_id,
+            event_date=when.date(),
+            occurred_at=when,
+            episode_summary=summary,
+            historical_era=era,
+            observations=observations,
+            finding_ids=tuple(item.node_id for item in observations) + extra_findings,
+        )
+
+    return _make
+
+
+@pytest.fixture
+def make_link():
+    """Build one link from something noticed to something the person carries."""
+    from lumen.pipeline.macroextraction.contracts import StandingLink
+
+    def _make(
+        from_id: str,
+        to_id: str,
+        *,
+        to_type: str = "pattern",
+        edge_name: str = "reinforces_obs_pat",
+    ) -> StandingLink:
+        return StandingLink(
+            from_id=from_id, to_id=to_id, to_type=to_type, edge_name=edge_name
+        )
+
+    return _make
+
+
+@pytest.fixture
+def make_corpus(make_window):
+    """
+    Build a whole reading of one period by hand.
+
+    Every field has a sensible empty default, so a test about one section
+    names only what that section reads and the rest of the report is
+    visibly not involved.
+    """
+    from lumen.pipeline.macroextraction.contracts import WindowCorpus
+
+    def _make(**overrides) -> WindowCorpus:
+        overrides.setdefault("window", make_window())
+        return WindowCorpus(**overrides)
+
+    return _make
+
+
+@pytest.fixture
+def pattern_row():
+    """A pattern record as the graph hands it back, tidied."""
+
+    def _make(
+        node_id: str,
+        *,
+        name: str = "Comparison with peers",
+        version: int = 1,
+        valid_from: str = "2026-05-04T20:00:00+00:00",
+        last_reinforced: str | None = None,
+        status: str = "ACTIVE",
+    ) -> dict:
+        return {
+            "node_id": node_id,
+            "pattern_name": name,
+            "pattern_description": "measures self against others",
+            "domain": "EMOTIONAL",
+            "version": version,
+            "created_at": valid_from,
+            "valid_from": valid_from,
+            "last_reinforced_at": last_reinforced or valid_from,
+            "status": status,
+        }
+
+    return _make
+
+
+@pytest.fixture
+def seed_month(graph_store):
+    """
+    Write one piece of writing and its findings into a real graph.
+
+    Deliberately writes the links too. What the reading half of a report
+    does is follow them, and a fixture that skipped them would let a test
+    pass with the query written wrongly.
+    """
+
+    def _seed(
+        episode_id: str,
+        *,
+        day: int,
+        month: int = 5,
+        year: int = 2026,
+        written_on: date | None = None,
+        observations: tuple[tuple[str, str, str], ...] = (),
+        patterns: dict[str, str] | None = None,
+        people: dict[str, str] | None = None,
+        signal: str = "HIGH",
+    ) -> str:
+        happened = datetime(year, month, day, 20, 0, tzinfo=UTC)
+        recorded = written_on or happened.date()
+
+        graph_store.write_node(
+            "EpisodeNode",
+            {
+                "node_id": episode_id,
+                "entry_id": f"entry_{episode_id}",
+                "occurred_at": happened.isoformat(),
+                "created_at": datetime(
+                    recorded.year, recorded.month, recorded.day, 21, 0, tzinfo=UTC
+                ).isoformat(),
+                "valid_from": happened.isoformat(),
+                "event_date": happened.date().isoformat(),
+                "session_label": "evening",
+                "source_modality": "TEXT_ENTRY",
+                "entry_class": "REFLECTION",
+                "episode_summary": f"what happened on {happened.date()}",
+                "episode_index": 1,
+                "total_episodes_in_entry": 1,
+                "coreference_map_id": f"cm_{episode_id}",
+                "reconciliation_status": "COMPLETE",
+                "raw_text_hash": f"hash_{episode_id}",
+            },
+        )
+
+        for node_id, observation_type, content in observations:
+            graph_store.write_node(
+                "ObservationNode",
+                {
+                    "node_id": node_id,
+                    "episode_id": episode_id,
+                    "occurred_at": happened.isoformat(),
+                    "created_at": happened.isoformat(),
+                    "valid_from": happened.isoformat(),
+                    "type": observation_type,
+                    "content": content,
+                    "signal_strength": signal,
+                    "provenance": "USER_GENERATED",
+                    "verification_status": "IMPLICIT",
+                    "extraction_confidence": "STANDARD",
+                    "status": "ACTIVE",
+                    "extraction_model": "fake",
+                    "extraction_attempt": 1,
+                    **(
+                        {"person_refs": json.dumps(list(people[node_id]))}
+                        if people and node_id in people
+                        else {}
+                    ),
+                },
+            )
+            graph_store.write_edge(
+                "contains_obs",
+                episode_id,
+                node_id,
+                {"valid_from": happened.isoformat()},
+            )
+            if patterns and node_id in patterns:
+                graph_store.write_edge(
+                    "reinforces_obs_pat",
+                    node_id,
+                    patterns[node_id],
+                    {"valid_from": happened.isoformat()},
+                )
+
+        return episode_id
+
+    return _seed
+
+
+@pytest.fixture
+def narrative_provider():
+    """A stand-in model that answers one report's wording request."""
+    from lumen.providers.fake import FakeLLMProvider
+
+    def _build(reply: dict | str) -> FakeLLMProvider:
+        return FakeLLMProvider(
+            [reply if isinstance(reply, str) else json.dumps(reply)],
+            role=ModelRole.THINKING,
+            model="fake-thinker",
+        )
+
+    return _build

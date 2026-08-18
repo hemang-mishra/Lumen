@@ -169,6 +169,12 @@ _FINDING_TO_STANDING: dict[str, tuple[str, ...]] = {
 _REACHED_THROUGH_A_FINDING: frozenset[str] = frozenset(_FINDING_TO_STANDING)
 
 
+# How many identifiers go into one link lookup. A batched question keeps the
+# number of round trips flat, but the identifiers themselves still travel as
+# a parameter, so they are sent a chunk at a time.
+_EDGE_LOOKUP_CHUNK = 500
+
+
 def _first_unique(rows: list[dict[str, Any]], limit: int) -> list[dict[str, Any]]:
     """
     The first few distinct records, keeping the order they were found in.
@@ -1118,10 +1124,11 @@ class KuzuGraphProvider(GraphProvider):
         return found
 
     def _newest_first(self, table: str) -> str:
-        """An ordering clause, for the tables that record when they began."""
-        if not queries.has_start_date(table):
+        """An ordering clause, for the tables that can be placed in time."""
+        column = queries.date_column(table)
+        if column is None:
             return ""
-        return f"ORDER BY n.{queries.VALID_FROM} DESC"
+        return f"ORDER BY n.{column} DESC"
 
     # ------------------------------------------------------------------
     # Anchor Lookups
@@ -1299,6 +1306,101 @@ class KuzuGraphProvider(GraphProvider):
         if res.has_next():
             return int(res.get_next()[0])
         return 0
+
+    # ------------------------------------------------------------------
+    # Periodic Report Lookups
+    #
+    # Three questions that only a report needs to ask: which writing covers
+    # a stretch of time, what a whole batch of records turned into, and
+    # which periods have been reported on already.
+    # ------------------------------------------------------------------
+
+    def find_episodes_by_event_date(
+        self, start: date, end: date, *, limit: int = 500, offset: int = 0
+    ) -> list[dict[str, Any]]:
+        """
+        Every piece of writing about a stretch of time, oldest first.
+
+        Matched on the day being written about rather than the day it was
+        written, so a late entry about last month is counted as last month.
+
+        Oldest first because a report reads as a story of the period, and
+        everything downstream of this — when a pattern was first and last
+        seen, which episode a new one began in — is stated in that order.
+        """
+        # The parameters are not called "start" and "end" because "end" is a
+        # reserved word in the query language and the failure it produces
+        # names a character offset rather than the word.
+        return self._collect(
+            "MATCH (n:EpisodeNode) "
+            "WHERE n.event_date >= $from_day AND n.event_date < $to_day "
+            f"RETURN n ORDER BY n.event_date, n.occurred_at SKIP {int(offset)} "
+            f"LIMIT {int(limit)}",
+            {"from_day": _as_text(start), "to_day": _as_text(end)},
+        )
+
+    def find_standing_edges(
+        self,
+        node_ids: list[str],
+        *,
+        edge_names: list[str] | None = None,
+        include_invalidated: bool = False,
+    ) -> list[EdgeRow]:
+        """
+        Every link leading out of a batch of records at once.
+
+        Asked in chunks rather than as one enormous list of identifiers,
+        because a query's parameters are held in memory whole and a quarter
+        of somebody's history is a few thousand of them.
+        """
+        wanted = list(dict.fromkeys(node_ids))
+        if not wanted:
+            return []
+
+        found: dict[tuple[str, str, str], EdgeRow] = {}
+        for position in range(0, len(wanted), _EDGE_LOOKUP_CHUNK):
+            chunk = wanted[position : position + _EDGE_LOOKUP_CHUNK]
+            for edge in self._step_out(
+                chunk,
+                edge_types=edge_names,
+                direction="out",
+                include_invalidated=include_invalidated,
+                as_of=None,
+            ):
+                found[(edge.edge_type, edge.from_node_id, edge.to_node_id)] = edge
+        return list(found.values())
+
+    def find_reports(
+        self,
+        *,
+        report_type: str | None = None,
+        period_start: datetime | date | None = None,
+        limit: int = 50,
+        offset: int = 0,
+    ) -> list[dict[str, Any]]:
+        """
+        Periodic reports already written, newest first.
+
+        Newest first matters when the same period has been reported on more
+        than once. Re-running a period on purpose leaves both reports in
+        place, because nothing here is ever overwritten, so the one a reader
+        wants is whichever was written last.
+        """
+        conditions: list[str] = []
+        params: dict[str, Any] = {}
+        if report_type:
+            conditions.append("n.report_type = $report_type")
+            params["report_type"] = report_type
+        if period_start is not None:
+            conditions.append("n.period_start = $period_start")
+            params["period_start"] = _as_text(period_start)
+
+        where = f"WHERE {' AND '.join(conditions)} " if conditions else ""
+        return self._collect(
+            f"MATCH (n:MacroextractionReportNode) {where}"
+            f"RETURN n ORDER BY n.created_at DESC SKIP {int(offset)} LIMIT {int(limit)}",
+            params,
+        )
 
     # ------------------------------------------------------------------
     # Bookkeeping Writes

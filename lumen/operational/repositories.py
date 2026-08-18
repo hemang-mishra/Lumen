@@ -359,6 +359,17 @@ class HitlQueueRepository(Protocol):
         """Count unresolved items, which is what the queue cap is measured against."""
         ...
 
+    def oldest_pending_at(self, user_id: str) -> datetime | None:
+        """
+        When the longest-waiting unresolved item was raised, or None if there
+        are none.
+
+        A count on its own does not say whether a queue is being kept up
+        with. Three items raised this morning and three raised five weeks ago
+        are the same number and completely different situations.
+        """
+        ...
+
     def update_status(
         self,
         item_id: str,

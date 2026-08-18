@@ -324,6 +324,14 @@ class TestTheApiCannotWrite:
         #     conversation, never the graph. It writes the rewrite beside the
         #     original rather than over it, and refuses outright once the day
         #     has been processed.
+        #
+        #   /reports/run — writes a periodic report to the graph, and is the
+        #     second route here that can. It is narrow in the same way the
+        #     uploads are: what it holds is not a graph handle but the thing
+        #     that builds reports, and all it can say to that is which period
+        #     to summarise. Reports are new nodes about existing history; no
+        #     path through this route can change or retire a record of
+        #     something the person actually wrote.
         spec = api_client.get("/openapi.json").json()
 
         posts = {
@@ -339,6 +347,7 @@ class TestTheApiCannotWrite:
             "/ingest/json",
             "/chat/transcribe",
             "/chat/messages/{message_id}/revise",
+            "/reports/run",
         }
 
     def test_the_upload_routes_cannot_reach_the_graph_themselves(self):

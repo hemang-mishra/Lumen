@@ -421,6 +421,91 @@ class ChatConfig:
 
 
 @dataclass(frozen=True)
+class MacroConfig:
+    """
+    Settings for the periodic reports that ask "what keeps happening?".
+
+    Everything here is a threshold in a judgement that would otherwise be
+    buried in code: how many times something has to recur before it is worth
+    naming, how long something has to go unmentioned before it counts as
+    ignored, how many separate things have to move together before that is a
+    shift rather than a coincidence.
+
+    They are gathered in one place because they are the report's opinions,
+    and opinions belong somewhere a person can read and change them.
+    """
+
+    enabled: bool = _env_bool("LUMEN_MACRO_ENABLED", True)
+
+    # How long after a period ends before it is reported on. Reports cover
+    # when things happened rather than when they were written, and a report
+    # is never rewritten, so running the instant a period ends would freeze
+    # it before the last few entries about it had been made.
+    weekly_grace_days: int = _env_int("LUMEN_MACRO_WEEKLY_GRACE_DAYS", 1)
+    monthly_grace_days: int = _env_int("LUMEN_MACRO_MONTHLY_GRACE_DAYS", 3)
+    quarterly_grace_days: int = _env_int("LUMEN_MACRO_QUARTERLY_GRACE_DAYS", 3)
+
+    # How far back to look for periods that were never reported on, and how
+    # many may be caught up in one go. The cap matters: a system switched off
+    # for a year would otherwise wake up and start dozens of model calls at
+    # once.
+    catchup_periods: int = _env_int("LUMEN_MACRO_CATCHUP_PERIODS", 6)
+    max_runs_per_invocation: int = _env_int("LUMEN_MACRO_MAX_RUNS", 4)
+
+    # The near-real-time scan. A burst of beliefs branching or contradicting
+    # inside two days is the shape of something shifting while it happens.
+    shadow_window_hours: int = _env_int("LUMEN_MACRO_SHADOW_WINDOW_HOURS", 48)
+    shadow_min_decisions: int = _env_int("LUMEN_MACRO_SHADOW_MIN_DECISIONS", 3)
+    shadow_min_targets: int = _env_int("LUMEN_MACRO_SHADOW_MIN_TARGETS", 2)
+    shadow_repeat_hours: int = _env_int("LUMEN_MACRO_SHADOW_REPEAT_HOURS", 24)
+
+    # How much of a window one report will read. A cap rather than a
+    # suggestion, and hitting it is recorded in the report rather than
+    # hidden, because a partial summary presented as a whole one is a wrong
+    # answer that looks right.
+    max_episodes_per_window: int = _env_int("LUMEN_MACRO_MAX_EPISODES", 200)
+    max_nodes_per_kind: int = _env_int("LUMEN_MACRO_MAX_NODES_PER_KIND", 500)
+
+    # How much of the arithmetic makes it into the report.
+    top_patterns_limit: int = _env_int("LUMEN_MACRO_TOP_PATTERNS", 10)
+    high_signal_limit: int = _env_int("LUMEN_MACRO_HIGH_SIGNAL_LIMIT", 25)
+    open_loop_limit: int = _env_int("LUMEN_MACRO_OPEN_LOOP_LIMIT", 25)
+    ignored_lesson_limit: int = _env_int("LUMEN_MACRO_IGNORED_LESSON_LIMIT", 10)
+    aging_limit: int = _env_int("LUMEN_MACRO_AGING_LIMIT", 25)
+
+    # How often something has to happen before the report says it recurs.
+    repeated_lesson_min_episodes: int = _env_int("LUMEN_MACRO_REPEATED_LESSON_MIN", 3)
+    relational_min_observations: int = _env_int("LUMEN_MACRO_RELATIONAL_MIN", 2)
+    arc_min_episodes: int = _env_int("LUMEN_MACRO_ARC_MIN_EPISODES", 3)
+
+    # How long a lesson can go unmentioned before it counts as ignored, and
+    # how far back to look for lessons that might qualify.
+    ignored_lesson_days: int = _env_int("LUMEN_MACRO_IGNORED_LESSON_DAYS", 14)
+    ignored_lesson_lookback_days: int = _env_int("LUMEN_MACRO_IGNORED_LOOKBACK_DAYS", 180)
+
+    # When a quiet pattern is worth less, and when it is quiet enough that
+    # nobody can tell from the record whether it resolved or just stopped
+    # being written down. The multipliers are reported here and applied to
+    # search ranking elsewhere.
+    cooling_days: int = _env_int("LUMEN_MACRO_COOLING_DAYS", 180)
+    dormant_days: int = _env_int("LUMEN_MACRO_DORMANT_DAYS", 365)
+    cooling_multiplier: float = _env_float("LUMEN_MACRO_COOLING_MULTIPLIER", 0.85)
+    dormant_multiplier: float = _env_float("LUMEN_MACRO_DORMANT_MULTIPLIER", 0.5)
+
+    # What counts as an identity-level shift rather than a few patterns
+    # moving independently, and how far back the comparison reaches.
+    archetype_min_patterns: int = _env_int("LUMEN_MACRO_ARCHETYPE_MIN_PATTERNS", 5)
+    archetype_window_days: int = _env_int("LUMEN_MACRO_ARCHETYPE_WINDOW_DAYS", 90)
+
+    # The single call that writes the report's prose. Capped by length
+    # because a quarter of somebody's history does not fit in a prompt, and
+    # retried twice because it is nobody's live request.
+    narrative_max_chars: int = _env_int("LUMEN_MACRO_NARRATIVE_MAX_CHARS", 20000)
+    narrative_attempts: int = _env_int("LUMEN_MACRO_NARRATIVE_ATTEMPTS", 2)
+    narrative_excerpt_chars: int = _env_int("LUMEN_MACRO_EXCERPT_CHARS", 220)
+
+
+@dataclass(frozen=True)
 class ObservabilityConfig:
     """
     Configuration for logging.
@@ -660,6 +745,7 @@ class AppConfig:
     query: QueryConfig = field(default_factory=QueryConfig)
     chat: ChatConfig = field(default_factory=ChatConfig)
     ingest: IngestConfig = field(default_factory=IngestConfig)
+    macro: MacroConfig = field(default_factory=MacroConfig)
 
     # The personal build has one user. Multi-user deployments set this per request.
     user_id: str = _env("LUMEN_USER_ID", "local")

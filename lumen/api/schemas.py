@@ -14,6 +14,8 @@ cannot say on its own: whether the answer was cut short.
 
 from __future__ import annotations
 
+import json
+
 from typing import Any, Literal
 
 from datetime import date, datetime
@@ -916,3 +918,162 @@ class ReviseRequest(BaseModel):
     session_id: str = Field(min_length=1)
     content: str = Field(min_length=1)
 
+
+class ReportEnvelopeView(BaseModel):
+    """
+    One periodic report, as it appears in a list.
+
+    The envelope only. A quarter's report holds a great deal of content, and
+    listing twenty of them in full would send several megabytes to answer the
+    question "which reports exist".
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    report_id: str
+    report_type: str
+    period_start: datetime
+    period_end: datetime
+    episodes_analyzed: int = Field(ge=0)
+    archetype_shift_detected: bool = False
+    narrative_status: str | None = None
+    headline: str | None = None
+    model_used: str = ""
+    created_at: datetime | None = None
+
+    @classmethod
+    def of(cls, row: dict[str, Any]) -> "ReportEnvelopeView":
+        """Build one from a report as the store returned it."""
+        tidied = tidy_row(row)
+        content = _report_content(tidied)
+        meta = content.get("meta") or {}
+        return cls(
+            report_id=str(tidied.get("node_id", "")),
+            report_type=str(tidied.get("report_type", "")),
+            period_start=_as_moment(tidied.get("period_start")),
+            period_end=_as_moment(tidied.get("period_end")),
+            episodes_analyzed=int(tidied.get("episodes_analyzed") or 0),
+            archetype_shift_detected=bool(tidied.get("archetype_shift_detected")),
+            narrative_status=meta.get("narrative_status"),
+            headline=content.get("headline") or None,
+            model_used=str(tidied.get("model_used", "")),
+            created_at=_as_moment(tidied.get("created_at"), default=None),
+        )
+
+
+class ReportDetailView(BaseModel):
+    """
+    One report in full, envelope and content together.
+
+    The content is handed over as it was stored rather than reshaped. It is a
+    document written at a point in time, and a reader years from now needs
+    what was actually written, not this month's idea of how to present it.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    report: ReportEnvelopeView
+    content: dict[str, Any] = Field(default_factory=dict)
+    episode_ids: list[str] = Field(default_factory=list)
+
+    @classmethod
+    def of(
+        cls, row: dict[str, Any], *, episode_ids: list[str]
+    ) -> "ReportDetailView":
+        """Build one from a report and the writing it was joined to."""
+        return cls(
+            report=ReportEnvelopeView.of(row),
+            content=_report_content(tidy_row(row)),
+            episode_ids=episode_ids,
+        )
+
+
+class ReportListView(BaseModel):
+    """A page of reports, newest first."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    reports: list[ReportEnvelopeView] = Field(default_factory=list)
+    count: int = Field(ge=0)
+    limit: int = Field(ge=1)
+    offset: int = Field(ge=0)
+
+
+class ReportDueView(BaseModel):
+    """
+    One period that should have been reported on and has not been.
+
+    What a schedule would run if it woke up now. Exposed so that the decision
+    is inspectable before anything is spent acting on it.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    report_type: str
+    period_start: datetime
+    period_end: datetime
+
+
+class ReportRunRequest(BaseModel):
+    """
+    A request to build one report by hand.
+
+    The period is named by the day it starts. `force` writes a second report
+    for a period that already has one, which is the only way to replace a
+    report whose wording came out badly — nothing here overwrites, so both
+    are kept and the newer one is what readers are shown.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    report_type: Literal["WEEKLY", "MONTHLY", "QUARTERLY", "SHADOW"]
+    period_start: date | None = None
+    force: bool = False
+
+
+class ReportRunView(BaseModel):
+    """What one hand-run report attempt came to."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    status: str
+    report_id: str | None = None
+    report_type: str
+    period_start: datetime
+    period_end: datetime
+    episodes_analyzed: int = Field(ge=0)
+    narrative_status: str
+    duration_ms: int = Field(ge=0)
+    error: str | None = None
+
+
+def _report_content(tidied: dict[str, Any]) -> dict[str, Any]:
+    """
+    A report's body, read back from how it was stored.
+
+    Kept as text in the graph because there is no column type for a document,
+    so it arrives as a run of JSON and is read back here. A body that cannot
+    be read is reported as empty rather than failing the request: the
+    envelope still says which period it covered, which is worth more than an
+    error.
+    """
+    raw = tidied.get("report_content")
+    if isinstance(raw, dict):
+        return raw
+    if not raw:
+        return {}
+    try:
+        parsed = json.loads(raw)
+    except (TypeError, ValueError):
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
+
+
+def _as_moment(value: Any, *, default: datetime | None = None) -> Any:
+    """Read a stored timestamp back, keeping a missing one missing."""
+    if isinstance(value, datetime):
+        return value
+    try:
+        return datetime.fromisoformat(str(value))
+    except (TypeError, ValueError):
+        return default

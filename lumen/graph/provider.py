@@ -206,6 +206,63 @@ class ReadOnlyGraph(Protocol):
         """Count how many past decisions of the given kinds were made about a node."""
         ...
 
+    def find_episodes_by_event_date(
+        self, start: date, end: date, *, limit: int = 500, offset: int = 0
+    ) -> list[dict[str, Any]]:
+        """
+        Every piece of writing about a stretch of time, oldest first.
+
+        Selected by the day the writing is *about*, not the day it was
+        written. An entry made on the third of June describing the
+        twenty-eighth of May belongs to May, and anything summarising a month
+        of somebody's life has to agree with that or it is summarising their
+        typing habits instead.
+
+        The end of the range is not included, so consecutive periods share no
+        episode and none falls between two of them.
+        """
+        ...
+
+    def find_standing_edges(
+        self,
+        node_ids: list[str],
+        *,
+        edge_names: list[str] | None = None,
+        include_invalidated: bool = False,
+    ) -> list["EdgeRow"]:
+        """
+        Every link leading out of a batch of records at once.
+
+        The batched form exists because the alternative is one walk per
+        record. Asking what a month's worth of findings turned into means
+        several hundred of them, and several hundred round trips to answer
+        one question is the difference between a report that runs and a
+        report that times out.
+
+        Withdrawn links are left out unless asked for, on the same reasoning
+        as everywhere else: a decision that was rolled back should not still
+        be shaping what the graph appears to say.
+        """
+        ...
+
+    def find_reports(
+        self,
+        *,
+        report_type: str | None = None,
+        period_start: datetime | date | None = None,
+        limit: int = 50,
+        offset: int = 0,
+    ) -> list[dict[str, Any]]:
+        """
+        Periodic reports already written, newest first.
+
+        Narrowing by both kind and period start is how anything checks
+        whether a given week or month has been covered already. That check is
+        what makes running the same period twice cost nothing, which in turn
+        is what makes a schedule safe to fire more than once.
+        """
+        ...
+
 
 class GraphProvider(ReadOnlyGraph, Protocol):
     """

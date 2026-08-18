@@ -450,6 +450,104 @@ class ReportType(StrEnum):
     QUARTERLY = "QUARTERLY"
 
 
+class MacroRunStatus(StrEnum):
+    """
+    How one attempt at building a periodic report ended.
+
+    WRITTEN          — a report was produced and saved.
+    SKIPPED_EXISTING — that period already had a report, so nothing was spent.
+    EMPTY_WINDOW     — nothing was written in that stretch of time.
+    NOT_DETECTED     — the scan ran and found nothing worth reporting.
+    FAILED           — the attempt could not be completed.
+
+    The middle three are ordinary outcomes rather than problems. A month
+    somebody did not write in should leave no document behind, and a quiet
+    two days should not produce a daily note saying nothing happened.
+    """
+
+    WRITTEN = "WRITTEN"
+    SKIPPED_EXISTING = "SKIPPED_EXISTING"
+    EMPTY_WINDOW = "EMPTY_WINDOW"
+    NOT_DETECTED = "NOT_DETECTED"
+    FAILED = "FAILED"
+
+
+class NarrativeStatus(StrEnum):
+    """
+    How much of a report's written prose survived.
+
+    OK          — the model answered and everything it said checked out.
+    DEGRADED    — it answered, but some of what it referred to does not
+                  exist, so those parts were dropped.
+    UNAVAILABLE — it could not be reached, so the report holds its counts
+                  and no prose at all.
+
+    Recorded on the report itself, because a report with no prose and a
+    report whose prose was never asked for read identically otherwise.
+    """
+
+    OK = "OK"
+    DEGRADED = "DEGRADED"
+    UNAVAILABLE = "UNAVAILABLE"
+
+
+class ArcDirection(StrEnum):
+    """Which way a relationship moved across a stretch of time."""
+
+    STRENGTHENING = "STRENGTHENING"
+    STABLE = "STABLE"
+    STRAINING = "STRAINING"
+    FADING = "FADING"
+
+
+class GapStatus(StrEnum):
+    """
+    Where a missing piece of somebody's life story currently stands.
+
+    PRESENT   — still missing, with nothing yet filling it.
+    NARROWING — something has started to fill it.
+    CLOSED    — it is no longer missing.
+    """
+
+    PRESENT = "PRESENT"
+    NARROWING = "NARROWING"
+    CLOSED = "CLOSED"
+
+
+class PatternTrend(StrEnum):
+    """
+    Which way one pattern moved between two stretches of time.
+
+    FREQUENCY_INCREASING  — it fired more often than before.
+    FREQUENCY_DECREASING  — it fired less often than before.
+    AWARENESS_INCREASING  — it fires as much as it did, but the person now
+                            catches themselves doing it more often.
+    STEADY                — nothing measurable changed.
+
+    The third is the interesting one. A habit that still happens but is now
+    noticed while it happens is a real change, and counting only how often
+    it fired would call that no change at all.
+    """
+
+    FREQUENCY_INCREASING = "FREQUENCY_INCREASING"
+    FREQUENCY_DECREASING = "FREQUENCY_DECREASING"
+    AWARENESS_INCREASING = "AWARENESS_INCREASING"
+    STEADY = "STEADY"
+
+
+class PatternAgeBand(StrEnum):
+    """
+    How long a pattern has gone without being seen again.
+
+    COOLING — quiet for a while, and worth less weight than it was.
+    DORMANT — quiet for so long that nobody can tell from the record alone
+              whether it resolved or simply stopped being written down.
+    """
+
+    COOLING = "COOLING"
+    DORMANT = "DORMANT"
+
+
 class CandidateRetrievalSource(StrEnum):
     """See Schema.md DecisionAuditNode.candidate_retrieval_source."""
 
@@ -681,6 +779,12 @@ __all__ = [
     "LoopCategory",
     "LoopResolutionStatus",
     "ReportType",
+    "MacroRunStatus",
+    "NarrativeStatus",
+    "ArcDirection",
+    "GapStatus",
+    "PatternTrend",
+    "PatternAgeBand",
     "CandidateRetrievalSource",
     "StructuralAnchorType",
     "HitlEntryType",
