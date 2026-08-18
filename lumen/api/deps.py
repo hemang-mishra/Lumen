@@ -148,6 +148,21 @@ def get_memory(request: Request) -> ConversationMemory:
     return request.app.state.memory
 
 
+def get_chat_stack(request: Request):
+    """
+    The thing that holds a conversation, and the ear that listens to one.
+
+    Built on the first turn rather than at startup, because talking needs a
+    model and every other route here reads two local databases and needs
+    none. A deployment with nothing configured still starts, still serves the
+    graph, and refuses only this.
+    """
+    stack = getattr(request.app.state, "chat", None)
+    if stack is None:
+        raise Unavailable("talking", "this deployment cannot hold a conversation")
+    return stack
+
+
 def get_sessions(request: Request) -> SessionRegistry:
     """
     The live conversations this process is holding.
@@ -170,4 +185,5 @@ __all__ = [
     "get_composer",
     "get_memory",
     "get_sessions",
+    "get_chat_stack",
 ]

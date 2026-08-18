@@ -320,3 +320,73 @@ class TestEmbedding:
         provider, _ = self._provider(provider_config, error=ConnectionError("refused"))
         with pytest.raises(ProviderUnavailableError):
             provider.embed_text("hello")
+
+
+def stream_piece(text: str = "", *, done: bool = False, eval_tokens: int = 0):
+    """Build something shaped like one piece of an Ollama stream."""
+    return SimpleNamespace(
+        message=SimpleNamespace(content=text),
+        done=done,
+        done_reason="stop" if done else None,
+        prompt_eval_count=10 if done else None,
+        eval_count=eval_tokens if done else None,
+    )
+
+
+class TestStreamingAReply:
+    """
+    A local model sending its answer as it writes it.
+
+    The shape differs from a finished reply in one way that matters: the
+    token counts only arrive on the piece marked done, so reading them from
+    every piece would overwrite real numbers with nothing.
+    """
+
+    def test_the_pieces_join_up(self, provider_config):
+        pieces = [stream_piece("Hello "), stream_piece("there"), stream_piece(done=True)]
+        provider, _ = build_provider(provider_config, result=pieces)
+
+        chunks = list(provider.stream_text([ChatMessage(role="user", content="hi")]))
+
+        assert "".join(chunk.text for chunk in chunks) == "Hello there"
+
+    def test_it_asks_for_a_stream(self, provider_config):
+        provider, client = build_provider(provider_config, result=[stream_piece(done=True)])
+
+        list(provider.stream_text([ChatMessage(role="user", content="hi")]))
+
+        assert client.calls[0]["stream"] is True
+
+    def test_the_totals_come_from_the_piece_that_says_it_is_done(self, provider_config):
+        pieces = [stream_piece("Hello"), stream_piece(done=True, eval_tokens=7)]
+        provider, _ = build_provider(provider_config, result=pieces)
+
+        final = list(provider.stream_text([ChatMessage(role="user", content="hi")]))[-1]
+
+        assert final.final is True
+        assert final.usage.completion_tokens == 7
+        assert final.finish_reason == "stop"
+
+    def test_a_system_instruction_goes_in_as_the_first_message(self, provider_config):
+        """Ollama has no separate field for one, so it becomes a message."""
+        provider, client = build_provider(provider_config, result=[stream_piece(done=True)])
+
+        list(
+            provider.stream_text(
+                [ChatMessage(role="user", content="hi")],
+                system_instruction="be warm",
+            )
+        )
+
+        assert client.calls[0]["messages"][0] == {
+            "role": "system",
+            "content": "be warm",
+        }
+
+    def test_a_daemon_that_is_not_running_is_reported_properly(self, provider_config):
+        provider, _ = build_provider(
+            provider_config, error=ConnectionError("connection refused")
+        )
+
+        with pytest.raises(ProviderError):
+            list(provider.stream_text([ChatMessage(role="user", content="hi")]))

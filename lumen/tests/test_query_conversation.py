@@ -16,8 +16,8 @@ from datetime import UTC, date, datetime
 import pytest
 
 from lumen.operational import models
-from lumen.operational.enums import BufferSource
-from lumen.query.conversation import ConversationStore
+from lumen.operational.enums import BufferSource, BufferStatus
+from lumen.query.conversation import ConversationFrozen, ConversationStore
 
 TODAY = date(2026, 8, 17)
 AT = datetime(2026, 8, 17, 10, 0, tzinfo=UTC)
@@ -261,3 +261,137 @@ class TestTheSummary:
 
         assert buffer.rolling_summary is None
         assert buffer.summary_through_seq == 0
+
+
+class TestOnceADayHasBecomeHistory:
+    """
+    A day that has been through the pipeline cannot be edited.
+
+    The alternative is broken in a way nothing reports. An episode is stored
+    under the day it happened on rather than under what it says, so a re-run
+    of an edited day finds that day already saved and skips it — the
+    conversation and the graph then disagree permanently, silently.
+
+    So the refusal is the point, and so is what it offers instead: say it
+    again today. Changing your mind is something the graph already knows how
+    to record.
+    """
+
+    @pytest.fixture
+    def processed(self, store, ops_store):
+        """A conversation that has already been handed to the pipeline."""
+        buffer = store.open("tester", on=date(2026, 8, 17))
+        first = store.append(buffer.session_id, role="user", content="what I said")
+        ops_store.buffers.mark_status(buffer.session_id, BufferStatus.PROCESSED)
+        return buffer.session_id, first.message_id
+
+    def test_editing_is_refused(self, store, processed):
+        session_id, message_id = processed
+
+        with pytest.raises(ConversationFrozen):
+            store.revise(session_id, message_id=message_id, content="what I meant")
+
+    def test_the_refusal_says_what_to_do_instead(self, store, processed):
+        session_id, message_id = processed
+
+        with pytest.raises(ConversationFrozen) as caught:
+            store.revise(session_id, message_id=message_id, content="what I meant")
+
+        assert "say it again today" in caught.value.instead
+
+    def test_moving_back_to_an_earlier_branch_is_refused_too(self, store, processed):
+        # Same reason. Which branch is live decides what the pipeline reads,
+        # and it has already read one.
+        session_id, message_id = processed
+
+        with pytest.raises(ConversationFrozen):
+            store.rewind_to(session_id, message_id)
+
+    def test_it_says_it_is_no_longer_editable(self, store, processed):
+        session_id, _ = processed
+
+        assert store.is_editable(session_id) is False
+
+    def test_nothing_was_changed_by_the_attempt(self, store, processed):
+        session_id, message_id = processed
+
+        with pytest.raises(ConversationFrozen):
+            store.revise(session_id, message_id=message_id, content="what I meant")
+
+        assert [item.turn.content for item in store.thread(session_id)] == [
+            "what I said"
+        ]
+
+
+class TestWhileTheDayIsStillOpen:
+    def test_editing_works_as_it_always_did(self, store):
+        buffer = store.open("tester", on=date(2026, 8, 18))
+        first = store.append(buffer.session_id, role="user", content="what I said")
+
+        store.revise(
+            buffer.session_id, message_id=first.message_id, content="what I meant"
+        )
+
+        assert [item.turn.content for item in store.thread(buffer.session_id)] == [
+            "what I meant"
+        ]
+
+    def test_the_original_is_still_there(self, store):
+        buffer = store.open("tester", on=date(2026, 8, 18))
+        first = store.append(buffer.session_id, role="user", content="what I said")
+
+        store.revise(
+            buffer.session_id, message_id=first.message_id, content="what I meant"
+        )
+
+        held = store._buffers.get_messages(buffer.session_id)
+        assert {record.content for record in held} == {"what I said", "what I meant"}
+
+    def test_it_says_it_is_editable(self, store):
+        buffer = store.open("tester", on=date(2026, 8, 18))
+
+        assert store.is_editable(buffer.session_id) is True
+
+
+class TestRecordingHowATurnArrived:
+    def test_a_spoken_turn_is_marked_as_spoken(self, store):
+        """
+        The pipeline cleans speech differently from typing, and has never had
+        anything to read because until now nothing could speak.
+        """
+        buffer = store.open("tester", on=date(2026, 8, 18))
+        store.append(
+            buffer.session_id, role="user", content="I went for a walk", modality="VOICE"
+        )
+
+        held = store._buffers.get_messages(buffer.session_id)
+        assert held[0].modality == "VOICE"
+
+    def test_typing_is_what_happens_by_default(self, store):
+        buffer = store.open("tester", on=date(2026, 8, 18))
+        store.append(buffer.session_id, role="user", content="I went for a walk")
+
+        held = store._buffers.get_messages(buffer.session_id)
+        assert held[0].modality == "TEXT"
+
+    def test_a_rewrite_keeps_how_the_original_arrived(self, store):
+        buffer = store.open("tester", on=date(2026, 8, 18))
+        first = store.append(
+            buffer.session_id, role="user", content="spoken", modality="VOICE"
+        )
+
+        store.revise(
+            buffer.session_id, message_id=first.message_id, content="spoken again"
+        )
+
+        held = {r.content: r.modality for r in store._buffers.get_messages(buffer.session_id)}
+        assert held["spoken again"] == "VOICE"
+
+
+class TestAskingAboutAConversationThatIsNotThere:
+    def test_editing_one_says_so_plainly(self, store):
+        with pytest.raises(ValueError, match="no conversation"):
+            store.revise("sb_nothing", message_id="msg_1", content="anything")
+
+    def test_it_is_not_editable(self, store):
+        assert store.is_editable("sb_nothing") is False

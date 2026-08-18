@@ -14,11 +14,12 @@ than being spread across the code that eventually sends it.
 from __future__ import annotations
 
 import logging
-from datetime import datetime
+from datetime import UTC, datetime
 
 from lumen.config import ChatConfig
 from lumen.query.assembly import ContextAssembler
 from lumen.query.assembly.budget import estimate_tokens
+from lumen.query.memory import earlier
 from lumen.query.memory.contracts import Recollection
 from lumen.query.prompting.contracts import ChatPrompt
 from lumen.query.prompting.system import build_system_prompt
@@ -64,10 +65,22 @@ class PromptComposer:
             bundle, signal, now=now, deferred=deferred
         )
         in_crisis = signal.emotional_register is EmotionalRegister.CRISIS
+        moment = now or datetime.now(UTC)
 
+        recent_days = (
+            ""
+            if in_crisis
+            else earlier.render(
+                recollection.previous_days,
+                now=moment,
+                max_tokens=self._config.previous_day_tokens,
+                chars_per_token=self._config.chars_per_token,
+            )
+        )
         system = build_system_prompt(
             context,
             summary=None if in_crisis else recollection.summary,
+            earlier_days=recent_days,
             in_crisis=in_crisis,
         )
         prompt = ChatPrompt(

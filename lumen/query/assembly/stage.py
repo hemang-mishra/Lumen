@@ -69,6 +69,10 @@ class ContextAssembler:
         moment = now or datetime.now(UTC)
         policy = policy_for(signal.emotional_register, self._config)
         unreachable = bundle.search_failed
+        # A briefing built partly from a search that missed the last
+        # turn's deadline is slightly behind the conversation, and the
+        # block says so rather than reading as though it were current.
+        deferred = deferred or bool(bundle.carried_forward)
 
         if not policy.injects_anything:
             return self._nothing(

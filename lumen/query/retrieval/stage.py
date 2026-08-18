@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import logging
 import time
+from collections.abc import Callable
 
 from lumen.config import QueryConfig
 from lumen.graph.provider import ReadOnlyGraph
@@ -39,7 +40,7 @@ from lumen.query.retrieval.contracts import (
     RetrievedNode,
     consulted_nothing,
 )
-from lumen.query.session import ChatSession
+from lumen.query.session import ChatSession, LateArrival
 from lumen.schemas.enums import EmotionalRegister, RetrievalOutcome, RetrievalPass
 from lumen.schemas.query import RetrievalSignal
 from lumen.vector.provider import VectorProvider
@@ -97,7 +98,10 @@ class ConversationalRetriever:
             return self._nothing(signal, started, _why_nothing(signal))
 
         turn_text = _turn_text(session, signal.turn_index)
-        semantic_attempt, structural_attempt = self._run_searches(signal, turn_text)
+        carried = self._collect_carried(session, signal.turn_index)
+        semantic_attempt, structural_attempt = self._run_searches(
+            signal, turn_text, session
+        )
 
         found_a: PassAResult = (
             semantic_attempt.value
@@ -120,8 +124,12 @@ class ConversationalRetriever:
             config=self._config,
         )
 
+        # Anything carried from last turn goes through the sensitivity rules
+        # again rather than being trusted because it was fetched once. The
+        # pass it came from never finished, so it was never checked at all —
+        # and what the person has opened up may have changed since.
         allowed, withheld = gate.apply(
-            [*found_a.candidates, *found_b, *revisited],
+            [*found_a.candidates, *found_b, *revisited, *carried],
             unlocked=signal.unlocked_domains,
         )
         kept = merge.merge(
@@ -162,6 +170,7 @@ class ConversationalRetriever:
             latency_ms=_elapsed_ms(started),
             within_budget=not (semantic_attempt.timed_out or structural_attempt.timed_out),
             gated=withheld,
+            carried_forward=tuple(node.node_id for node in carried),
         )
         _log(bundle, fallback=found_a.used_fallback)
         return bundle
@@ -175,15 +184,82 @@ class ConversationalRetriever:
     # The two searches that talk to something
     # ------------------------------------------------------------------
 
+    def _collect_carried(
+        self, session: ChatSession, turn_index: int
+    ) -> list[RetrievedNode]:
+        """
+        Whatever last turn's search found after the turn had moved on.
+
+        Ranked below anything fresh, because it answers the question before
+        this one. Dropped outright once the conversation has gone further
+        than a turn past it — history about something already left behind
+        pulls the assistant backwards.
+        """
+        arrival = session.late_arrivals.collect()
+        if arrival is None:
+            return []
+
+        if arrival.is_stale(turn_index, allowed_lag=self._config.carry_forward_turns):
+            logger.info(
+                "a late search finally arrived, and the conversation had "
+                "moved too far past it to use",
+                extra={
+                    "session_id": session.session_id,
+                    "fetched_for_turn": arrival.turn_index,
+                    "now_turn": turn_index,
+                },
+            )
+            return []
+
+        carried = [
+            node.model_copy(
+                update={"rank_score": node.rank_score * self._config.deferred_penalty}
+            )
+            for node in arrival.candidates
+        ]
+        logger.info(
+            "a search from the previous turn arrived late and is being used now",
+            extra={
+                "session_id": session.session_id,
+                "fetched_for_turn": arrival.turn_index,
+                "carried": len(carried),
+            },
+        )
+        return carried
+
+    def _keep_for_next_turn(
+        self, session: ChatSession, turn_index: int
+    ) -> Callable[[str, object], None]:
+        """
+        Build the hook that catches a search finishing after its deadline.
+
+        Runs on a worker thread with nobody waiting, so it does the smallest
+        possible thing: puts the candidates in the day's one slot and stops.
+        Everything that has to be decided about them — the sensitivity rules,
+        the ranking — happens on the next turn, where the current state of the
+        conversation is known.
+        """
+
+        def keep(name: str, produced: object) -> None:
+            candidates = _candidates_of(produced)
+            if not candidates:
+                return
+            session.late_arrivals.leave(
+                LateArrival(turn_index=turn_index, candidates=candidates)
+            )
+
+        return keep
+
     def _run_searches(
-        self, signal: RetrievalSignal, turn_text: str
+        self, signal: RetrievalSignal, turn_text: str, session: ChatSession
     ) -> tuple[Attempt, Attempt]:
         """
         Run the meaning-based search and the anchor lookups side by side.
 
-        One shared deadline, because three seconds means three seconds to
-        the person waiting, not three seconds each. Whichever does not
-        finish is abandoned; the one that did still answers.
+        One shared deadline, because eight seconds means eight seconds to
+        the person waiting, not eight seconds each. Whichever does not
+        finish is abandoned — but not thrown away: it goes on running, and
+        what it eventually finds is kept for the next turn.
         """
         attempts = self._runner.run_all(
             {
@@ -203,6 +279,7 @@ class ConversationalRetriever:
                 ),
             },
             timeout_seconds=self._config.retrieval_budget_seconds,
+            on_late=self._keep_for_next_turn(session, signal.turn_index),
         )
         for attempt in attempts:
             if attempt.error is not None:
@@ -294,6 +371,20 @@ class ConversationalRetriever:
 # ---------------------------------------------------------------------------
 # Reading the turn and reporting on it
 # ---------------------------------------------------------------------------
+
+
+def _candidates_of(produced: object) -> tuple:
+    """
+    The records inside whatever a late search handed back.
+
+    The two searches return different shapes — one a result object, one a
+    plain list — and this is the only place that has to know both, because it
+    is the only place that sees a result without knowing which pass made it.
+    """
+    if isinstance(produced, list):
+        return tuple(produced)
+    candidates = getattr(produced, "candidates", None)
+    return tuple(candidates) if candidates else ()
 
 
 def _turn_text(session: ChatSession, turn_index: int) -> str:

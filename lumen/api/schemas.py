@@ -16,6 +16,8 @@ from __future__ import annotations
 
 from typing import Any, Literal
 
+from datetime import date, datetime
+
 from pydantic import BaseModel, ConfigDict, Field
 
 from lumen.graph.provider import EdgeRow, GraphSlice
@@ -852,3 +854,65 @@ __all__ = [
     "WrittenMessageView",
     "EpisodeSourceView",
 ]
+
+
+class TranscriptView(BaseModel):
+    """What a recording turned out to say."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    text: str
+    language: str | None = None
+
+
+class ChatMessageView(BaseModel):
+    """One turn of a conversation, as the outside may read it."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    message_id: str
+    role: str
+    content: str
+    timestamp: datetime
+
+
+class ChatDayView(BaseModel):
+    """
+    One day that holds a conversation.
+
+    Says whether it can still be changed, because that is the next question
+    somebody will ask and the date alone does not answer it — a day becomes
+    unchangeable when the pipeline has drawn conclusions from it, not at
+    midnight.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    session_id: str
+    event_date: date
+    message_count: int = Field(ge=0)
+    status: str
+    editable: bool
+    summary: str | None = None
+
+
+class ChatThreadView(BaseModel):
+    """One day's conversation, as the person would read it back."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    session_id: str
+    event_date: date
+    editable: bool
+    summary: str | None = None
+    messages: list[ChatMessageView] = Field(default_factory=list)
+
+
+class ReviseRequest(BaseModel):
+    """A request to say one of the earlier turns differently."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    session_id: str = Field(min_length=1)
+    content: str = Field(min_length=1)
+

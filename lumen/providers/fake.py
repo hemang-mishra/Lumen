@@ -25,9 +25,18 @@ from typing import Any
 from pydantic import BaseModel
 
 from lumen.config import ProviderConfig
-from lumen.providers.base import BaseEmbeddingProvider, BaseLLMProvider, RawResponse
-from lumen.providers.errors import FakeScriptExhaustedError
-from lumen.providers.results import ChatMessage, LLMUsage
+from lumen.providers.base import (
+    BaseEmbeddingProvider,
+    BaseLLMProvider,
+    RawChunk,
+    RawResponse,
+)
+from lumen.providers.audio import to_wav
+from lumen.providers.errors import (
+    FakeScriptExhaustedError,
+    ProviderResponseError,
+)
+from lumen.providers.results import ChatMessage, LLMUsage, Speech, Transcript
 from lumen.schemas.enums import EmbeddingTaskType, ModelRole
 
 # A script is either a list of replies to hand out in order, a lookup from
@@ -73,11 +82,26 @@ class FakeLLMProvider(BaseLLMProvider):
         model: str = "fake-model",
         role: ModelRole = ModelRole.LIGHTWEIGHT,
         config: ProviderConfig | None = None,
+        chunk_words: int = 3,
+        break_after: int | None = None,
     ) -> None:
+        """
+        Args:
+            script: What to answer with.
+            model: The name to report.
+            role: The job this stand-in is filling.
+            config: Retry and timing settings.
+            chunk_words: How many words go in each piece of a streamed reply.
+            break_after: Break the stream once this many pieces have been
+                sent, so the "it failed halfway through" path can be
+                exercised. Left unset, streams always finish.
+        """
         super().__init__(model, role, config or ProviderConfig())
         self._state = _ScriptState(script if script is not None else [])
         self.calls: list[RecordedCall] = []
         self.closed = False
+        self.chunk_words = chunk_words
+        self.break_after = break_after
 
     def _request_structured(
         self,
@@ -115,6 +139,40 @@ class FakeLLMProvider(BaseLLMProvider):
             )
         )
         return self._next_reply(prompt)
+
+    def _request_stream(
+        self,
+        *,
+        messages: list[ChatMessage],
+        system_instruction: str | None,
+        temperature: float,
+    ) -> Any:
+        """
+        Hand the scripted reply back a few words at a time.
+
+        Chopped up rather than sent whole so that everything above this goes
+        through the real streaming path. A stand-in that answered in one piece
+        would leave the piece-by-piece handling untested everywhere it is used.
+        """
+        prompt = "\n".join(f"{m.role}: {m.content}" for m in messages)
+        self.calls.append(
+            RecordedCall(
+                operation="stream_text",
+                prompt=prompt,
+                system_instruction=system_instruction,
+                temperature=temperature,
+            )
+        )
+        reply = self._next_reply(prompt)
+        if self.break_after is not None:
+            return _broken_stream(reply, self.break_after, self.chunk_words)
+        return _worded_stream(reply, self.chunk_words)
+
+    def _read_chunk(self, piece: Any) -> RawChunk:
+        """Each piece is already text, and the last one carries the totals."""
+        if isinstance(piece, RawChunk):
+            return piece
+        return RawChunk(text=str(piece))
 
     def _read_response(self, reply: Any) -> RawResponse:
         """The scripted reply is already just text."""
@@ -270,3 +328,124 @@ __all__ = [
     "Script",
     "fake_scripts",
 ]
+
+
+def _worded_stream(reply: str, chunk_words: int) -> Any:
+    """A finished reply, handed out a few words at a time."""
+    words = reply.split(" ")
+    step = max(int(chunk_words), 1)
+    pieces = [" ".join(words[at : at + step]) for at in range(0, len(words), step)]
+    for position, piece in enumerate(pieces):
+        text = piece if position == len(pieces) - 1 else f"{piece} "
+        yield RawChunk(text=text)
+    yield RawChunk(
+        usage=LLMUsage(
+            prompt_tokens=0,
+            completion_tokens=len(words),
+            total_tokens=len(words),
+        ),
+        finish_reason="STOP",
+    )
+
+
+def _broken_stream(reply: str, break_after: int, chunk_words: int) -> Any:
+    """A reply that stops partway through, the way a dropped connection does."""
+    for position, piece in enumerate(_worded_stream(reply, chunk_words)):
+        if position >= break_after:
+            raise ConnectionError("the connection dropped mid-reply")
+        yield piece
+
+
+class FakeTranscriptionProvider:
+    """
+    Speech to text that answers from a script.
+
+    Ships here for the same reason the other stand-ins do: voice is the one
+    job with no local option at all, so without this nothing about the spoken
+    path could be exercised on a machine with no credential.
+    """
+
+    provider_name = "fake"
+
+    def __init__(
+        self,
+        script: Sequence[str] | None = None,
+        *,
+        model: str = "fake-ears",
+    ) -> None:
+        self.model_name = model
+        self.model_role = ModelRole.TRANSCRIPTION
+        self._state = _ScriptState(list(script) if script else [])
+        self.heard: list[tuple[int, str]] = []
+        self.closed = False
+
+    def transcribe(self, audio: bytes, *, mime_type: str) -> Transcript:
+        """Hand back the next scripted line, noting what it was given."""
+        if not audio:
+            raise ProviderResponseError(
+                "there is no audio to listen to",
+                provider=self.provider_name,
+                model=self.model_name,
+                role=self.model_role,
+            )
+        self.heard.append((len(audio), mime_type))
+
+        script = self._state.script
+        if self._state.position >= len(script):
+            raise FakeScriptExhaustedError(
+                f"the script has {len(script)} lines and all of them have been used",
+                provider=self.provider_name,
+                model=self.model_name,
+                role=self.model_role,
+            )
+        said = script[self._state.position]
+        self._state.position += 1
+        return Transcript(
+            text=said, provider=self.provider_name, model=self.model_name
+        )
+
+    def close(self) -> None:
+        """Note that it was closed, so a test can check that it happens."""
+        self.closed = True
+
+
+class FakeSpeechProvider:
+    """
+    Text to speech that makes a silent recording of about the right length.
+
+    Real audio is not the point. What everything above this needs to know is
+    that bytes came back, that they say what format they are, and that the
+    length tracks the text — which is enough to check the plumbing without
+    listening to anything.
+    """
+
+    provider_name = "fake"
+
+    def __init__(self, *, model: str = "fake-voice") -> None:
+        self.model_name = model
+        self.model_role = ModelRole.TTS
+        self.spoken: list[str] = []
+        self.closed = False
+
+    def synthesize(self, text: str) -> Speech:
+        """Return silence roughly as long as the text would take to say."""
+        said = text.strip()
+        if not said:
+            raise ProviderResponseError(
+                "there is nothing to say",
+                provider=self.provider_name,
+                model=self.model_name,
+                role=self.model_role,
+            )
+        self.spoken.append(said)
+        return Speech(
+            audio=to_wav(b"\x00\x00" * len(said)),
+            mime_type="audio/wav",
+            provider=self.provider_name,
+            model=self.model_name,
+        )
+
+    def close(self) -> None:
+        """Note that it was closed, so a test can check that it happens."""
+        self.closed = True
+

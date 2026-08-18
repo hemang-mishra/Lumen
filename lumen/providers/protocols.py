@@ -13,11 +13,19 @@ hold a conversation.
 
 from __future__ import annotations
 
+from collections.abc import Iterator
 from typing import Protocol, runtime_checkable
 
 from pydantic import BaseModel
 
-from lumen.providers.results import ChatMessage, LLMResult, StructuredResult
+from lumen.providers.results import (
+    ChatMessage,
+    LLMResult,
+    Speech,
+    StructuredResult,
+    TextChunk,
+    Transcript,
+)
 from lumen.schemas.enums import EmbeddingTaskType, ModelRole
 
 
@@ -68,6 +76,37 @@ class LLMProvider(Protocol):
 
 
 @runtime_checkable
+class StreamingLLMProvider(LLMProvider, Protocol):
+    """
+    A text model that can send its reply as it writes it.
+
+    Kept separate from the plain text interface so that something which only
+    needs a finished answer is not made to care about streaming. Only the
+    live conversation reads a reply piece by piece; every other caller in
+    Lumen wants the whole thing and would gain nothing from this.
+    """
+
+    def stream_text(
+        self,
+        messages: list[ChatMessage],
+        *,
+        system_instruction: str | None = None,
+        temperature: float | None = None,
+    ) -> Iterator[TextChunk]:
+        """
+        Hold a conversation and hand back the reply in pieces.
+
+        The pieces arrive in order and joining their text gives the whole
+        reply. The last piece is marked `final` and carries the token counts
+        and timings instead of more words.
+
+        A break partway through raises StreamInterrupted rather than being
+        retried, because the person has already read what came before it.
+        """
+        ...
+
+
+@runtime_checkable
 class EmbeddingProvider(Protocol):
     """Something that turns text into vectors."""
 
@@ -104,33 +143,53 @@ class EmbeddingProvider(Protocol):
         ...
 
 
+@runtime_checkable
 class AudioTranscriptionProvider(Protocol):
     """
     Something that turns recorded speech into text.
 
-    Declared now so the shape is agreed, but nothing implements it yet — the
-    pipeline works on text, and there is no voice input to convert.
+    Takes the audio itself rather than a path to it. Recordings arrive from a
+    browser as bytes, and writing them to disk only to read them straight
+    back would put somebody's voice on the filesystem for no reason at all.
     """
 
-    def transcribe(self, audio_file_path: str) -> str:
-        """Read an audio file and return what was said."""
+    provider_name: str
+    model_name: str
+
+    def transcribe(self, audio: bytes, *, mime_type: str) -> Transcript:
+        """Listen to a recording and return what was said."""
+        ...
+
+    def close(self) -> None:
+        """Release the network connection, if this provider holds one."""
         ...
 
 
+@runtime_checkable
 class TTSProvider(Protocol):
     """
     Something that turns text into spoken audio.
 
-    Declared now, implemented later, for the same reason as transcription.
+    Hands back the audio rather than a path, for the same reason as
+    transcription: the caller is usually about to send it somewhere, and a
+    temporary file in between helps nobody.
     """
 
-    def synthesize(self, text: str, output_path: str) -> str:
-        """Speak the text into an audio file and return where it was written."""
+    provider_name: str
+    model_name: str
+
+    def synthesize(self, text: str) -> Speech:
+        """Say the text out loud and return the recording."""
+        ...
+
+    def close(self) -> None:
+        """Release the network connection, if this provider holds one."""
         ...
 
 
 __all__ = [
     "LLMProvider",
+    "StreamingLLMProvider",
     "EmbeddingProvider",
     "AudioTranscriptionProvider",
     "TTSProvider",

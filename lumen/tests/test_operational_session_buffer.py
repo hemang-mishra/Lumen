@@ -293,3 +293,17 @@ class TestBuildDecayEvent:
 
         event = ops_store.buffers.build_decay_event(buffer.session_id)
         assert event.source_modality == SourceModality.TEXT_ENTRY
+
+
+class TestAskingForNoEarlierDays:
+    def test_asking_for_none_reads_nothing_at_all(self, ops_store):
+        """
+        A ceiling of zero means no earlier days, not "all of them". Slicing
+        would quietly turn one into the other.
+        """
+        from datetime import date
+
+        assert (
+            ops_store.buffers.recent_buffers("tester", before=date(2026, 8, 18), limit=0)
+            == []
+        )

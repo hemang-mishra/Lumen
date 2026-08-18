@@ -147,3 +147,68 @@ class TestTracing:
             "trace-parallel",
             "trace-parallel",
         ]
+
+
+class TestHandingOnALateAnswer:
+    """
+    A piece that missed its deadline goes on running and eventually finishes.
+    Its answer is handed to whoever wanted it rather than thrown away.
+    """
+
+    def test_a_late_answer_reaches_the_one_waiting_for_it(self):
+        import time
+
+        runner = DeadlineRunner(max_workers=2, name="test-late")
+        landed = []
+
+        def slow():
+            time.sleep(0.2)
+            return "eventually"
+
+        runner.run_all({"slow": slow}, timeout_seconds=0.0,
+                       on_late=lambda name, value: landed.append((name, value)))
+
+        for _ in range(50):
+            if landed:
+                break
+            time.sleep(0.02)
+        runner.close()
+
+        assert landed == [("slow", "eventually")]
+
+    def test_one_that_failed_is_not_handed_on(self):
+        import time
+
+        runner = DeadlineRunner(max_workers=2, name="test-late")
+        landed = []
+
+        def slow_and_broken():
+            time.sleep(0.1)
+            raise RuntimeError("no")
+
+        runner.run_all({"slow": slow_and_broken}, timeout_seconds=0.0,
+                       on_late=lambda name, value: landed.append(name))
+        time.sleep(0.3)
+        runner.close()
+
+        assert landed == []
+
+    def test_a_receiver_that_breaks_does_not_take_the_thread_with_it(self):
+        """
+        This runs on a worker with nobody waiting, so an error would have
+        nowhere to go. Saying so in a log beats letting it disappear.
+        """
+        import time
+
+        runner = DeadlineRunner(max_workers=2, name="test-late")
+
+        def slow():
+            time.sleep(0.1)
+            return "eventually"
+
+        def broken(name, value):
+            raise RuntimeError("cannot take it")
+
+        runner.run_all({"slow": slow}, timeout_seconds=0.0, on_late=broken)
+        time.sleep(0.3)
+        runner.close()

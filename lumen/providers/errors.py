@@ -144,6 +144,25 @@ class ProviderContentBlockedError(ProviderResponseError):
         return details
 
 
+class StreamInterrupted(ProviderError):
+    """
+    A reply broke partway through, after some of it had already been sent.
+
+    This is its own kind of failure because it cannot be retried. Every other
+    model call in Lumen quietly tries again when it fails, and that works
+    because nobody has seen the failed attempt. Here the person is already
+    reading the words, and starting a second reply underneath the first one
+    would be worse than stopping.
+
+    What was said before the break is carried on the error, so the caller can
+    keep it rather than losing a reply that was most of the way there.
+    """
+
+    def __init__(self, message: str, *, said: str = "", **kwargs: Any) -> None:
+        super().__init__(message, **kwargs)
+        self.said = said
+
+
 class FakeScriptExhaustedError(ProviderError):
     """
     A scripted test provider was asked for a response it does not have.
@@ -162,5 +181,6 @@ __all__ = [
     "ProviderConfigurationError",
     "ProviderResponseError",
     "ProviderContentBlockedError",
+    "StreamInterrupted",
     "FakeScriptExhaustedError",
 ]

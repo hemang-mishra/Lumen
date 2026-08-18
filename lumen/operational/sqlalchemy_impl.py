@@ -18,7 +18,7 @@ import threading
 import uuid
 from collections.abc import Generator
 from contextlib import contextmanager
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from typing import Any
 
 from sqlalchemy import Engine, delete, func, select
@@ -299,6 +299,7 @@ class SqlAlchemySessionBufferRepository:
             event_date=message.event_date,
             dialogue_act=message.dialogue_act.value if message.dialogue_act else None,
             co_created_marker=message.co_created_marker,
+            modality=message.modality,
         )
         db.add(row)
         buffer.message_count += 1
@@ -317,6 +318,35 @@ class SqlAlchemySessionBufferRepository:
                 )
             buffer.active_message_id = message_id
             db.flush()
+
+    def recent_buffers(
+        self,
+        user_id: str,
+        *,
+        before: date,
+        limit: int,
+        session_label: str = "",
+        lookback_days: int = 14,
+    ) -> list[SessionBufferRecord]:
+        wanted = max(int(limit), 0)
+        if wanted == 0:
+            return []
+
+        earliest = before - timedelta(days=max(int(lookback_days), 0))
+        with self._sessions.session() as db:
+            rows = db.scalars(
+                select(models.SessionBuffer)
+                .where(
+                    models.SessionBuffer.user_id == user_id,
+                    models.SessionBuffer.session_label == session_label,
+                    models.SessionBuffer.event_date < before,
+                    models.SessionBuffer.event_date >= earliest,
+                    models.SessionBuffer.message_count > 0,
+                )
+                .order_by(models.SessionBuffer.event_date.desc())
+                .limit(wanted)
+            )
+            return [_to_buffer_record(row) for row in rows]
 
     def save_summary(self, session_id: str, summary: str, through_seq: int) -> None:
         with self._sessions.session() as db:
@@ -1218,6 +1248,7 @@ def _to_message_record(row: models.BufferMessage) -> BufferMessageRecord:
         dialogue_act=row.dialogue_act,
         co_created_marker=row.co_created_marker,
         parent_message_id=row.parent_message_id,
+        modality=row.modality or "TEXT",
     )
 
 

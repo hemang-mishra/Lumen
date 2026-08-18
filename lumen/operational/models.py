@@ -163,6 +163,13 @@ class BufferMessage(Base):
 
     role: Mapped[str] = mapped_column(String(8), nullable=False)
     content: Mapped[str] = mapped_column(Text, nullable=False)
+
+    # Whether this turn was spoken or typed. Kept per message because a day
+    # where somebody did both is normal, and the extraction pipeline cleans
+    # the two differently.
+    modality: Mapped[str] = mapped_column(
+        String(16), nullable=False, server_default="TEXT", default="TEXT"
+    )
     timestamp: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     event_date: Mapped[date] = mapped_column(Date, nullable=False)
 

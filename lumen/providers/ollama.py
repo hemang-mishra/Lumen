@@ -20,6 +20,7 @@ from lumen.config import ProviderConfig
 from lumen.providers.base import (
     BaseEmbeddingProvider,
     BaseLLMProvider,
+    RawChunk,
     RawResponse,
     normalise_model_name,
     resolve_dimensions,
@@ -212,6 +213,45 @@ class OllamaLLMProvider(BaseLLMProvider):
             raise _map_error(
                 exc, model=self.model_name, role=self.model_role, host=self._host
             ) from exc
+
+    def _request_stream(
+        self,
+        *,
+        messages: list[ChatMessage],
+        system_instruction: str | None,
+        temperature: float,
+    ) -> Any:
+        """Send a conversation and get the reply back as it is written."""
+        payload = []
+        if system_instruction:
+            payload.append({"role": "system", "content": system_instruction})
+        payload.extend({"role": m.role, "content": m.content} for m in messages)
+
+        try:
+            return self._client.chat(
+                model=self.model_name,
+                messages=payload,
+                options={"temperature": temperature},
+                stream=True,
+            )
+        except BaseException as exc:
+            raise _map_error(
+                exc, model=self.model_name, role=self.model_role, host=self._host
+            ) from exc
+
+    def _read_chunk(self, piece: Any) -> RawChunk:
+        """
+        Take the text out of one piece of the stream.
+
+        The totals only arrive on the piece marked done, so they are read
+        from that one and ignored everywhere else.
+        """
+        done = bool(_read(piece, "done"))
+        return RawChunk(
+            text=_message_content(piece) or "",
+            usage=_usage(piece) if done else None,
+            finish_reason=_read(piece, "done_reason") if done else None,
+        )
 
     def _read_response(self, reply: Any) -> RawResponse:
         """

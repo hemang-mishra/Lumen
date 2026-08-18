@@ -337,6 +337,14 @@ class QueryConfig:
     # a policy number, not a measurement — a record found because a name
     # matched has no similarity score, and never gets given one.
     anchor_base_score: float = _env_float("LUMEN_ANCHOR_BASE_SCORE", 0.6)
+
+    # What happens to a search that missed its deadline and finished anyway.
+    # It cannot be stopped, so its answer is either kept for the next turn or
+    # thrown away — and the next turn is the only one where it is still about
+    # roughly what is being talked about. Ranked below anything fresh,
+    # because it answers the question before this one.
+    carry_forward_turns: int = _env_int("LUMEN_CARRY_FORWARD_TURNS", 1)
+    deferred_penalty: float = _env_float("LUMEN_DEFERRED_PENALTY", 0.9)
     retrieval_max_workers: int = _env_int("LUMEN_RETRIEVAL_MAX_WORKERS", 4)
 
 
@@ -361,6 +369,11 @@ class ChatConfig:
       LUMEN_CHAT_RECENT_TURNS           — turns kept word for word
       LUMEN_CHAT_SUMMARY_EVERY          — turns between summary refreshes
       LUMEN_CHAT_SUMMARY_WORDS          — how long the summary may run
+      LUMEN_CHAT_PREVIOUS_DAYS          — earlier days carried into today
+      LUMEN_CHAT_PREVIOUS_DAY_LOOKBACK  — how far back to reach to find them
+      LUMEN_CHAT_PREVIOUS_DAY_TOKENS    — the allowance those days share
+      LUMEN_VOICE_ENABLED               — whether replies are spoken
+      LUMEN_MAX_AUDIO_BYTES             — the largest recording accepted
 
     There is no crisis setting, and that is deliberate. Nothing is injected
     when somebody is in acute distress, and making that a number somebody
@@ -390,6 +403,21 @@ class ChatConfig:
     recent_turns: int = _env_int("LUMEN_CHAT_RECENT_TURNS", 12)
     summary_every: int = _env_int("LUMEN_CHAT_SUMMARY_EVERY", 8)
     summary_words: int = _env_int("LUMEN_CHAT_SUMMARY_WORDS", 200)
+
+    # How much of the last few days today's conversation opens with. Life
+    # runs on longer than one night, and a thread dropped on Monday is often
+    # picked up on Thursday — so this counts days that hold a conversation
+    # rather than squares on the calendar, and reaches back a fortnight to
+    # find them. Free: every day already writes a summary of itself.
+    # Whether replies are spoken. Off by default because it needs a model
+    # that many deployments will not have configured, and a chat that refuses
+    # to start over a missing voice would be a poor trade.
+    voice_enabled: bool = _env_bool("LUMEN_VOICE_ENABLED", False)
+    max_audio_bytes: int = _env_int("LUMEN_MAX_AUDIO_BYTES", 25 * 1024 * 1024)
+
+    previous_days: int = _env_int("LUMEN_CHAT_PREVIOUS_DAYS", 3)
+    previous_day_lookback: int = _env_int("LUMEN_CHAT_PREVIOUS_DAY_LOOKBACK", 14)
+    previous_day_tokens: int = _env_int("LUMEN_CHAT_PREVIOUS_DAY_TOKENS", 700)
 
 
 @dataclass(frozen=True)
@@ -455,14 +483,21 @@ class ProviderConfig:
     thinking_provider: str = _env("LUMEN_THINKING_PROVIDER", "gemini")
     thinking_model: str = _env("LUMEN_THINKING_MODEL", "gemini-2.5-pro")
 
+    # The model that talks to the person. Configured on its own because
+    # writing a warm reply in under a second and doing the overnight
+    # extraction reasoning are different jobs with different needs — tying
+    # them together means every improvement to one hurts the other.
+    conversation_provider: str = _env("LUMEN_CONVERSATION_PROVIDER", "gemini")
+    conversation_model: str = _env("LUMEN_CONVERSATION_MODEL", "gemini-2.5-flash")
+
     embedding_provider: str = _env("LUMEN_EMBEDDING_PROVIDER", "gemini")
     embedding_model: str = _env("LUMEN_EMBEDDING_MODEL", "text-embedding-004")
 
-    transcription_provider: str = _env("LUMEN_TRANSCRIPTION_PROVIDER", "whisper_cpp")
-    transcription_model: str = _env("LUMEN_TRANSCRIPTION_MODEL", "base.en")
+    transcription_provider: str = _env("LUMEN_TRANSCRIPTION_PROVIDER", "gemini")
+    transcription_model: str = _env("LUMEN_TRANSCRIPTION_MODEL", "gemini-2.5-flash")
 
-    tts_provider: str = _env("LUMEN_TTS_PROVIDER", "macos")
-    tts_model: str = _env("LUMEN_TTS_MODEL", "default")
+    tts_provider: str = _env("LUMEN_TTS_PROVIDER", "gemini")
+    tts_model: str = _env("LUMEN_TTS_MODEL", "gemini-2.5-flash-preview-tts")
 
     # Where a local Ollama daemon is listening.
     ollama_host: str = _env("LUMEN_OLLAMA_HOST", "http://localhost:11434")
@@ -514,6 +549,10 @@ class ProviderConfig:
         mapping: dict[ModelRole, tuple[str, str]] = {
             ModelRole.LIGHTWEIGHT: (self.lightweight_provider, self.lightweight_model),
             ModelRole.THINKING: (self.thinking_provider, self.thinking_model),
+            ModelRole.CONVERSATION: (
+                self.conversation_provider,
+                self.conversation_model,
+            ),
             ModelRole.EMBEDDING: (self.embedding_provider, self.embedding_model),
             ModelRole.TRANSCRIPTION: (self.transcription_provider, self.transcription_model),
             ModelRole.TTS: (self.tts_provider, self.tts_model),

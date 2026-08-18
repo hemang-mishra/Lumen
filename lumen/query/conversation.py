@@ -20,7 +20,7 @@ import uuid
 from dataclasses import dataclass
 from datetime import UTC, date, datetime
 
-from lumen.operational.enums import BufferSource
+from lumen.operational.enums import BufferSource, BufferStatus
 from lumen.operational.repositories import SessionBufferRepository
 from lumen.operational.schemas import BufferMessageRecord, SessionBufferRecord
 from lumen.schemas.query import ChatTurn
@@ -32,6 +32,41 @@ logger = logging.getLogger(__name__)
 # and renaming a stored value is a migration for no gain.
 STORED_ROLE = {"user": "USER", "assistant": "AI"}
 LIVE_ROLE = {"USER": "user", "AI": "assistant"}
+
+# While a conversation is still being collected it can be rewritten freely.
+# Once it has been handed to the extraction pipeline it has become history,
+# and history is not edited.
+EDITABLE_STATUSES = frozenset({BufferStatus.OPEN})
+
+
+class ConversationFrozen(Exception):
+    """
+    An edit arrived for a day that has already become history.
+
+    Worth its own error rather than a plain refusal, because the honest
+    answer includes what to do instead. An episode is stored under the day it
+    happened on, not under what it says, so re-running an edited day finds
+    that day already saved and skips it — the conversation and the graph
+    would disagree from then on with nothing anywhere reporting it.
+
+    What the person actually wants is almost always available: say it again
+    today. The correction becomes a new entry, and changing your mind is
+    something the graph already knows how to record.
+
+    Attributes:
+        session_id: The conversation that is closed.
+        status: How far along it is.
+        instead: The thing to do instead, in plain words.
+    """
+
+    def __init__(self, session_id: str, status: BufferStatus) -> None:
+        super().__init__(
+            f"the conversation on {session_id!r} has already been processed "
+            f"({status.value}) and cannot be changed"
+        )
+        self.session_id = session_id
+        self.status = status
+        self.instead = "say it again today, as a new message"
 
 
 @dataclass(frozen=True)
@@ -94,6 +129,30 @@ class ConversationStore:
         """One conversation's own record, or nothing if there is no such one."""
         return self._buffers.get_buffer(session_id)
 
+    def days_before(
+        self,
+        user_id: str,
+        *,
+        on: date,
+        limit: int,
+        label: str = "",
+        lookback_days: int = 14,
+    ) -> list[SessionBufferRecord]:
+        """
+        The last few days this person actually talked, before a given day.
+
+        Days with nothing in them are skipped, so somebody who writes twice a
+        week still gets the last few conversations rather than a run of
+        blanks.
+        """
+        return self._buffers.recent_buffers(
+            user_id,
+            before=on,
+            limit=limit,
+            session_label=label,
+            lookback_days=lookback_days,
+        )
+
     # ------------------------------------------------------------------
     # Saying things
     # ------------------------------------------------------------------
@@ -106,6 +165,7 @@ class ConversationStore:
         content: str,
         at: datetime | None = None,
         event_date: date | None = None,
+        modality: str = "TEXT",
     ) -> StoredTurn:
         """
         Add a turn to the end of the conversation as it currently reads.
@@ -113,9 +173,18 @@ class ConversationStore:
         The reply link is filled in by the store from wherever the
         conversation currently ends, so ordinary talking needs to know
         nothing about branches.
+
+        Whether it was spoken or typed is recorded, because the extraction
+        pipeline cleans the two differently and a spoken turn is full of
+        things nobody would ever write down.
         """
         return self._write(
-            session_id, role=role, content=content, at=at, event_date=event_date
+            session_id,
+            role=role,
+            content=content,
+            at=at,
+            event_date=event_date,
+            modality=modality,
         )
 
     def revise(
@@ -135,6 +204,8 @@ class ConversationStore:
         longer the thread being read — nothing anybody said is destroyed,
         which is the same rule the graph lives by.
         """
+        self._require_open(session_id)
+
         original = self._find(session_id, message_id)
         if original is None:
             raise ValueError(
@@ -149,6 +220,7 @@ class ConversationStore:
             event_date=original.event_date,
             parent=original.parent_message_id,
             explicit_parent=True,
+            modality=original.modality,
         )
         logger.info(
             "a turn was said differently, and the conversation reads from the new one",
@@ -162,7 +234,21 @@ class ConversationStore:
 
     def rewind_to(self, session_id: str, message_id: str) -> None:
         """Read from a branch that had been left behind."""
+        self._require_open(session_id)
         self._buffers.set_active(session_id, message_id)
+
+    def is_editable(self, session_id: str) -> bool:
+        """Whether this conversation is still open to being changed."""
+        buffer = self._buffers.get_buffer(session_id)
+        return buffer is not None and buffer.status in EDITABLE_STATUSES
+
+    def _require_open(self, session_id: str) -> None:
+        """Refuse to change a day that has already become history."""
+        buffer = self._buffers.get_buffer(session_id)
+        if buffer is None:
+            raise ValueError(f"no conversation {session_id!r}")
+        if buffer.status not in EDITABLE_STATUSES:
+            raise ConversationFrozen(session_id, buffer.status)
 
     # ------------------------------------------------------------------
     # Reading it back
@@ -203,6 +289,7 @@ class ConversationStore:
         event_date: date | None,
         parent: str | None = None,
         explicit_parent: bool = False,
+        modality: str = "TEXT",
     ) -> StoredTurn:
         """Store one message, wherever in the conversation it belongs."""
         buffer = self._buffers.get_buffer(session_id)
@@ -221,6 +308,7 @@ class ConversationStore:
             timestamp=moment,
             event_date=event_date or buffer.event_date,
             parent_message_id=parent,
+            modality=modality,
         )
 
         if explicit_parent:
@@ -273,4 +361,11 @@ def _as_turn(record: BufferMessageRecord, index: int) -> ChatTurn:
     )
 
 
-__all__ = ["ConversationStore", "StoredTurn", "STORED_ROLE", "LIVE_ROLE"]
+__all__ = [
+    "ConversationStore",
+    "ConversationFrozen",
+    "StoredTurn",
+    "STORED_ROLE",
+    "LIVE_ROLE",
+    "EDITABLE_STATUSES",
+]

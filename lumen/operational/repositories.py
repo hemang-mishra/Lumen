@@ -145,6 +145,28 @@ class SessionBufferRepository(Protocol):
         """
         ...
 
+    def recent_buffers(
+        self,
+        user_id: str,
+        *,
+        before: date,
+        limit: int,
+        session_label: str = "",
+        lookback_days: int = 14,
+    ) -> list[SessionBufferRecord]:
+        """
+        This person's last few conversations before a given day, newest first.
+
+        "The last three days" means the last three days that hold a
+        conversation, not the last three squares on the calendar — somebody
+        who writes twice a week would otherwise get nothing. The lookback is
+        how far back it is willing to reach to find them.
+
+        Days with nothing in them are left out, so an empty one does not take
+        a slot from a day that has something to say.
+        """
+        ...
+
     def save_summary(self, session_id: str, summary: str, through_seq: int) -> None:
         """
         Record what this conversation has been about so far.

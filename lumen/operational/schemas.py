@@ -68,6 +68,11 @@ class BufferMessageRecord(OperationalRecord):
     co_created_marker: bool = False
     parent_message_id: str | None = None
 
+    # Whether this turn was spoken or typed. The extraction pipeline cleans
+    # the two differently, and until something could speak there was nothing
+    # to record — so anything without it counts as typed.
+    modality: str = Field(default="TEXT", pattern="^(TEXT|VOICE)$")
+
 
 class SessionBufferRecord(OperationalRecord):
     """

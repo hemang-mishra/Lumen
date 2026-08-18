@@ -442,6 +442,104 @@ Carried-forward context is tagged `retrieval_source: DEFERRED` so the AI knows i
 
 ---
 
+## Holding the Conversation
+
+### The reply is streamed, and a streamed reply cannot be retried
+
+The assistant's reply is sent as it is written. A considered answer takes several
+seconds to produce, and the difference between watching it appear and waiting in silence
+is the difference between a pause that reads as thought and one that reads as lag.
+
+The model providers gained a `stream_text` capability for this, kept as a separate
+`StreamingLLMProvider` interface so that something which only needs a finished answer is
+not made to care about streaming.
+
+**A break partway through cannot be retried.** Every other model call in Lumen quietly
+tries again on failure, which is safe because nobody has seen the failed attempt. Once
+words are on somebody's screen they cannot be taken back, so a break ends the reply,
+reports what had already been said, and stores it — the person read those words, and a
+stored conversation that disagrees with the screen would have the next turn answered
+against a history missing half of it. A failure *before* any words is an ordinary failed
+call, because nothing reached anybody.
+
+### The reply model is configured on its own
+
+`ModelRole.CONVERSATION` joins the four existing roles (`LUMEN_CONVERSATION_PROVIDER` /
+`LUMEN_CONVERSATION_MODEL`). Writing a warm reply in under a second and doing the
+overnight extraction reasoning are different jobs with different needs; tying them
+together would mean every improvement to one is a regression to the other.
+
+### Continuity across days
+
+Today's conversation opens with what the last few days were about
+(`LUMEN_CHAT_PREVIOUS_DAYS`, default 3). Every day already writes a rolling summary of
+itself, so this costs a handful of row reads and no model call.
+
+**It counts days that hold a conversation, not squares on the calendar** — reaching back
+up to `LUMEN_CHAT_PREVIOUS_DAY_LOOKBACK` days (default 14). Somebody who writes twice a
+week would otherwise get nothing, which is the exact case the continuity is for. The days
+share one allowance (`LUMEN_CHAT_PREVIOUS_DAY_TOKENS`) and the oldest is dropped first.
+
+Crossing midnight forces one summary of the day that just ended, because a short
+conversation never accumulates enough turns to trigger one on the usual cadence — without
+it the continuity would work only for the days somebody talked a lot, which is backwards.
+
+**This does not weaken the day boundary.** The day still decides what gets extracted and
+what gets locked away again; what crosses is reading material for the assistant. The
+retrieval side's working set — the handful of records already surfaced today — still
+resets at midnight, because carrying it would narrow what the person can be reminded of
+tomorrow.
+
+A day's summary carries over even when the day was a hard one. The midnight re-lock still
+protects the heaviest *stored records*; a summary of a conversation the person themselves
+had is their own words about their own day.
+
+### A day is frozen once it has become history
+
+Editing works normally while a conversation is `OPEN`. Once it has been handed to the
+extraction pipeline it is refused, and the refusal says what to do instead: **say it again
+today.** The correction becomes a new entry, and changing your mind is something the graph
+has known how to record since reconciliation shipped.
+
+The reason is that the alternative is silently broken. An episode is stored under the day
+it happened on rather than under what it says, so a re-run of an edited day finds that
+identifier already present and skips the whole episode without a word — the conversation
+and the graph would then disagree permanently with nothing reporting it. A second guard
+covers the other roads to the same state: when the pipeline skips an already-saved
+episode it now compares the stored `raw_text_hash` against the incoming text and warns
+when they differ.
+
+### The late lookup is carried into the next turn
+
+On the rare turn where retrieval runs past its budget, that turn is answered with no
+history. The search cannot be stopped, so it is caught when it lands and held in a
+one-slot mailbox on the day's session. The next turn opens with it, ranked at
+`LUMEN_DEFERRED_PENALTY` (0.9) of a fresh result and marked as slightly behind the
+conversation.
+
+Two things make that honest. A carried result is **re-checked against the sensitivity
+gate**, not merely re-ranked — the pass it came from never finished, so it was never
+gated at all, and what the person has opened up may have changed. And it is carried at
+most `LUMEN_CARRY_FORWARD_TURNS` (1) turns: history about a question already left behind
+pulls the conversation backwards.
+
+### Voice
+
+Speaking and listening both go through the models rather than through files: a recording
+arrives as bytes and goes straight to a model, so a temporary file in between would put
+somebody's voice on the filesystem for no reason. A spoken turn is stored with
+`modality: VOICE`, which is what finally gives the pipeline's transcript cleaning
+something to read.
+
+The reply is spoken **once it is finished**, not sentence by sentence as it streams. One
+request per reply, and no sentence-boundary detection on a live stream.
+
+**Speech to text has no local option.** Every other job in Lumen can be pointed at a model
+running on your own machine; the local runtime does not do speech at all. A deployment
+that requires fully local processing has no voice input, and the error says so.
+
+---
+
 ## Session Lifecycle
 
 ### Conversations are stored, and editing branches

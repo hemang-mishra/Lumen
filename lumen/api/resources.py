@@ -132,3 +132,129 @@ class LazySearchStack:
 
 
 __all__ = ["LazySearchStack"]
+
+
+class LazyChatStack:
+    """
+    Builds the thing that holds a conversation, the first time one is held.
+
+    Built late for the same reason the search is: it needs models, and every
+    other route in this service reads two local databases and needs none. A
+    deployment with nothing configured still starts and still serves the
+    graph — only talking is refused, and it says why.
+
+    The voice is separate again inside this. Speech is the one job with no
+    local option at all, so a deployment can perfectly well have a chat model
+    and no voice, and that has to be an ordinary state rather than a failure.
+    """
+
+    def __init__(
+        self,
+        *,
+        config: AppConfig,
+        search: LazySearchStack,
+        formulator,
+        composer,
+        memory,
+        sessions,
+    ) -> None:
+        self._config = config
+        self._search = search
+        self._formulator = formulator
+        self._composer = composer
+        self._memory = memory
+        self._sessions = sessions
+        self._lock = threading.Lock()
+        self._engine = None
+        self._llm = None
+        self._speech = None
+        self._listener = None
+
+    def engine(self):
+        """
+        The chat engine, built if this is the first time.
+
+        Raises:
+            ProviderError: No conversation model is configured. Left to
+                propagate — a chat with nothing to answer with is a refusal,
+                not a silence.
+        """
+        from lumen.query.chat import ChatEngine
+
+        with self._lock:
+            if self._engine is None:
+                self._engine = ChatEngine(
+                    formulator=self._formulator,
+                    retriever=self._search.get(),
+                    composer=self._composer,
+                    memory=self._memory,
+                    sessions=self._sessions,
+                    llm=self._reply_model(),
+                    speech=self._voice(),
+                    config=self._config.chat,
+                )
+            return self._engine
+
+    def listener(self):
+        """
+        The thing that turns a recording into words.
+
+        Built on its own so that a deployment with no speech model still
+        chats normally — asking for this is the only thing that fails.
+        """
+        from lumen.providers.factory import get_transcription_provider
+
+        with self._lock:
+            if self._listener is None:
+                self._listener = get_transcription_provider(self._config)
+            return self._listener
+
+    def close(self) -> None:
+        """Release the models this opened, leaving borrowed ones alone."""
+        for held in (self._llm, self._speech, self._listener):
+            if held is not None:
+                _quietly_close(held)
+        self._engine = None
+        self._llm = self._speech = self._listener = None
+
+    def _reply_model(self):
+        """The model that writes the replies."""
+        from lumen.providers.factory import get_llm_provider
+        from lumen.schemas.enums import ModelRole
+
+        if self._llm is None:
+            self._llm = get_llm_provider(ModelRole.CONVERSATION, self._config)
+        return self._llm
+
+    def _voice(self):
+        """
+        The voice, if this deployment has one.
+
+        A missing voice is not a failure. It costs the spoken half of a
+        conversation and nothing else, so it is logged and set aside rather
+        than stopping anybody from talking.
+        """
+        from lumen.providers.errors import ProviderError
+        from lumen.providers.factory import get_speech_provider
+
+        if not self._config.chat.voice_enabled:
+            return None
+        if self._speech is None:
+            try:
+                self._speech = get_speech_provider(self._config)
+            except ProviderError:
+                logger.warning(
+                    "no voice is configured, so replies will not be spoken",
+                    exc_info=True,
+                )
+                return None
+        return self._speech
+
+
+def _quietly_close(held) -> None:
+    """Close something without letting a failed cleanup mask a real problem."""
+    try:
+        held.close()
+    except Exception:
+        logger.warning("a provider did not close cleanly", exc_info=True)
+

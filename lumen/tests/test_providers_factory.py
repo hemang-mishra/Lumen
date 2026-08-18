@@ -15,6 +15,8 @@ from pydantic import BaseModel
 from lumen.config import AppConfig, ProviderConfig, VectorConfig
 from lumen.providers.errors import ProviderConfigurationError
 from lumen.providers.factory import (
+    get_speech_provider,
+    get_transcription_provider,
     close_all_providers,
     get_embedding_provider,
     get_llm_provider,
@@ -40,6 +42,9 @@ def all_fake(**overrides) -> AppConfig:
     settings = {
         "lightweight_provider": "fake",
         "thinking_provider": "fake",
+        "conversation_provider": "fake",
+        "transcription_provider": "fake",
+        "tts_provider": "fake",
         "embedding_provider": "fake",
         "embedding_model": "fake-embedding",
         "max_attempts": 1,
@@ -102,14 +107,43 @@ class TestRefusingBadRequests:
         with pytest.raises(ProviderConfigurationError, match="get_embedding_provider"):
             get_llm_provider(ModelRole.EMBEDDING, all_fake())
 
-    @pytest.mark.parametrize("role", [ModelRole.TRANSCRIPTION, ModelRole.TTS])
-    def test_roles_with_no_implementation_say_so(self, role):
-        with pytest.raises(ProviderConfigurationError, match="no implementation yet"):
+    @pytest.mark.parametrize(
+        "role,expected",
+        [
+            (ModelRole.TRANSCRIPTION, "get_transcription_provider"),
+            (ModelRole.TTS, "get_speech_provider"),
+        ],
+    )
+    def test_a_voice_role_points_at_the_right_function(self, role, expected):
+        """Both are real jobs now, just not jobs a text model does."""
+        with pytest.raises(ProviderConfigurationError, match=expected):
             get_llm_provider(role, all_fake())
 
-    def test_the_message_says_what_will_bring_it(self):
-        with pytest.raises(ProviderConfigurationError, match="voice"):
-            get_llm_provider(ModelRole.TRANSCRIPTION, all_fake())
+
+class TestTheVoiceProviders:
+    def test_a_listener_can_be_built(self):
+        listener = get_transcription_provider(all_fake())
+
+        assert listener.provider_name == "fake"
+
+    def test_a_voice_can_be_built(self):
+        voice = get_speech_provider(all_fake())
+
+        assert voice.provider_name == "fake"
+
+    def test_speech_to_text_says_it_has_no_local_option(self):
+        """
+        The one job that cannot be done on your own machine.
+
+        Everything else can be pointed at a local model. Saying so in the
+        error means somebody who needs a fully local deployment learns it
+        here rather than discovering it in production.
+        """
+        config = AppConfig(
+            providers=ProviderConfig(transcription_provider="ollama")
+        )
+        with pytest.raises(ProviderConfigurationError, match="no local option"):
+            get_transcription_provider(config)
 
 
 class TestVectorWidthCheck:

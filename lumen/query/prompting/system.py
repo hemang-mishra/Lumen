@@ -30,15 +30,21 @@ def build_system_prompt(
     context: AssembledContext,
     *,
     summary: str | None = None,
+    earlier_days: str = "",
     in_crisis: bool = False,
 ) -> str:
     """
     The instructions the assistant gets for this turn.
 
-    The crisis form takes no notes and no summary. Both would invite exactly
-    the sort of stepping-back that the moment does not want, and a summary of
-    the last hour is not what somebody in the middle of a bad ten minutes
-    needs reflected at them.
+    The crisis form takes no notes, no summary and no earlier days. All three
+    would invite exactly the sort of stepping-back that the moment does not
+    want, and the last week reflected back is not what somebody in the middle
+    of a bad ten minutes needs.
+
+    The order is doing work. The assistant reads who it is, then how to
+    behave, then what it knows about the person, then where they have been
+    recently, then where this conversation has got to — so by the time it
+    reaches their words it has already been told how to hold them.
     """
     if in_crisis:
         return persona.CRISIS_INSTRUCTION
@@ -47,6 +53,7 @@ def build_system_prompt(
         persona.IDENTITY,
         persona.HOW_TO_BE,
         _notes(context),
+        earlier_days,
         _summary(summary),
         persona.SAFETY,
     ]

@@ -36,8 +36,8 @@ from fastapi.staticfiles import StaticFiles
 
 from lumen.api.deps import get_graph, get_ops
 from lumen.api.errors import register_error_handlers
-from lumen.api.resources import LazySearchStack
-from lumen.api.routes import debug, graph, ingest, query
+from lumen.api.resources import LazyChatStack, LazySearchStack
+from lumen.api.routes import chat, debug, graph, ingest, query
 from lumen.api.schemas import HealthView
 from lumen.config import AppConfig
 from lumen.env import load_env
@@ -89,6 +89,7 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
     app.include_router(graph.router)
     app.include_router(debug.router)
     app.include_router(query.router)
+    app.include_router(chat.router)
 
     # Not mounted at all when uploads are switched off, rather than mounted
     # and refusing. A deployment that says it only reads should not have a
@@ -180,6 +181,14 @@ def _lifespan_for(settings: AppConfig):
             llm=_summariser(settings),
             config=settings.chat,
         )
+        app.state.chat = LazyChatStack(
+            config=settings,
+            search=search,
+            formulator=formulator,
+            composer=app.state.composer,
+            memory=app.state.memory,
+            sessions=app.state.sessions,
+        )
         logger.info("api ready", extra={"graph_path": settings.graph.db_path})
 
         try:
@@ -193,6 +202,7 @@ def _lifespan_for(settings: AppConfig):
             # The search stack goes before the importer, since it may be
             # borrowing the importer's index and closing that first would
             # pull it out from under a request still being served.
+            app.state.chat.close()
             search.close()
             if worker is not None:
                 worker.stop()

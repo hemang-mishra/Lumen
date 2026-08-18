@@ -25,10 +25,11 @@ import logging
 from lumen.config import ChatConfig
 from lumen.providers.errors import ProviderError
 from lumen.providers.protocols import LLMProvider
+from lumen.operational.schemas import SessionBufferRecord
 from lumen.query.conversation import ConversationStore, StoredTurn
 from lumen.providers.protocols import ChatMessage
 from lumen.query.memory import prompts
-from lumen.query.memory.contracts import Recollection
+from lumen.query.memory.contracts import DaySummary, Recollection
 
 logger = logging.getLogger(__name__)
 
@@ -77,8 +78,8 @@ class ConversationMemory:
         """
         The conversation as the assistant should see it now.
 
-        Cheap: two reads and no model call. This runs on every turn, so it
-        has to be.
+        Cheap: a handful of reads and no model call. This runs on every turn,
+        so it has to be.
 
         A conversation nobody has started yet comes back empty rather than
         failing. "This is the first thing anybody has said" is an ordinary
@@ -104,7 +105,47 @@ class ConversationMemory:
             turns=tuple(item.turn for item in recent),
             summarised_through=through,
             total_turns=len(thread),
+            previous_days=self._earlier_days(buffer),
         )
+
+    def _earlier_days(self, buffer: SessionBufferRecord) -> tuple[DaySummary, ...]:
+        """
+        What the last few days were about, oldest first.
+
+        Free: every day already writes a summary of itself, so this is a
+        handful of row reads and no model call. Days that were never
+        summarised are skipped rather than guessed at.
+
+        A failure here costs today's conversation its sense of the week and
+        nothing else, so it is caught rather than allowed to lose the turn.
+        """
+        wanted = max(self._config.previous_days, 0)
+        if not wanted:
+            return ()
+
+        try:
+            earlier = self._store.days_before(
+                buffer.user_id,
+                on=buffer.event_date,
+                limit=wanted,
+                label=buffer.session_label,
+                lookback_days=self._config.previous_day_lookback,
+            )
+        except Exception:
+            logger.warning(
+                "could not read the earlier days, so today starts without them",
+                exc_info=True,
+                extra={"session_id": buffer.session_id},
+            )
+            return ()
+
+        days = [
+            DaySummary(on=record.event_date, summary=record.rolling_summary.strip())
+            for record in earlier
+            if record.rolling_summary and record.rolling_summary.strip()
+        ]
+        days.reverse()
+        return tuple(days)
 
     def refresh(self, session_id: str, *, force: bool = False) -> bool:
         """
@@ -129,7 +170,7 @@ class ConversationMemory:
         thread = self._store.thread(session_id)
         keep = max(self._config.recent_turns, 1)
         older = thread[:-keep] if len(thread) > keep else []
-        unsummarised = [item for item in older if item.seq > buffer.summary_through_seq]
+        unsummarised = _not_yet_folded_in(older, buffer)
 
         if not unsummarised:
             return False
@@ -196,6 +237,27 @@ class ConversationMemory:
             return None
         return text
 
+
+
+def _not_yet_folded_in(
+    older: list[StoredTurn], buffer: SessionBufferRecord
+) -> list[StoredTurn]:
+    """
+    Which of the older turns the summary does not already cover.
+
+    The first turn of a conversation is the awkward one. Arrival numbers
+    start at zero and so does "how far the summary reaches", so asking for
+    everything past that point quietly excludes the opening — which is
+    usually the thing somebody came in with, and exactly what the summary
+    exists to keep hold of.
+
+    So the two states are told apart properly: a conversation that has never
+    been summarised has *all* of its older turns outstanding, and only after
+    that does the mark mean anything.
+    """
+    if not buffer.rolling_summary:
+        return list(older)
+    return [item for item in older if item.seq > buffer.summary_through_seq]
 
 
 __all__ = ["ConversationMemory"]

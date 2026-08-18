@@ -272,7 +272,9 @@ def _run_one_episode(
     others. Letting it propagate would throw away every topic in the entry
     over one of them.
     """
-    if graph.get_node(piece.episode_id) is not None:
+    saved = graph.get_node(piece.episode_id)
+    if saved is not None:
+        _warn_if_the_words_changed(saved, piece)
         logger.info(
             "episode is already saved; leaving it untouched",
             extra={"episode_id": piece.episode_id},
@@ -435,6 +437,39 @@ def _outcome_status(status: ReconciliationStatus) -> EpisodeRunStatus:
 # ---------------------------------------------------------------------------
 # Odds and ends
 # ---------------------------------------------------------------------------
+
+
+def _warn_if_the_words_changed(
+    saved: dict, piece: PreprocessedEpisode
+) -> None:
+    """
+    Say something when a saved episode no longer matches the words it came from.
+
+    An episode is stored under the day it happened on, not under what it
+    says, so a day that gets run again is recognised and skipped whatever its
+    text now holds. That is right for an ordinary repeat and quietly wrong
+    when the words really did change — the stored records were drawn from
+    text that no longer exists anywhere, and nothing would ever say so.
+
+    Live chat is not allowed to reach this state: a day is frozen once it has
+    been processed. A re-upload or a corrected import can still get here by
+    another road, and a silent disagreement between what somebody wrote and
+    what the graph believes is the worst failure this system has.
+    """
+    stored_hash = str(saved.get("raw_text_hash") or "")
+    if not stored_hash or stored_hash == piece.raw_text_hash:
+        return
+
+    logger.warning(
+        "this episode is already saved but its words have changed since; the "
+        "stored records were drawn from text that is no longer here, and they "
+        "are being left exactly as they are",
+        extra={
+            "episode_id": piece.episode_id,
+            "stored_hash": stored_hash,
+            "incoming_hash": piece.raw_text_hash,
+        },
+    )
 
 
 def _payload_for(

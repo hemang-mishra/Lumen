@@ -567,4 +567,98 @@ it is to read real briefings, not to change the rule on a hunch.
 
 # SECTION C — WHAT WAS ACTUALLY BUILT
 
-*(filled in as the goal is built)*
+## C1. Files
+
+**New — `lumen/query/chat/`:** `engine.py` (`ChatEngine` — one turn, in order),
+`contracts.py` (the events a turn emits).
+
+**New — `lumen/chat/`:** `session.py` (`build_runner`, `converse` — the wiring, shared by
+the terminal and the tests), `__main__.py` (`python -m lumen.chat`).
+
+**New — `lumen/providers/audio.py`:** `GeminiTranscriptionProvider`,
+`GeminiSpeechProvider`, and the WAV assembly their raw samples need.
+
+**New — `lumen/query/memory/earlier.py`:** the last few days, as the assistant reads them.
+
+**New — `lumen/api/routes/chat.py`:** the web socket and the four requests around it.
+
+**New — migration `0005_voice`:** one column, `buffer_messages.modality`.
+
+**Amended:** `lumen/providers/{protocols,base,results,errors,gemini,ollama,fake,factory}.py`
+(streaming, the voice roles); `lumen/schemas/enums.py` + `lumen/config.py`
+(`ModelRole.CONVERSATION`, the chat and voice settings); `lumen/query/{session,deadline,
+conversation}.py` and `lumen/query/retrieval/stage.py` (the carry-forward path);
+`lumen/query/memory/{stage,contracts}.py` and `lumen/query/prompting/{system,compose}.py`
+(the earlier days); `lumen/operational/{models,schemas,repositories,sqlalchemy_impl}.py`
+(`recent_buffers`, modality); `lumen/pipeline/orchestration/runner.py` (the divergence
+warning); `lumen/api/{main,deps,schemas,resources}.py`.
+
+## C2. Deviations From the Plan
+
+1. **Streaming is its own interface, not a method on the existing one.** The plan added
+   `stream_text` to `LLMProvider`. It ships as `StreamingLLMProvider`, which extends it —
+   only the live conversation reads a reply piece by piece, and everything else in Lumen
+   would have gained a method it has no use for.
+2. **`LazyChatStack` was added**, mirroring the search stack. The plan had the application
+   building the engine at startup; that would have made a missing conversation model stop
+   the whole service from starting, which is exactly the failure Goal 13 already fixed once.
+3. **`lumen/chat/session.py` holds the wiring, not just the printing.** Building an engine
+   is six collaborators and two optional models, and the terminal and the web service must
+   not drift into wiring it differently. Written once, used by both.
+4. **A failure before the first word is not a `StreamInterrupted`.** Found while writing
+   the tests: nothing reached anybody, so there is nothing that cannot be retried, and
+   calling it an interrupted reply sends somebody looking for a network problem.
+
+## C3. Things Caught While Implementing
+
+1. **The first turn of a conversation could never be summarised.** Arrival numbers start
+   at zero and so does "how far the summary reaches", and the comparison was strictly
+   greater — so the opening of every conversation was silently excluded from its own
+   summary. That is the thing somebody came in with, and the exact thing the summary
+   exists to keep hold of. A pre-existing bug from Goal 15, surfaced by a Goal 16 test
+   about writing up a finished day.
+2. **A reply stopped by a safety filter mid-stream read as a short answer.** The refusal
+   check for a finished reply lived inside `_read_response` and the streaming path could
+   not reach it. Both now share one `_raise_if_refused`, because a rule that holds for one
+   shape of reply and not the other will eventually be missing from whichever shape
+   somebody uses.
+3. **An abandoned formulation could have unlocked a sensitive subject.** Not new here —
+   it was found and fixed in the review that preceded this goal — but the same shape
+   recurred while wiring the carry-forward: a late search hands back candidates that were
+   never gated, because the pass that would have gated them never finished. They go
+   through the gate on arrival rather than being trusted because they were once fetched.
+4. **The voice protocols took file paths.** Both now take and return the audio itself. A
+   recording arrives from a browser as bytes and goes straight to a model; a file in
+   between would have put somebody's voice on the filesystem for no reason.
+
+## C4. Honest Limitations
+
+- **Whether the replies are any good cannot be tested.** A test proves the right history
+  reached the model and arrived in time. `python -m lumen.chat` exists because that
+  judgement has to be made by reading one.
+- **The speech models are preview-grade** and hand back raw samples with no header. The
+  WAV assembly is forty-four bytes of fixed structure written by hand, and the models can
+  change under it.
+- **Three days of summaries is a lot of words in front of every turn** — potentially as
+  much as the briefing itself. It has its own allowance and its own line in the token
+  count, and it is the first thing to look at if replies start feeling unfocused.
+- **A summary of a day is not a transcript of it**, and carrying three forward carries
+  three compressions. Errors in them are not corrected by being carried.
+- **Speech to text has no local option**, and cannot have one with the runtime this
+  project uses.
+
+## C5. What Is Still Deferred
+
+| Deferred | To |
+|---|---|
+| Handing a finished day to the extraction pipeline automatically — the storage and the trigger point are here, the background watcher is not | Goal 20 |
+| Time decay in the ranking | Goal 19 |
+| The review queue's cap, snooze and auto-resolve | Goal 18 |
+| A real front end — `python -m lumen.chat` is a harness, not a product | later |
+
+## C6. Result
+
+3684 tests passing, 20 deselected. **99% coverage** across `lumen/query/`,
+`lumen/providers/`, `lumen/api/`, `lumen/chat/` and `lumen/operational/` — the ten
+uncovered lines are the `__main__` guard, three defensive branches that cannot be reached
+from outside, and four that predate this goal.

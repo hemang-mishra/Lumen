@@ -147,6 +147,7 @@ class DeadlineRunner(Generic[T]):
         work: Mapping[str, Callable[[], Any]],
         *,
         timeout_seconds: float,
+        on_late: Callable[[str, Any], None] | None = None,
     ) -> list[Attempt]:
         """
         Do several pieces of work side by side under one shared deadline.
@@ -163,6 +164,13 @@ class DeadlineRunner(Generic[T]):
 
         Results come back in the order the work was given, so a caller can
         name its pieces and read them back by position without a lookup.
+
+        `on_late` is called from the worker thread when a piece that had been
+        given up on eventually finishes. A running thread cannot be stopped,
+        so that work happens whether anybody wants it or not — this is the
+        difference between throwing the answer away and keeping it for the
+        next turn. It is called with the piece's name and what it produced,
+        never for one that failed, and anything it raises is swallowed.
         """
         started = _now()
         futures: dict[str, Future[Any]] = {}
@@ -191,7 +199,9 @@ class DeadlineRunner(Generic[T]):
 
         elapsed = _elapsed_ms(started)
         return [
-            self._outcome(name, futures.get(name), refused.get(name), elapsed)
+            self._outcome(
+                name, futures.get(name), refused.get(name), elapsed, on_late
+            )
             for name in work
         ]
 
@@ -205,6 +215,7 @@ class DeadlineRunner(Generic[T]):
         future: Future[Any] | None,
         refusal: BaseException | None,
         elapsed_ms: int,
+        on_late: Callable[[str, Any], None] | None = None,
     ) -> Attempt:
         """Read one piece of parallel work back into a plain description."""
         if refusal is not None:
@@ -212,12 +223,40 @@ class DeadlineRunner(Generic[T]):
         if future is None or not future.done():
             if future is not None:
                 future.add_done_callback(self._note_late_arrival)
+                if on_late is not None:
+                    future.add_done_callback(self._hand_over(name, on_late))
             return Attempt(name=name, timed_out=True, duration_ms=elapsed_ms)
 
         error = future.exception()
         if error is not None:
             return Attempt(name=name, error=error, duration_ms=elapsed_ms)
         return Attempt(name=name, value=future.result(), duration_ms=elapsed_ms)
+
+    def _hand_over(
+        self, name: str, on_late: Callable[[str, Any], None]
+    ) -> Callable[[Future[Any]], None]:
+        """
+        Pass a late answer on to whoever wanted it.
+
+        Anything raised here is swallowed on purpose. This runs on a worker
+        thread with nobody waiting on it, so an error would have nowhere to
+        go and would be lost anyway — better to say so in a log line than to
+        let it disappear.
+        """
+
+        def deliver(future: Future[Any]) -> None:
+            if future.cancelled() or future.exception() is not None:
+                return
+            try:
+                on_late(name, future.result())
+            except Exception:
+                logger.warning(
+                    "a late answer could not be handed on",
+                    exc_info=True,
+                    extra={"runner": self._name, "piece": name},
+                )
+
+        return deliver
 
     def _note_late_arrival(self, future: Future[T]) -> None:
         """

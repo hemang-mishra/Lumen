@@ -80,14 +80,22 @@ class TestDomainEnum:
 
 
 class TestModelRole:
-    def test_has_all_five_roles(self):
+    def test_names_every_job_a_model_can_be_hired_for(self):
         """
-        Replaces the old RoutingTier (STANDARD/HIGH_SECURITY) concept, which
-        conflated model capability with deployment locality. ModelRole only
-        describes capability; locality is a pure ProviderConfig choice.
+        Each member is a job, not a place a model runs.
+
+        CONVERSATION is separate from THINKING because writing a warm reply
+        in under a second and doing the overnight extraction reasoning need
+        different models, and tying them together means every improvement to
+        one is a regression to the other.
         """
         assert {m.value for m in E.ModelRole} == {
-            "LIGHTWEIGHT", "THINKING", "EMBEDDING", "TRANSCRIPTION", "TTS",
+            "LIGHTWEIGHT",
+            "THINKING",
+            "CONVERSATION",
+            "EMBEDDING",
+            "TRANSCRIPTION",
+            "TTS",
         }
 
     def test_carries_no_privacy_or_locality_members(self):

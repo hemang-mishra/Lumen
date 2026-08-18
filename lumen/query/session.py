@@ -16,6 +16,7 @@ the ingestion side, and that is the one that becomes graph history.
 from __future__ import annotations
 
 import logging
+import threading
 from collections import deque
 from dataclasses import dataclass, field
 from datetime import date, datetime
@@ -40,6 +41,67 @@ def make_session_id(user_id: str, event_date: date, label: str = DEFAULT_LABEL) 
     """
     stamp = event_date.strftime("%Y_%m_%d")
     return f"{user_id}_{stamp}_{label}" if label else f"{user_id}_{stamp}"
+
+
+@dataclass(frozen=True)
+class LateArrival:
+    """
+    A search that finished after the turn it was for had already been answered.
+
+    A running thread cannot be stopped, so a search that missed its deadline
+    goes on and produces an answer nobody is waiting for. Throwing it away
+    would mean paying for the work and getting nothing; keeping it means the
+    next turn opens with what the last one could not wait for.
+
+    Attributes:
+        turn_index: The turn it was fetched for, so a stale one can be spotted.
+        candidates: What it found, exactly as the pass produced it — not yet
+            checked against the sensitivity rules, because the pass that
+            would have done that never finished.
+    """
+
+    turn_index: int
+    candidates: tuple
+
+    def is_stale(self, now_turn: int, *, allowed_lag: int = 1) -> bool:
+        """
+        Whether the conversation has moved too far past this to still use it.
+
+        One turn is the whole allowance. An answer to a question that has
+        already been left behind twice is worth less than nothing, because it
+        pulls the assistant back to something the person has finished with.
+        """
+        return now_turn - self.turn_index > allowed_lag
+
+
+class Mailbox:
+    """
+    One slot for a search that came back too late.
+
+    Written from a worker thread and read from the one serving the turn, so
+    everything here is done under a lock. One slot rather than a queue: a
+    backlog of late answers is a system quietly falling further behind, and
+    the newest is the only one still worth having.
+    """
+
+    def __init__(self) -> None:
+        self._held: LateArrival | None = None
+        self._lock = threading.Lock()
+
+    def leave(self, arrival: LateArrival) -> None:
+        """Put a late answer in the slot, replacing anything older."""
+        with self._lock:
+            self._held = arrival
+
+    def collect(self) -> LateArrival | None:
+        """Take whatever is in the slot, leaving it empty."""
+        with self._lock:
+            held, self._held = self._held, None
+            return held
+
+    def __bool__(self) -> bool:
+        with self._lock:
+            return self._held is not None
 
 
 @dataclass
@@ -71,6 +133,10 @@ class ChatSession:
     context_buffer: SessionContextBuffer = field(
         default_factory=SessionContextBuffer, repr=False
     )
+    # Where a search that missed its deadline leaves its answer for the next
+    # turn. Belongs to the day like everything else here, so it goes when the
+    # day does and never carries across midnight.
+    late_arrivals: Mailbox = field(default_factory=Mailbox, repr=False)
 
     _turns: deque[ChatTurn] = field(default_factory=deque, repr=False)
     _unlocked: set[Domain] = field(default_factory=set, repr=False)
@@ -200,6 +266,18 @@ class SessionRegistry:
         self._sessions[key] = session
         return session
 
+    def get_for(
+        self, user_id: str, *, label: str = DEFAULT_LABEL
+    ) -> ChatSession | None:
+        """
+        The session currently held for this person, whatever day it is from.
+
+        Asked before opening today's, so that crossing midnight can be
+        noticed — the day that just ended is the one that still needs writing
+        up, and after `open` has run there is nothing left pointing at it.
+        """
+        return self._sessions.get((user_id, label))
+
     def get(self, session_id: str) -> ChatSession | None:
         """The held session with this identifier, if there is one."""
         return next(
@@ -227,4 +305,11 @@ class SessionRegistry:
         self._sessions.clear()
 
 
-__all__ = ["ChatSession", "SessionRegistry", "make_session_id", "DEFAULT_LABEL"]
+__all__ = [
+    "ChatSession",
+    "SessionRegistry",
+    "LateArrival",
+    "Mailbox",
+    "make_session_id",
+    "DEFAULT_LABEL",
+]

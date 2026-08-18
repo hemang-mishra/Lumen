@@ -123,6 +123,10 @@ class RetrievalBundle(BaseModel):
             the person has not opened that subject today. Named rather than
             silently dropped, because a system that quietly withholds things
             is one nobody can debug.
+        carried_forward: Records that came from a search which missed the
+            previous turn's deadline and finished afterwards. Named so that a
+            briefing built partly from slightly older material can be seen to
+            be one.
     """
 
     model_config = ConfigDict(extra="forbid", frozen=True)
@@ -135,6 +139,7 @@ class RetrievalBundle(BaseModel):
     latency_ms: int = Field(default=0, ge=0)
     within_budget: bool = True
     gated: tuple[str, ...] = ()
+    carried_forward: tuple[str, ...] = ()
 
     @property
     def search_failed(self) -> bool:

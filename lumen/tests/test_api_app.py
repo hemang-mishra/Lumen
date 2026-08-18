@@ -291,8 +291,8 @@ class TestTheApiCannotWrite:
         }
         assert used == {"GET"}
 
-    def test_every_post_is_one_of_the_five_that_have_earned_it(self, api_client):
-        # An allow-list rather than a count, so that adding a sixth is a
+    def test_every_post_is_one_that_has_earned_it(self, api_client):
+        # An allow-list rather than a count, so that adding another is a
         # deliberate act with a reason written next to it.
         #
         #   /query/formulate — changes nothing, but what it is given is
@@ -313,6 +313,17 @@ class TestTheApiCannotWrite:
         #     receive to the importer and put an identifier on a queue;
         #     neither can reach the graph, which is what the two tests above
         #     check by type and by name.
+        #
+        #   /chat/transcribe — a recording of somebody's voice, which has
+        #     even less business in a URL than a sentence does. It writes
+        #     nothing; the words come back and are sent on as an ordinary
+        #     turn.
+        #
+        #   /chat/messages/{message_id}/revise — the one POST here that
+        #     really does change something, and what it changes is the
+        #     conversation, never the graph. It writes the rewrite beside the
+        #     original rather than over it, and refuses outright once the day
+        #     has been processed.
         spec = api_client.get("/openapi.json").json()
 
         posts = {
@@ -326,6 +337,8 @@ class TestTheApiCannotWrite:
             "/query/prompt",
             "/ingest/file",
             "/ingest/json",
+            "/chat/transcribe",
+            "/chat/messages/{message_id}/revise",
         }
 
     def test_the_upload_routes_cannot_reach_the_graph_themselves(self):

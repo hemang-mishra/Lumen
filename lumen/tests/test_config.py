@@ -56,9 +56,10 @@ class TestProviderConfigResolve:
         [
             (ModelRole.LIGHTWEIGHT, "gemini", "gemini-2.5-flash"),
             (ModelRole.THINKING, "gemini", "gemini-2.5-pro"),
+            (ModelRole.CONVERSATION, "gemini", "gemini-2.5-flash"),
             (ModelRole.EMBEDDING, "gemini", "text-embedding-004"),
-            (ModelRole.TRANSCRIPTION, "whisper_cpp", "base.en"),
-            (ModelRole.TTS, "macos", "default"),
+            (ModelRole.TRANSCRIPTION, "gemini", "gemini-2.5-flash"),
+            (ModelRole.TTS, "gemini", "gemini-2.5-flash-preview-tts"),
         ],
     )
     def test_resolve_returns_configured_pair(self, role, expected_provider, expected_model):
