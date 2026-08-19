@@ -193,6 +193,11 @@ class HitlQueueItemRecord(OperationalRecord):
 
     The two rank fields are worked out by the repository when the item is
     added, so callers pass meaning and never have to know the numbers.
+
+    Deferring an item sets both a count and a date it stays hidden until.
+    The count is what eventually lets it settle itself; the date is what
+    makes deferring mean anything in the moment, since an item that
+    reappears immediately has not been deferred at all.
     """
 
     id: str = Field(min_length=1)
@@ -214,8 +219,10 @@ class HitlQueueItemRecord(OperationalRecord):
     created_at: datetime | None = None
     snooze_count: int = Field(default=0, ge=0)
     last_snoozed_at: datetime | None = None
+    snoozed_until: datetime | None = None
     resolved_at: datetime | None = None
     resolution_choice: HitlResolutionChoice | None = None
+    resolved_action: ReconciliationAction | None = None
     priority_rank: int | None = Field(default=None, ge=1)
     signal_rank: int | None = Field(default=None, ge=1)
 

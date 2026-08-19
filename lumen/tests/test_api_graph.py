@@ -455,7 +455,12 @@ class TestWhatAnEntryChangedInTheHistory:
 
         assert all("waiting_for_a_person" in o for o in body["outcomes"])
         acted = [o for o in body["outcomes"] if not o["waiting_for_a_person"]]
-        assert all(o["status"] in {"ACTIVE", "ROLLED_BACK"} for o in acted)
+        # A decision can also be closed without ever acting — nobody was
+        # asked because no answer would have changed anything. That is not
+        # waiting, and it is not in the history either.
+        assert all(
+            o["status"] in {"ACTIVE", "ROLLED_BACK", "DISMISSED"} for o in acted
+        )
 
     def test_an_entry_nobody_decided_about_reports_no_outcomes(
         self, api_client, graph_store, episode_id

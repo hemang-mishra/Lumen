@@ -332,6 +332,28 @@ class TestTheApiCannotWrite:
         #     to summarise. Reports are new nodes about existing history; no
         #     path through this route can change or retire a record of
         #     something the person actually wrote.
+        #
+        #   /hitl/{item_id}/resolve — the third route that writes to the
+        #     graph, and the only one where a person's tap is what causes the
+        #     write. What it holds is not a graph handle either, and the only
+        #     thing a caller supplies is which of the answers already on the
+        #     card they picked. Everything that lands was worked out and
+        #     saved when the question was raised, so this cannot be used to
+        #     write something nobody proposed.
+        #
+        #   /hitl/{item_id}/snooze — changes when an item is next shown and
+        #     nothing else. A POST because it is a state change on the queue,
+        #     not a reading of it.
+        #
+        #   /hitl/{item_id}/dismiss — withdraws a question that can no
+        #     longer be answered, because what it was going to write was
+        #     never kept. It is the one write here that adds nothing to the
+        #     history at all: it stamps the note as withdrawn so the system
+        #     stops asking. Refused for anything answerable.
+        #
+        #   /hitl/sweep — settles items that ran out of time and lets parked
+        #     ones in. It can write to the graph, by exactly the same path as
+        #     a person answering, and only for items already deferred once.
         spec = api_client.get("/openapi.json").json()
 
         posts = {
@@ -348,6 +370,10 @@ class TestTheApiCannotWrite:
             "/chat/transcribe",
             "/chat/messages/{message_id}/revise",
             "/reports/run",
+            "/hitl/{item_id}/resolve",
+            "/hitl/{item_id}/dismiss",
+            "/hitl/{item_id}/snooze",
+            "/hitl/sweep",
         }
 
     def test_the_upload_routes_cannot_reach_the_graph_themselves(self):

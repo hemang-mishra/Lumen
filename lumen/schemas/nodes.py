@@ -423,12 +423,19 @@ class DecisionAuditNode(LumenNode):
         return self
 
     @model_validator(mode="after")
-    def _validate_ambiguous_never_active(self) -> "DecisionAuditNode":
-        """Rule A3-7: AMBIGUOUS never auto-executes; it must be PENDING_HITL."""
-        if self.action == ReconciliationAction.AMBIGUOUS and self.status != DecisionStatus.PENDING_HITL:
+    def _validate_ambiguous_never_acts_on_its_own(self) -> "DecisionAuditNode":
+        """
+        A tie never carries itself out.
+
+        It is either still waiting for somebody or closed without anything
+        having been done. What it must never be is active, which would claim
+        the system acted on a reading it could not separate from another.
+        """
+        allowed = {DecisionStatus.PENDING_HITL, DecisionStatus.DISMISSED}
+        if self.action == ReconciliationAction.AMBIGUOUS and self.status not in allowed:
             raise ValueError(
-                "action AMBIGUOUS must have status PENDING_HITL — it never "
-                f"auto-executes (got status={self.status})"
+                "action AMBIGUOUS must be waiting or dismissed — it never "
+                f"acts on its own (got status={self.status})"
             )
         return self
 
@@ -524,7 +531,33 @@ class OpenLoopNode(TemporalNode):
         return self
 
 
+# Every kind of record, by the name it is stored under.
+#
+# Needed because a record is held in a plan as its base type, which is fine
+# while it stays in memory and loses the difference between a belief and a
+# pattern the moment it is written down and read back. Anything that stores a
+# plan looks the concrete kind up here.
+NODE_MODELS: dict[str, type[LumenNode]] = {
+    "EpisodeNode": EpisodeNode,
+    "ObservationNode": ObservationNode,
+    "EventNode": EventNode,
+    "SessionNode": SessionNode,
+    "CausalChainNode": CausalChainNode,
+    "CausalStepNode": CausalStepNode,
+    "PatternNode": PatternNode,
+    "BeliefNode": BeliefNode,
+    "LessonNode": LessonNode,
+    "AdoptedPrincipleNode": AdoptedPrincipleNode,
+    "PersonEntityNode": PersonEntityNode,
+    "DecisionAuditNode": DecisionAuditNode,
+    "ContradictionNode": ContradictionNode,
+    "MacroextractionReportNode": MacroextractionReportNode,
+    "OpenLoopNode": OpenLoopNode,
+}
+
+
 __all__ = [
+    "NODE_MODELS",
     "LifecycleHistoryEntry",
     "RollbackPointer",
     "EpisodeNode",

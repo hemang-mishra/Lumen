@@ -387,18 +387,45 @@ The system prompt includes the Lumen context block unconditionally. The explicit
 
 ### Wait Window
 
-RAG retrieval is allowed to take up to **3 seconds** before the carry-forward policy kicks in. This is the maximum tolerated wait per turn.
+RAG retrieval is allowed to take up to **20 seconds** before the carry-forward policy kicks in. This is the maximum tolerated wait per turn. The figure has moved twice — see the correction on deadlines as safety nets, below.
 
 | Stage | Target | Notes |
 |---|---|---|
-| Query Formulation | **600ms hard deadline** (configurable) | Must complete before retrieval starts. See correction below. |
+| Query Formulation | **3s hard deadline** (configurable) | Must complete before retrieval starts. See corrections below. |
 | Context assembly + prompt | <50ms | Templates and arithmetic; no model call |
 | Conversation summary refresh | ~1 call per 8 turns | **After** the reply, never on the critical path |
-| Pass A (Semantic) | <2s (see below) | Contains a model call |
-| Pass B (Structural) | <200ms (graph lookup, no embedding) | Faster — no vector math |
+| Pass A (Semantic) | 15s ceiling (see below) | Contains a model call, an embedding call and an index search |
+| Pass B (Structural) | 5s ceiling (see below) | No vector math, but it can queue behind a writer |
 | Pass C (Buffer) | <20ms (in-memory) | Always succeeds |
 | Assembly + Compression | <200ms | |
-| **Total wait window** | **≤3 seconds** | Enforced as a shared wall clock, not per pass |
+| **Total wait window** | **≤20 seconds** | Enforced as a shared wall clock, not per pass |
+
+> **Correction: these are safety nets, not pace-setters.** Every figure in the table above was
+> originally chosen to fit inside the time somebody spends reading the previous reply, on the
+> reasoning that a felt pause breaks the conversational rhythm. That reasoning is right about
+> what a pause costs and wrong about what a deadline is for. A deadline set close to how long
+> the work actually takes does not make the work faster — it converts the slow tail of a
+> working system into turns that silently retrieved nothing, which is the one failure this
+> whole document exists to prevent. The person notices a pause; they do not notice, and cannot
+> notice, that the thing answering them has just forgotten who they are.
+>
+> The shipped budgets are therefore set to catch calls that have **hung**, not calls that are
+> merely slow: formulation 3s (`LUMEN_FORMULATION_TIMEOUT_SECONDS`), the shared retrieval wall
+> clock 20s (`LUMEN_RETRIEVAL_BUDGET_SECONDS`), Pass A 15s (`LUMEN_PASS_A_TIMEOUT_SECONDS`),
+> Pass B 5s (`LUMEN_PASS_B_TIMEOUT_SECONDS`). Pass B calls no model, but since the
+> single-writer lock landed it can queue behind an import's write transaction, so its ceiling
+> is how long it may wait for somebody else rather than how long it takes.
+>
+> Two knock-on changes. The deadline worker pools widen from 4 to 8
+> (`LUMEN_FORMULATION_MAX_WORKERS`, `LUMEN_RETRIEVAL_MAX_WORKERS`), because a longer deadline
+> holds each worker longer and an abandoned call still cannot be cancelled. And the
+> formulation model moves from **no retries to one** (`max_attempts=2`): the backoff starts at
+> half a second, which did not fit inside a sub-second deadline and does fit inside a
+> three-second one, so a dropped connection now costs a retry instead of the turn's whole
+> retrieval. Three attempts still do not fit and are not used.
+>
+> Carry-forward is unchanged and is what makes this safe to tune generously: retrieval that
+> misses the wall clock is not discarded, it arrives at the start of the next turn.
 
 > **Correction to Pass A's budget.** `<800ms` cannot hold: Pass A contains a HyDE model call,
 > which this same document prices at 300–800ms, *plus* an embedding call and an index search.
@@ -408,9 +435,9 @@ RAG retrieval is allowed to take up to **3 seconds** before the carry-forward po
 > each. A pass that misses it is abandoned and reported as abandoned; the pass that finished
 > still answers.
 
-> **Correction to the formulation budget.** This document previously specified `<100ms` for the formulation call. That figure is not reachable: a real call to a hosted fast model takes 300–800ms end to end, so a 100ms budget would be missed on essentially every turn and the number would describe nothing. The shipped behaviour is a **configurable hard deadline, defaulting to 600ms** (`LUMEN_FORMULATION_TIMEOUT_SECONDS`), after which the call is abandoned and the turn proceeds with no retrieval. The measured latency is recorded on every `RetrievalSignal`, so the real distribution is observable rather than assumed.
+> **Correction to the formulation budget.** This document previously specified `<100ms` for the formulation call. That figure is not reachable: a real call to a hosted fast model takes 300–800ms end to end, so a 100ms budget would be missed on essentially every turn and the number would describe nothing. The shipped behaviour is a **configurable hard deadline** (`LUMEN_FORMULATION_TIMEOUT_SECONDS`), after which the call is abandoned and the turn proceeds with no retrieval. It defaulted to 600ms; it now defaults to 3s, for the reason given in the safety-net correction above — 600ms was itself close enough to a working call's duration to fire on healthy ones. The measured latency is recorded on every `RetrievalSignal`, so the real distribution is observable rather than assumed.
 >
-> Two consequences worth stating. The abandoned call is **not cancelled** — Python cannot stop a running thread — so it completes on its own and its answer is discarded; the thread pool is bounded and late arrivals are logged. And the formulation model is built with **retries disabled** (`max_attempts=1`), unlike every other model call in the system: a call that has already missed a sub-second deadline gains nothing from being tried again, and retrying only guarantees the wait is spent twice.
+> Two consequences worth stating. The abandoned call is **not cancelled** — Python cannot stop a running thread — so it completes on its own and its answer is discarded; the thread pool is bounded and late arrivals are logged. And the formulation model gets **one retry** (`max_attempts=2`) where every other call in the system gets three. It had none while the deadline was sub-second, since a second attempt could not have finished inside one; at three seconds a half-second backoff leaves room for exactly one more go.
 >
 > **Correction to what the deadline covers.** The budget originally wrapped the model call and nothing else, which meant it bounded the smallest part of the stage. Grounding reads the graph on both sides of that call — the era vocabulary before it, one lookup per named person and the open-loop check after it — and since the single-writer lock landed, those reads serialise against an import's write transaction and can wait for as long as it runs. The whole stage is now one deadline-guarded unit, and **nothing inside it touches the day's session**: the work returns a reading and only the calling thread applies it, so a reading abandoned for missing its deadline cannot unlock a sensitive domain for a turn the conversation never used.
 >
@@ -426,12 +453,14 @@ RAG retrieval is allowed to take up to **3 seconds** before the carry-forward po
 
 Context is **never discarded**. There are two outcomes:
 
-- **Retrieval completes within 3 seconds:** Context is injected into the current turn's system prompt before the AI generates its response.
-- **Retrieval exceeds 3 seconds:** Context is carried forward and injected at the **start of the next turn** as a prefixed briefing block. The current turn proceeds without it.
+- **Retrieval completes within the wall clock (20s):** Context is injected into the current turn's system prompt before the AI generates its response.
+- **Retrieval exceeds it:** Context is carried forward and injected at the **start of the next turn** as a prefixed briefing block. The current turn proceeds without it.
 
 Carried-forward context is tagged `retrieval_source: DEFERRED` so the AI knows it is slightly stale relative to the current conversation state. Deferred context is injected at a lower priority rank than fresh retrieval (0.9× conv_score).
 
 > **Why 3 seconds?** The therapeutic conversational rhythm is preserved — the user is reading the previous AI response during this window. A 3-second retrieval window that runs in parallel with the user's reading time is effectively invisible. 5–10 seconds would exceed reading time and produce a felt pause.
+>
+> **Superseded.** The window is 20 seconds. The paragraph above is a correct description of what a pause costs and an incorrect conclusion about where to set the limit — it treats the deadline as the target duration rather than as the point at which a call is declared broken. Most turns still complete well inside three seconds; the difference is that the ones that do not now finish instead of being abandoned. See the correction on safety nets in the Latency Budget section.
 >
 > **Superseded, per explicit user decision.** The window is now **8 seconds**
 > (`LUMEN_RETRIEVAL_BUDGET_SECONDS`, with Pass A at 6s). A brief pause before a considered

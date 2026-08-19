@@ -413,8 +413,17 @@ class HitlQueueItem(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     snooze_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     last_snoozed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+    # While this is in the future the item is not shown. Deferring something
+    # that comes straight back is not deferring it.
+    snoozed_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
     resolved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     resolution_choice: Mapped[str | None] = mapped_column(String(48))
+
+    # What was actually done about it, so the queue can be read back without
+    # going to the graph for every row.
+    resolved_action: Mapped[str | None] = mapped_column(String(32))
 
     __table_args__ = (
         # The exact ordering the queue is read in.
@@ -423,6 +432,37 @@ class HitlQueueItem(Base):
             "user_id", "status", "priority_rank", "signal_rank", "created_at",
         ),
     )
+
+
+class HitlProposal(Base):
+    """
+    What the system was going to write, kept until somebody answers.
+
+    Stored whole and as it was built, so answering a question days later
+    replays a finished piece of writing rather than working one out again.
+    Without this the only thing surviving an escalation is a note of what the
+    system was leaning towards, which describes the question and cannot
+    answer it.
+
+    Keyed on the decision note rather than the queue row, because the note is
+    already the one thing linking this store to the graph, and one decision
+    can only ever be waiting on one answer.
+
+    The version number is here so that a later change to the saved shape can
+    be migrated deliberately instead of guessed at when an old row is read
+    back.
+    """
+
+    __tablename__ = "hitl_proposals"
+
+    audit_node_id: Mapped[str] = mapped_column(
+        String(256),
+        ForeignKey("hitl_queue.audit_node_id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    payload: Mapped[str] = mapped_column(Text, nullable=False)
+    schema_version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
 
 class UserSetting(Base):

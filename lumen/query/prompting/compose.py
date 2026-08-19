@@ -22,6 +22,7 @@ from lumen.query.assembly.budget import estimate_tokens
 from lumen.query.memory import earlier
 from lumen.query.memory.contracts import Recollection
 from lumen.query.prompting.contracts import ChatPrompt
+from lumen.query.prompting.persona import DEFAULT_PERSONA, Persona
 from lumen.query.prompting.system import build_system_prompt
 from lumen.query.retrieval.contracts import RetrievalBundle
 from lumen.schemas.enums import EmotionalRegister
@@ -51,6 +52,7 @@ class PromptComposer:
         recollection: Recollection,
         now: datetime | None = None,
         deferred: bool = False,
+        persona: Persona | None = None,
     ) -> ChatPrompt:
         """
         Put the instructions, the briefing and the conversation together.
@@ -60,6 +62,11 @@ class PromptComposer:
         ten minutes does not need the last hour reflected back at them, and
         the ordinary instructions ask for exactly the kind of stepping-back
         that would produce that.
+
+        The persona is passed in per call rather than held on the composer,
+        because there is one composer for the whole process and the wording
+        belongs to whoever is talking. Left out, everybody gets the defaults —
+        which is what a caller with no notion of who is speaking should get.
         """
         context = self._assembler.assemble(
             bundle, signal, now=now, deferred=deferred
@@ -82,6 +89,7 @@ class PromptComposer:
             summary=None if in_crisis else recollection.summary,
             earlier_days=recent_days,
             in_crisis=in_crisis,
+            persona=persona or DEFAULT_PERSONA,
         )
         prompt = ChatPrompt(
             system=system,

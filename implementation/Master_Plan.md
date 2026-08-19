@@ -815,10 +815,49 @@ This document outlines the systematic, stage-by-stage implementation plan for th
   - *Result:* 4026 tests passing (313 new), **99% coverage** on the new package.
   - *Plan:* [`implementation/Goal_17_Plan.md`](file:///Users/hemangmishra/Projects/Lumen/implementation/Goal_17_Plan.md)
 
-- [ ] **Goal 18: HITL Queue System**
-  - Implement `lumen/api/routes/hitl.py` — card-based review UI endpoints.
-  - Configurable queue cap (default 40), 7-day auto-resolve, snooze support.
-  - *Test:* Force AMBIGUOUS reconciliation, verify queue entry, resolve manually, verify graph update.
+- [x] **Goal 18: The Review Queue — Answering the Questions Lumen Could Not** ✅
+  - Implemented `lumen/review/` — `capacity` (the ceiling, pure), `cards` (a question
+    assembled for a person, read-only), `resolve` (an answer turned into a write plan,
+    pure), `housekeeping` (the two things on a clock), and `service` (the narrow surface
+    the web layer holds). Plus `lumen/pipeline/reconciliation/freeze.py`, which keeps what
+    a held-back decision was about to write.
+  - **The proposal is frozen, not re-thought** (per explicit user decision). At the moment
+    a decision escalates, every answer it could be given is built in full — the actual
+    records, links and updates — and saved. Answering replays it: no model call, nothing to
+    wait on, and what lands is exactly what the card offered. Without this the only thing
+    surviving an escalation was a note of what the system was leaning towards, which
+    describes a question and cannot answer one.
+  - **Deferring hides an item for 24 hours** (per explicit user decision), a recorded
+    divergence from the spec's literal "retains its position in queue" — an item that comes
+    straight back has not been deferred. **Housekeeping runs whenever the queue is touched**
+    and on demand, so the queue is self-correcting with no scheduler; Goal 20 gets one
+    endpoint to call. **Only something deferred at least once ever settles itself**: silence
+    is not consent.
+  - **An answer leaves two notes.** The waiting note is stamped with who decided what and
+    when and is otherwise untouched; a second note records the action actually taken and
+    carries its own undo pointer. Rewriting the first would leave a graph reading as though
+    the system had been sure all along. Answering re-checks the target is still current, so
+    a proposal overtaken by a later entry is refused rather than attached to an old version
+    — and the answer that stands a finding on its own stays available, because it touches
+    nothing that could have moved.
+  - Also added: `SavedNode`/`SavedEdge` with `NODE_MODELS`/`EDGE_MODELS`, so a plan survives
+    being stored and read back as the kinds of record and link it really is;
+    `BookkeepingOperation.MARK_HITL_RESOLVED` and `GraphProvider.resolve_decision`;
+    `superseded_by_dec`; `snoozed_until`/`resolved_action` and a `hitl_proposals` table
+    (migration `0006_review_queue`); six store reads and writes; `Conflict` (409);
+    `/hitl` (list, count, detail, resolve, snooze, sweep) with an inspection page.
+  - *Amends Goal 9:* `SettledDecision.runner_up_target_node_id` — the runner-up's target was
+    dropped when the model's answer was flattened, which made "take the second reading"
+    literally unanswerable. `plan.writes_for` exposes the action builders so a saved answer
+    and a live one cannot drift apart.
+  - *Deferred:* undo of a resolution to its own goal — it applies to every decision, not
+    only answered ones, and needs edge invalidation the provider does not have; the pointers
+    are written faithfully meanwhile. Extraction failures still cannot be queued
+    (`hitl_queue.audit_node_id` is `NOT NULL` and they have no audit node) and stay reachable
+    from their episode, per Goal 29. The mobile-first one-tap surface is Goal 29's; running
+    the sweep on a timer and the badge nudge are Goal 20's.
+  - *Test:* Force an `AMBIGUOUS` reconciliation, verify the queue entry and its saved
+    proposal, answer it, verify the suspended edge now exists and both notes are linked.
 
 - [ ] **Goal 19: Temporal Decay & Maintenance Jobs**
   - Implement temporal decay weights in retrieval score calculations.
@@ -827,9 +866,50 @@ This document outlines the systematic, stage-by-stage implementation plan for th
   - *Test:* Simulate 400-day gap, verify retrieval score drops by expected multiplier.
 
 - [ ] **Goal 20: API Gateway (BFF) Integration**
-  - Finalize `lumen/api/main.py` (FastAPI) tying all routes: `/chat`, `/ingest`, `/query`, `/graph`, `/hitl`, `/reports`.
+  - Finalize `lumen/api/main.py` (FastAPI) tying all routes: `/chat`, `/ingest`, `/query`, `/graph`, `/hitl`, `/reports`, `/settings`.
   - WebSocket streaming for chat responses and pipeline progress updates.
   - *Test:* Full HTTP lifecycle: Ingest → Pipeline triggers → Query → Chat with RAG context.
+
+> **Landed early: a configurable system prompt, and more generous deadlines.** Two changes
+> were made between Goals 18 and 19 rather than waiting for the goal that owns them, because
+> both were cheap once the question was asked and both were costing something every day they
+> were not made.
+>
+> **Deadlines are now safety nets rather than pace-setters.** Every wait in the live
+> conversation was originally sized to fit inside the time somebody spends reading the
+> previous reply. That is a correct account of what a pause costs and a wrong conclusion
+> about where to set a limit: a deadline set close to how long healthy work takes converts
+> the slow tail of a working system into turns that silently retrieved nothing. Formulation
+> 0.6s → 3s, the shared retrieval clock 8s → 20s, Pass A 6s → 15s, Pass B 0.5s → 5s (it can
+> queue behind an import's write transaction since the single-writer lock landed), both
+> deadline worker pools 4 → 8, and the provider timeouts 60s/180s → 120s/300s for batch work
+> nobody waits on. The formulation model goes from no retries to one: at 0.6s a retry could
+> not have finished, and at 3s a half-second backoff fits. Carry-forward is what makes this
+> safe to tune generously — retrieval that misses the clock arrives next turn rather than
+> being discarded. Recorded as a correction in `Conversational_RAG_Mode.md`.
+>
+> **The system prompt is now the person's to change**, which it had never been — it was five
+> module constants in `persona.py` with no path from a user to any of them. Shipped: a
+> `Persona` model carrying the three editable sections, a `PersonaStore` over the existing
+> `user_settings` table storing *only* the sections somebody actually changed, threading
+> through `build_system_prompt` → `PromptComposer.compose` → `ChatEngine` (which is the one
+> object in the chain that knows who is speaking), and `GET`/`PUT`/`DELETE /settings/persona`.
+>
+> Two design decisions worth carrying forward. **Safety and crisis are not fields on
+> `Persona`** — they are applied from module constants on every turn regardless of what is
+> stored, so making them configurable is a code change with a reviewer rather than something
+> reachable by a request. They are still *readable* through the API, because being unable to
+> edit the distress instruction and being unable to see it are different things. And **only
+> differences are stored**: a section is reset by deleting the override, never by writing
+> today's default back, so a reset section keeps following later improvements to the wording
+> instead of freezing a copy of it.
+>
+> *Deferred to Goal 20:* the settings surface belongs in the goal that finalises the API, and
+> the routes currently read `config.user_id` like every other surface — Goal 21 retrofits
+> that through `get_identity` along with the rest. *Deferred to the front-end goals:* the S10
+> editor itself (`FR-S10-6`…`FR-S10-8`). *Not planned:* per-user prompt caching. The read is
+> one primary-key lookup on a turn already making several model calls, and a cache would mean
+> an edit made through the API not reaching a conversation already running in another process.
 
 ## Phase 6: Identity & Multi-User (Goals 21-22)
 **Objective:** Put a real person behind every request, and give each of them a graph nobody

@@ -21,6 +21,7 @@ from datetime import UTC, datetime
 import pytest
 
 from lumen.pipeline.reconciliation import reconcile
+from lumen.schemas.edges import LogicalEdgeType
 from lumen.schemas.enums import (
     CandidateRetrievalSource,
     DecisionStatus,
@@ -890,3 +891,87 @@ class TestReadingStoredDates:
 
         assert _read_moment("last tuesday") is None
         assert _read_moment(None) is None
+
+
+class TestWhatAWaitingItemKeeps:
+    """
+    A held-back decision saves what it was about to write.
+
+    Without this the stage produces a note saying "I could not decide" and
+    throws away the change it had worked out, which describes the question
+    and cannot answer it.
+    """
+
+    def test_a_tie_keeps_both_readings(self, make_extraction, run):
+        outcome, _, _ = run(
+            make_extraction("a"),
+            [searched("obs_new_1", found())],
+            {"decision": json.dumps({"decisions": [{
+                "item_index": 1,
+                "primary": {"action": "MERGE", "target_node_id": "pat_old", "confidence": 0.92},
+                "runner_up": {"action": "REINFORCE", "target_node_id": "pat_old", "confidence": 0.90},
+            }]})},
+        )
+
+        proposal = outcome.escalations[0].proposal
+        assert proposal is not None
+        assert proposal.primary.action is ReconciliationAction.MERGE
+        assert proposal.runner_up is not None
+        assert proposal.runner_up.action is ReconciliationAction.REINFORCE
+
+    def test_the_second_reading_keeps_the_record_it_pointed_at(
+        self, make_extraction, run
+    ):
+        outcome, _, _ = run(
+            make_extraction("a"),
+            [searched("obs_new_1", found())],
+            {"decision": json.dumps({"decisions": [{
+                "item_index": 1,
+                "primary": {"action": "MERGE", "target_node_id": "pat_old", "confidence": 0.92},
+                "runner_up": {"action": "REINFORCE", "target_node_id": "pat_old", "confidence": 0.90},
+            }]})},
+        )
+
+        assert outcome.escalations[0].proposal.runner_up.target_node_id == "pat_old"
+
+    def test_standing_alone_is_always_among_the_answers(self, make_extraction, run):
+        outcome, _, _ = run(
+            make_extraction("a"),
+            [searched("obs_new_1", found())],
+            {"decision": decided((1, "MERGE", "pat_old", 0.5, {}))},
+        )
+
+        proposal = outcome.escalations[0].proposal
+        assert proposal.fallback.action is ReconciliationAction.BRANCH
+
+    def test_what_is_kept_is_writing_and_not_a_description_of_it(
+        self, make_extraction, run
+    ):
+        # The saved answer holds real records and links, so answering days
+        # later replays them rather than working them out again.
+        outcome, _, _ = run(
+            make_extraction("a"),
+            [searched("obs_new_1", found())],
+            {"decision": decided((1, "MERGE", "pat_old", 0.5, {}))},
+        )
+
+        assert outcome.escalations[0].proposal.primary.edges
+
+    def test_none_of_it_reaches_the_write_plan(self, make_extraction, run):
+        # Saved is not written. The change stays held back until somebody
+        # answers, which is the whole point of holding it back.
+        outcome, _, _ = run(
+            make_extraction("a"),
+            [searched("obs_new_1", found())],
+            {"decision": decided((1, "MERGE", "pat_old", 0.5, {}))},
+        )
+
+        assert [node.node_type for node in outcome.write_plan.nodes] == [
+            "DecisionAuditNode"
+        ]
+        # The note is still linked to what it is about — that is how the
+        # entry records that something was deliberately not done. What is
+        # absent is the merge itself.
+        assert {edge.logical_type for edge in outcome.write_plan.edges} == {
+            LogicalEdgeType.DECIDED_BY
+        }

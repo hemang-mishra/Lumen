@@ -37,7 +37,16 @@ from fastapi.staticfiles import StaticFiles
 from lumen.api.deps import get_graph, get_ops
 from lumen.api.errors import register_error_handlers
 from lumen.api.resources import LazyChatStack, LazySearchStack
-from lumen.api.routes import chat, debug, graph, ingest, query, reports
+from lumen.api.routes import (
+    chat,
+    debug,
+    graph,
+    hitl,
+    ingest,
+    query,
+    reports,
+    settings as settings_routes,
+)
 from lumen.api.schemas import HealthView
 from lumen.config import AppConfig
 from lumen.env import load_env
@@ -49,6 +58,7 @@ from lumen.operational.repositories import OperationalStore
 from lumen.operational.sqlalchemy_impl import build_operational_store
 from lumen.providers.errors import ProviderError
 from lumen.pipeline.macroextraction.service import MacroextractionService
+from lumen.review.service import ReviewService
 from lumen.providers.factory import get_llm_provider
 from lumen.query import (
     ConversationMemory,
@@ -57,6 +67,7 @@ from lumen.query import (
     QueryFormulator,
     SessionRegistry,
 )
+from lumen.query.prompting import PersonaStore
 from lumen.schemas.enums import ModelRole
 
 logger = logging.getLogger(__name__)
@@ -92,6 +103,8 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
     app.include_router(query.router)
     app.include_router(chat.router)
     app.include_router(reports.router)
+    app.include_router(hitl.router)
+    app.include_router(settings_routes.router)
 
     # Not mounted at all when uploads are switched off, rather than mounted
     # and refusing. A deployment that says it only reads should not have a
@@ -176,11 +189,19 @@ def _lifespan_for(settings: AppConfig):
         app.state.reporter = MacroextractionService(
             config=settings, graph=provider, ops=store
         )
+        app.state.reviewer = ReviewService(
+            config=settings,
+            graph=provider,
+            ops=store,
+            open_vectors=search.vectors,
+            open_embedder=search.embedder,
+        )
         app.state.formulator = formulator
         app.state.ingest = worker
         app.state.search = search
         app.state.sessions = SessionRegistry(settings.query)
         app.state.composer = PromptComposer(config=settings.chat)
+        app.state.personas = PersonaStore(settings=store.settings)
         app.state.memory = ConversationMemory(
             store=ConversationStore(store.buffers),
             llm=_summariser(settings),
@@ -193,6 +214,7 @@ def _lifespan_for(settings: AppConfig):
             composer=app.state.composer,
             memory=app.state.memory,
             sessions=app.state.sessions,
+            personas=app.state.personas,
         )
         logger.info("api ready", extra={"graph_path": settings.graph.db_path})
 
@@ -328,13 +350,19 @@ def _build_formulator(
     settings: AppConfig, graph: ReadOnlyGraph
 ) -> QueryFormulator | None:
     """
-    The turn reader, with retries switched off for its model.
+    The turn reader, with its model held to a single retry.
 
     Every other model call in the system retries a few times with a growing
-    pause, which is right for work nobody is waiting on. This one has a
-    deadline measured in fractions of a second: a call that failed has
-    already missed it, and retrying only guarantees the wait is spent twice
-    over before the same answer arrives.
+    pause, which is right for work nobody is waiting on. This one is on a
+    deadline with somebody sitting in front of it, so it gets one retry
+    rather than none and rather than three.
+
+    None was right while the deadline was measured in fractions of a second:
+    a second attempt could not have finished inside it, so retrying only
+    guaranteed the wait was spent twice over. The deadline is seconds now,
+    and the growing pause starts at half of one, which leaves room for
+    exactly one more attempt. Three does not fit, and a turn that has burned
+    its whole budget on retries has lost the retrieval either way.
 
     A model that cannot be reached is not a reason to refuse to start. Every
     other thing this service does is a read of two local databases and works
@@ -344,10 +372,10 @@ def _build_formulator(
     The graph is handed over as a reader, so this whole side of the
     application is incapable of changing anything.
     """
-    no_retries = replace(settings.providers, max_attempts=1)
+    one_retry = replace(settings.providers, max_attempts=2)
     try:
         llm = get_llm_provider(
-            ModelRole.LIGHTWEIGHT, replace(settings, providers=no_retries)
+            ModelRole.LIGHTWEIGHT, replace(settings, providers=one_retry)
         )
     except ProviderError:
         logger.warning(

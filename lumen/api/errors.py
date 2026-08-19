@@ -69,6 +69,22 @@ class BadRequest(Exception):
         super().__init__(reason)
 
 
+class Conflict(Exception):
+    """
+    The request was fine and the world moved on underneath it.
+
+    Kept apart from a bad request because nothing about what was sent is
+    wrong: answering a question that somebody already answered, or one whose
+    record has been rewritten since it was asked, is a valid request that
+    arrived too late. Telling the two apart is what lets a caller know
+    whether to fix the request or simply reload it.
+    """
+
+    def __init__(self, reason: str) -> None:
+        self.reason = reason
+        super().__init__(reason)
+
+
 def register_error_handlers(app: FastAPI) -> None:
     """Teach the application how to answer when something goes wrong."""
 
@@ -88,6 +104,13 @@ def register_error_handlers(app: FastAPI) -> None:
                 "detail": str(exc),
                 "what": exc.what,
             },
+        )
+
+    @app.exception_handler(Conflict)
+    async def _conflict(_request: Request, exc: Conflict) -> JSONResponse:
+        return JSONResponse(
+            status_code=409,
+            content={"error": "conflict", "detail": exc.reason},
         )
 
     @app.exception_handler(NotFound)
@@ -121,4 +144,10 @@ def register_error_handlers(app: FastAPI) -> None:
         )
 
 
-__all__ = ["NotFound", "Unavailable", "BadRequest", "register_error_handlers"]
+__all__ = [
+    "NotFound",
+    "Unavailable",
+    "BadRequest",
+    "Conflict",
+    "register_error_handlers",
+]

@@ -33,7 +33,7 @@ from lumen.query.chat.engine import VOICE
 from lumen.query.conversation import ConversationStore
 from lumen.query.formulation import QueryFormulator
 from lumen.query.memory import ConversationMemory
-from lumen.query.prompting import PromptComposer
+from lumen.query.prompting import PersonaStore, PromptComposer
 from lumen.query.session import SessionRegistry
 from lumen.schemas.enums import ModelRole
 
@@ -95,6 +95,7 @@ def build(ops_store):
         retriever=None,
         chat_config=None,
         break_after=None,
+        personas=None,
     ):
         settings = chat_config or ChatConfig()
         memory = ConversationMemory(
@@ -118,6 +119,7 @@ def build(ops_store):
                 break_after=break_after,
             ),
             speech=speech,
+            personas=personas,
             config=settings,
         )
 
@@ -465,3 +467,70 @@ class TestWhenTheTidyingUpFails:
 
         session_id = only(events, TurnAccepted)[0].session_id
         assert len(engine._memory.store.thread(session_id)) == 1
+
+
+class TestTheWordingTheTurnIsAnsweredWith:
+    """
+    Whether what a person wrote in their settings reaches the model.
+
+    The mechanism is tested where it lives; what is checked here is the one
+    join this file owns — that the engine looks the instruction up for the
+    person who is actually speaking, and hands it to the composer rather than
+    resolving it and dropping it.
+    """
+
+    def test_a_turn_uses_this_persons_own_wording(self, build, ops_store):
+        personas = PersonaStore(settings=ops_store.settings)
+        personas.save(USER, {"identity": "You are Ada. Be blunt."})
+
+        prompt = _the_prompt(build(personas=personas))
+        assert "You are Ada. Be blunt." in prompt
+
+    def test_a_turn_without_a_store_uses_the_shipped_wording(self, build):
+        assert "You are Lumen." in _the_prompt(build())
+
+    def test_one_persons_wording_does_not_reach_another(self, build, ops_store):
+        personas = PersonaStore(settings=ops_store.settings)
+        personas.save("somebody-else", {"identity": "You are Ada."})
+
+        assert "You are Ada." not in _the_prompt(build(personas=personas))
+
+    def test_an_instruction_that_cannot_be_read_still_answers_the_turn(
+        self, build, ops_store
+    ):
+        """
+        A settings table that will not answer costs the wording, not the turn.
+
+        Refusing to talk to somebody because a paragraph could not be read
+        would be the wrong trade by a wide margin.
+        """
+
+        class Broken:
+            def get(self, user_id, key):
+                raise RuntimeError("no database")
+
+            def set(self, user_id, key, value):
+                raise RuntimeError("no database")
+
+            def delete(self, user_id, key):
+                raise RuntimeError("no database")
+
+            def get_all(self, user_id):
+                raise RuntimeError("no database")
+
+        events = list(build(personas=PersonaStore(settings=Broken())).say(USER, "hello"))
+        assert any(isinstance(event, ReplyDone) for event in events)
+
+
+def _the_prompt(built) -> str:
+    """
+    The instructions one turn was actually answered with.
+
+    Read off the scripted model rather than off the composer, because what
+    is being checked is that the wording reached the call — resolving it and
+    then not passing it on would look identical from anywhere earlier.
+    """
+    list(built.say(USER, "I keep putting this off."))
+    spoken = [call for call in built._llm.calls if call.operation == "stream_text"]
+    assert spoken, "the turn never reached the model"
+    return spoken[-1].system_instruction or ""

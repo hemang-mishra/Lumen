@@ -37,7 +37,7 @@ from lumen.operational.schemas import (
     StageRunRecord,
     StoredErasureAudit,
 )
-from lumen.schemas.enums import HitlResolutionChoice
+from lumen.schemas.enums import HitlResolutionChoice, ReconciliationAction
 from lumen.schemas.pipeline import SessionDecayEvent
 
 
@@ -355,8 +355,52 @@ class HitlQueueRepository(Protocol):
         """
         ...
 
+    def list_visible(
+        self, user_id: str, *, now: datetime, limit: int = 20
+    ) -> list[HitlQueueItemRecord]:
+        """
+        List the items to actually show, in the order to show them.
+
+        The same ordering as `list_pending`, minus anything the user deferred
+        and that is still resting, and minus anything parked because the
+        queue was full. What comes back is what they are being asked right
+        now.
+        """
+        ...
+
+    def list_parked(self, user_id: str) -> list[HitlQueueItemRecord]:
+        """
+        List the items held outside the queue because it was full.
+
+        Waiting, not decided. They are let in as soon as answering something
+        else makes room.
+        """
+        ...
+
+    def find_auto_resolvable(
+        self, user_id: str, *, cutoff: datetime
+    ) -> list[HitlQueueItemRecord]:
+        """
+        List items deferred at least once and last deferred before the cutoff.
+
+        Never returns something nobody has touched. Deferring an item is a
+        sign it was seen and weighed; leaving it unopened is not, and only
+        the first of those is enough to settle it on somebody's behalf.
+        """
+        ...
+
     def count_pending(self, user_id: str) -> int:
-        """Count unresolved items, which is what the queue cap is measured against."""
+        """Count unresolved items, parked ones included."""
+        ...
+
+    def count_asked(self, user_id: str) -> int:
+        """
+        Count the items actually put to the user.
+
+        This is what the cap limits, and it deliberately leaves out the ones
+        parked behind it — counting those against the ceiling they are queued
+        behind would mean none of them ever got in.
+        """
         ...
 
     def oldest_pending_at(self, user_id: str) -> datetime | None:
@@ -375,8 +419,40 @@ class HitlQueueRepository(Protocol):
         item_id: str,
         status: HitlItemStatus,
         resolution_choice: HitlResolutionChoice | None = None,
+        resolved_action: ReconciliationAction | None = None,
     ) -> HitlQueueItemRecord:
-        """Move an item to a new state, stamping the time when it is settled."""
+        """
+        Move an item to a new state, stamping the time when it is settled.
+
+        Refuses to settle something already settled. Answering the same
+        question twice would write the same change to the graph twice.
+        """
+        ...
+
+    def snooze(
+        self, item_id: str, *, until: datetime, at: datetime
+    ) -> HitlQueueItemRecord:
+        """
+        Defer an item: count the deferral, and hide it until the given time.
+
+        The count is what eventually lets the item settle itself, so this is
+        also the moment an item becomes capable of being settled without
+        anybody answering it.
+        """
+        ...
+
+    def save_proposal(self, audit_node_id: str, payload: str) -> None:
+        """
+        Keep what the system was going to write, against the decision note.
+
+        Saving the same thing twice replaces it rather than failing. Re-running
+        an entry produces the same held-back decisions, and the second run's
+        working is as good as the first's.
+        """
+        ...
+
+    def get_proposal(self, audit_node_id: str) -> str | None:
+        """What was going to be written, or None if nothing was kept."""
         ...
 
 

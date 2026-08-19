@@ -120,10 +120,12 @@ class TestReconciliationAction:
 
 
 class TestDecisionStatus:
-    def test_has_all_six_statuses(self):
+    def test_has_all_seven_statuses(self):
+        # DISMISSED is neither active nor waiting: no change was made, and
+        # the question has been withdrawn rather than settled.
         assert {m.value for m in E.DecisionStatus} == {
             "ACTIVE", "ROLLED_BACK", "PENDING_HITL", "BELOW_THRESHOLD",
-            "SUSPENDED_QUEUE_FULL", "EXTRACTION_FAILED",
+            "SUSPENDED_QUEUE_FULL", "EXTRACTION_FAILED", "DISMISSED",
         }
 
 

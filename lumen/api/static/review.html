@@ -1,0 +1,281 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Lumen — Review</title>
+  <link rel="stylesheet" href="app.css">
+</head>
+<body>
+<header>
+  <h1>Lumen</h1>
+  <nav>
+    <a href="index.html">Import</a>
+    <a href="episodes.html">Episodes</a>
+    <a href="review.html">Review</a>
+    <a href="reports.html">Reports</a>
+    <a href="trace.html">Runs</a>
+    <a href="chat.html">Turn reader</a>
+  </nav>
+  <span class="note">test harness — not the product UI</span>
+</header>
+
+<main>
+  <section>
+    <h2>Waiting on you</h2>
+    <p class="lede">
+      The things Lumen could not settle on its own. Every answer below was
+      worked out when the question was raised and kept since, so answering
+      writes exactly what you are shown here — no model is asked anything.
+    </p>
+    <div class="panel" id="counts"><div class="empty">Loading…</div></div>
+  </section>
+
+  <section>
+    <div class="row" style="margin-bottom:12px">
+      <button id="sweep">Run housekeeping</button>
+      <span class="faint">settles anything overdue, lets in anything parked</span>
+    </div>
+    <div id="result"></div>
+  </section>
+
+  <section>
+    <div class="panel" id="queue"><div class="empty">Loading…</div></div>
+  </section>
+</main>
+
+<script src="app.js"></script>
+<script>
+/*
+ * The review page.
+ *
+ * One card per question, with its answers as buttons. Everything a judgement
+ * needs is on the card: what was found, what it is being matched against in
+ * the person's own earlier words, and what each answer would do.
+ *
+ * A card whose recommendation has gone stale — because a later entry moved
+ * the same belief on a version — says so and disables the buttons that would
+ * act on the old version. The answer that stands the finding on its own
+ * touches nothing existing, so it stays available.
+ */
+
+document.getElementById("sweep").addEventListener("click", sweep);
+document.getElementById("queue").addEventListener("click", (event) => {
+  const button = event.target.closest("[data-choice]");
+  if (button) answer(button.getAttribute("data-item"), button.getAttribute("data-choice"));
+});
+
+/** Run the housekeeping by hand, and say what it did. */
+async function sweep() {
+  fill("result", say("ok", "Running…"));
+  let report;
+  try {
+    report = await api("/hitl/sweep", { method: "POST" });
+  } catch (error) {
+    fill("result", say("bad", String(error.message)));
+    return;
+  }
+  const parts = [];
+  if (report.auto_resolved.length) parts.push(`${report.auto_resolved.length} settled on their own`);
+  if (report.admitted.length) parts.push(`${report.admitted.length} let in`);
+  if (report.failed.length) parts.push(`${report.failed.length} could not be settled`);
+  fill("result", say(report.failed.length ? "warn" : "ok",
+    parts.length ? parts.join(", ") + "." : "Nothing needed doing."));
+  refresh();
+}
+
+/** Send one answer, then redraw. */
+async function answer(itemId, choice) {
+  fill("result", say("ok", "Saving…"));
+
+  let outcome;
+  try {
+    const route = { SNOOZE: "snooze", DISMISS: "dismiss" }[choice] || "resolve";
+    const sendsBody = route === "resolve";
+    outcome = await api(`/hitl/${encodeURIComponent(itemId)}/${route}`, {
+      method: "POST",
+      headers: sendsBody ? { "Content-Type": "application/json" } : undefined,
+      body: sendsBody ? JSON.stringify({ choice }) : undefined,
+    });
+  } catch (error) {
+    fill("result", say("bad", String(error.message)));
+    return;
+  }
+
+  if (choice === "SNOOZE") {
+    fill("result", say("ok", `Put off until ${when(outcome.snoozed_until)}.`));
+  } else if (choice === "DISMISS") {
+    fill("result", say("ok", "Withdrawn. Nothing was written to your history."));
+  } else if (outcome.recorded_choice === "DECLINED") {
+    fill("result", say("ok",
+      "Left with its entry. Nothing was added to your history."));
+  } else {
+    // An answer that writes nothing is a real outcome, not a failure: a
+    // finding that does not warrant a lasting record stays with its entry.
+    fill("result", say("ok", outcome.writes_nothing
+      ? `Answered as ${outcome.action_taken}; nothing further needed recording.`
+      : `Answered as ${outcome.action_taken} — wrote ${outcome.nodes_written.length} record(s) and ${outcome.edges_written.length} link(s).`));
+  }
+  refresh();
+}
+
+/** How much is waiting, and how full the queue is. */
+async function refreshCounts() {
+  let counts;
+  try {
+    counts = await api("/hitl/count");
+  } catch (error) {
+    fill("counts", say("bad", String(error.message)));
+    return;
+  }
+
+  fill("counts", el("div", { class: "row" },
+    el("div", {}, el("strong", {}, String(counts.visible)), " showing now"),
+    el("div", { class: "faint" }, `${counts.pending} unresolved · ${counts.cap} asked at a time`),
+    counts.parked
+      ? el("div", {}, tag("QUEUE FULL"), ` ${counts.parked} waiting outside`)
+      : el("div", { class: "faint" }, "nothing parked"),
+    // Said plainly rather than as "N of M allowed", which reads like a rule
+    // has been broken when a backlog simply predates the ceiling.
+    counts.pending > counts.visible
+      ? el("div", { class: "faint" },
+          `${counts.pending - counts.visible} more waiting behind them`)
+      : null,
+    counts.oldest_asked_at
+      ? el("div", { class: "faint" }, `oldest raised ${when(counts.oldest_asked_at)}`)
+      : el("div", { class: "faint" }, "nothing waiting"),
+  ));
+}
+
+/** Every question to ask right now, in the order to ask them. */
+async function refresh() {
+  refreshCounts();
+
+  let view;
+  try {
+    view = await api("/hitl?limit=100");
+  } catch (error) {
+    fill("queue", say("bad", String(error.message)));
+    return;
+  }
+
+  if (!view.cards.length) {
+    fill("queue", el("div", { class: "empty" }, "Nothing is waiting on you."));
+    return;
+  }
+  fill("queue", view.cards.map(card));
+}
+
+/** One question, with everything needed to answer it. */
+function card(item) {
+  return el("div", { class: "panel", style: "margin-bottom:16px" },
+    el("div", { class: "row" },
+      tag(item.entry_type),
+      tag(item.signal_strength),
+      el("span", { class: "faint" },
+        `raised ${item.age_days} day(s) ago` +
+        (item.snooze_count ? `, put off ${item.snooze_count}×` : "")),
+      item.auto_resolves_at
+        ? el("span", { class: "faint" }, `settles itself ${when(item.auto_resolves_at)}`)
+        : null,
+    ),
+    el("p", {}, el("strong", {}, item.question)),
+
+    // What was found, in the person's own words. This is the whole basis for
+    // a judgement; an identifier here is a card nobody can answer.
+    el("blockquote", {},
+      item.source_text || el("span", { class: "faint" },
+        `the finding ${item.source_node_id} could not be read back`)),
+
+    item.episode_summary
+      ? el("p", { class: "dim" }, `From: ${item.episode_summary}`)
+      : null,
+
+    // What it was weighed against, and how the system leaned. Shown at the
+    // top of the card rather than only on the buttons, because a card with
+    // no buttons still has to explain itself.
+    item.compared_against
+      ? el("div", { class: "dim", style: "margin:8px 0" },
+          "Weighed against ",
+          el("span", { class: "mono" }, item.compared_against.node_id),
+          ": ",
+          item.compared_against.text || "(no wording stored)")
+      : null,
+    item.recommended_action
+      ? el("div", { class: "faint", style: "margin-bottom:8px" },
+          "Leaning towards ", tag(item.recommended_action),
+          item.recommended_confidence !== null
+            ? ` · ${item.recommended_confidence.toFixed(2)} sure`
+            : "")
+      : null,
+    item.stale ? say("warn", item.stale_reason) : null,
+
+    // A question nobody can answer still appears, and says why. Hiding it is
+    // what makes the count above disagree with the list below.
+    item.answerable ? null : say("warn", item.unanswerable_reason
+      + " — it was raised before Lumen kept its working, so there is nothing"
+      + " to carry out."),
+
+    el("div", {}, item.options.map((option) => choice(item, option))),
+    el("div", { class: "row", style: "margin-top:8px" },
+      el("button", { "data-item": item.item_id, "data-choice": "SNOOZE" }, "Not now"),
+      item.answerable
+        ? null
+        : el("button", { "data-item": item.item_id, "data-choice": "DISMISS" },
+             "Withdraw this question"),
+    ),
+  );
+}
+
+/** One answer, with the record it would act on shown in its own words. */
+function choice(item, option) {
+  // Only the answers touching an existing record go stale. Standing the
+  // finding on its own involves nothing that could have moved underneath it.
+  const blocked = item.stale && option.target !== null;
+
+  // A refusal is not a smaller version of the recommendation — it is the
+  // finding staying part of its entry and becoming nothing more. Showing it
+  // with an action tag would read as a second thing being done.
+  if (option.declines) {
+    return el("div", { class: "row", style: "margin-top:8px; align-items:flex-start" },
+      el("button", {
+        "data-item": item.item_id, "data-choice": option.choice,
+      }, option.label),
+      el("div", { class: "faint" }, "nothing is recorded; the finding stays with its entry"),
+    );
+  }
+
+  return el("div", { class: "row", style: "margin-top:8px; align-items:flex-start" },
+    el("button", {
+      "data-item": blocked ? null : item.item_id,
+      "data-choice": blocked ? null : option.choice,
+      disabled: blocked,
+    }, option.label),
+    el("div", {},
+      el("div", {}, tag(option.action),
+        option.confidence !== null
+          ? el("span", { class: "faint" }, ` ${option.confidence.toFixed(2)} sure`)
+          : null,
+        option.writes_nothing
+          ? el("span", { class: "faint" }, " — records nothing further")
+          : null),
+      option.target
+        ? el("div", { class: "dim" },
+            el("span", { class: "mono" }, option.target.node_id), ": ",
+            option.target.text || "(no wording stored)")
+        : null,
+      option.difference ? el("div", { class: "faint" }, option.difference) : null,
+    ),
+  );
+}
+
+/** A stored timestamp, shown as a plain date and time. */
+function when(value) {
+  if (!value) return "—";
+  return new Date(value).toLocaleString();
+}
+
+refresh();
+</script>
+</body>
+</html>

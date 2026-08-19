@@ -30,6 +30,7 @@ from lumen.graph.provider import ReadOnlyGraph
 from lumen.ingest import IngestWorker
 from lumen.operational.repositories import OperationalStore
 from lumen.pipeline.macroextraction.service import MacroextractionService
+from lumen.review.service import ReviewService
 from lumen.providers.errors import ProviderError
 from lumen.query import (
     ConversationalRetriever,
@@ -38,6 +39,7 @@ from lumen.query import (
     QueryFormulator,
     SessionRegistry,
 )
+from lumen.query.prompting import PersonaStore
 
 
 def get_graph(request: Request) -> ReadOnlyGraph:
@@ -100,6 +102,22 @@ def get_reporter(request: Request) -> MacroextractionService:
     return reporter
 
 
+def get_reviewer(request: Request) -> ReviewService:
+    """
+    The thing that answers review questions.
+
+    Narrow in the same way as the other two objects here that can change the
+    graph. What a route can do with one of these is list what is waiting,
+    answer one, defer one, or run the housekeeping. There is no way to reach
+    the graph through it, so no route can grow a way to write something
+    nobody was asked about.
+    """
+    reviewer = getattr(request.app.state, "reviewer", None)
+    if reviewer is None:
+        raise Unavailable("the review queue", "this deployment cannot answer reviews")
+    return reviewer
+
+
 def get_formulator(request: Request) -> QueryFormulator:
     """
     The thing that reads a conversational turn.
@@ -154,6 +172,19 @@ def get_composer(request: Request) -> PromptComposer:
     them changes every turn rather than the next one.
     """
     return request.app.state.composer
+
+
+def get_personas(request: Request) -> PersonaStore:
+    """
+    The thing that knows how each person has asked to be spoken to.
+
+    Reads and writes one row of the settings table and can reach nothing
+    else. Worth stating plainly, because this is the only handle in this file
+    that lets a caller change what a model is told: what it can change is
+    three paragraphs of tone, and the parts about distress are not fields on
+    what it hands back, so there is no request that could reach them.
+    """
+    return request.app.state.personas
 
 
 def get_memory(request: Request) -> ConversationMemory:
