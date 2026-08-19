@@ -866,9 +866,50 @@ This document outlines the systematic, stage-by-stage implementation plan for th
   - *Test:* Simulate 400-day gap, verify retrieval score drops by expected multiplier.
 
 - [ ] **Goal 20: API Gateway (BFF) Integration**
-  - Finalize `lumen/api/main.py` (FastAPI) tying all routes: `/chat`, `/ingest`, `/query`, `/graph`, `/hitl`, `/reports`.
+  - Finalize `lumen/api/main.py` (FastAPI) tying all routes: `/chat`, `/ingest`, `/query`, `/graph`, `/hitl`, `/reports`, `/settings`.
   - WebSocket streaming for chat responses and pipeline progress updates.
   - *Test:* Full HTTP lifecycle: Ingest → Pipeline triggers → Query → Chat with RAG context.
+
+> **Landed early: a configurable system prompt, and more generous deadlines.** Two changes
+> were made between Goals 18 and 19 rather than waiting for the goal that owns them, because
+> both were cheap once the question was asked and both were costing something every day they
+> were not made.
+>
+> **Deadlines are now safety nets rather than pace-setters.** Every wait in the live
+> conversation was originally sized to fit inside the time somebody spends reading the
+> previous reply. That is a correct account of what a pause costs and a wrong conclusion
+> about where to set a limit: a deadline set close to how long healthy work takes converts
+> the slow tail of a working system into turns that silently retrieved nothing. Formulation
+> 0.6s → 3s, the shared retrieval clock 8s → 20s, Pass A 6s → 15s, Pass B 0.5s → 5s (it can
+> queue behind an import's write transaction since the single-writer lock landed), both
+> deadline worker pools 4 → 8, and the provider timeouts 60s/180s → 120s/300s for batch work
+> nobody waits on. The formulation model goes from no retries to one: at 0.6s a retry could
+> not have finished, and at 3s a half-second backoff fits. Carry-forward is what makes this
+> safe to tune generously — retrieval that misses the clock arrives next turn rather than
+> being discarded. Recorded as a correction in `Conversational_RAG_Mode.md`.
+>
+> **The system prompt is now the person's to change**, which it had never been — it was five
+> module constants in `persona.py` with no path from a user to any of them. Shipped: a
+> `Persona` model carrying the three editable sections, a `PersonaStore` over the existing
+> `user_settings` table storing *only* the sections somebody actually changed, threading
+> through `build_system_prompt` → `PromptComposer.compose` → `ChatEngine` (which is the one
+> object in the chain that knows who is speaking), and `GET`/`PUT`/`DELETE /settings/persona`.
+>
+> Two design decisions worth carrying forward. **Safety and crisis are not fields on
+> `Persona`** — they are applied from module constants on every turn regardless of what is
+> stored, so making them configurable is a code change with a reviewer rather than something
+> reachable by a request. They are still *readable* through the API, because being unable to
+> edit the distress instruction and being unable to see it are different things. And **only
+> differences are stored**: a section is reset by deleting the override, never by writing
+> today's default back, so a reset section keeps following later improvements to the wording
+> instead of freezing a copy of it.
+>
+> *Deferred to Goal 20:* the settings surface belongs in the goal that finalises the API, and
+> the routes currently read `config.user_id` like every other surface — Goal 21 retrofits
+> that through `get_identity` along with the rest. *Deferred to the front-end goals:* the S10
+> editor itself (`FR-S10-6`…`FR-S10-8`). *Not planned:* per-user prompt caching. The read is
+> one primary-key lookup on a turn already making several model calls, and a cache would mean
+> an edit made through the API not reaching a conversation already running in another process.
 
 ## Phase 6: Identity & Multi-User (Goals 21-22)
 **Objective:** Put a real person behind every request, and give each of them a graph nobody

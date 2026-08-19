@@ -39,6 +39,7 @@ from lumen.query import (
     QueryFormulator,
     SessionRegistry,
 )
+from lumen.query.prompting import PersonaStore
 
 
 def get_graph(request: Request) -> ReadOnlyGraph:
@@ -171,6 +172,19 @@ def get_composer(request: Request) -> PromptComposer:
     them changes every turn rather than the next one.
     """
     return request.app.state.composer
+
+
+def get_personas(request: Request) -> PersonaStore:
+    """
+    The thing that knows how each person has asked to be spoken to.
+
+    Reads and writes one row of the settings table and can reach nothing
+    else. Worth stating plainly, because this is the only handle in this file
+    that lets a caller change what a model is told: what it can change is
+    three paragraphs of tone, and the parts about distress are not fields on
+    what it hands back, so there is no request that could reach them.
+    """
+    return request.app.state.personas
 
 
 def get_memory(request: Request) -> ConversationMemory:

@@ -370,7 +370,24 @@ never find.
 **FR-S10-5** Provider and model configuration is **read-only** in the UI. It is a
 deployment property read from the environment at process start, never a user setting.
 
-**Backed by:** `GET /health`, and `config_snapshot` on each run. Complete enough today.
+**FR-S10-6** The person can rewrite how the assistant talks to them. Three sections are
+theirs — who it is, how it behaves, and how visible their own history may be — each shown
+beside the default it replaces, each independently resettable. Editing one must not disturb
+the others, and clearing a box must restore that section's default rather than leaving the
+assistant with a heading and silence under it.
+
+**FR-S10-7** The distress and crisis instructions are shown and **cannot be edited**. Both
+halves of that are requirements. They are visible because somebody deciding whether to trust
+this with the worst week of their life is entitled to read what it has been told to do during
+one. They are fixed because a settings screen is the wrong place to discover that the safety
+paragraph was deleted six months ago. This is enforced in the type rather than in the UI —
+there is no field for either — so a screen cannot expose them by mistake.
+
+**FR-S10-8** Where a section is long, the editor must say how long it may be *before* a save
+is refused. The limit is published on the read.
+
+**Backed by:** `GET /health`, `config_snapshot` on each run, and
+`GET`/`PUT`/`DELETE /settings/persona`. Complete enough today.
 
 ### S11 — Sign in
 

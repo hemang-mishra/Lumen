@@ -176,6 +176,7 @@ class LazyChatStack:
         composer,
         memory,
         sessions,
+        personas=None,
     ) -> None:
         self._config = config
         self._search = search
@@ -183,6 +184,7 @@ class LazyChatStack:
         self._composer = composer
         self._memory = memory
         self._sessions = sessions
+        self._personas = personas
         self._lock = threading.Lock()
         self._engine = None
         self._llm = None
@@ -210,6 +212,7 @@ class LazyChatStack:
                     sessions=self._sessions,
                     llm=self._reply_model(),
                     speech=self._voice(),
+                    personas=self._personas,
                     config=self._config.chat,
                 )
             return self._engine

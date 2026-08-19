@@ -102,6 +102,11 @@ def _known_setting_keys() -> frozenset[str]:
         "pipeline.session_decay_minutes",
         "hitl.queue_cap",
         "logging.level",
+        # How the assistant is instructed to talk to this person. One key
+        # holding one object rather than a key per section: a save that set
+        # two sections and failed on the third would otherwise leave an
+        # instruction nobody composed, and nothing here spans keys.
+        "chat.persona",
     })
 
 

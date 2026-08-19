@@ -276,42 +276,72 @@ class QueryConfig:
       LUMEN_ANCHOR_BASE_SCORE           — what an exact anchor match is worth
       LUMEN_RETRIEVAL_MAX_WORKERS       — threads available for the parallel searches
 
-    The timeout is the number that matters most. It is deliberately shorter
-    than any other model call in the system: this one runs on every single
-    turn, and the person is waiting on it. Six hundred milliseconds is about
-    as long as a real call to a fast model takes, so the deadline catches
-    calls that have gone wrong rather than calls that are merely working.
+    Every deadline here is a **safety net, not a pace-setter.** That is the
+    one thing to understand before changing any of them. Each one exists to
+    catch a call that has gone wrong — a hung connection, a provider that
+    will never answer — and not to hurry a call that is merely working. A
+    deadline set close to how long the work actually takes does not make
+    anything faster; it just converts the slow tail of a working system into
+    turns that silently retrieved nothing.
+
+    That is why the numbers are generous. The failure they guard against is
+    a felt pause before a reply; the failure they cause when set too tight is
+    an assistant that has forgotten somebody, which is worse and is invisible
+    from the outside. A pause before a considered answer is normal in this
+    kind of conversation. Being answered by something that does not remember
+    you is not.
 
     The turn window exists because some turns cannot be read alone. "I don't
     feel that anymore" says nothing without the sentence before it.
 
-    The three-second search budget is the other side of the same coin. It is
-    spent while the person is still reading the previous reply, which is what
-    makes it invisible rather than a pause — and it is a limit on the whole
-    search, not on each part of it, because that is what the person waiting
-    actually experiences.
+    The search budget is a limit on the whole search rather than on each part
+    of it, because one wall clock is what the person waiting actually
+    experiences. The per-pass limits sit under it so that one stuck pass
+    cannot spend the shared budget and leave the other with nothing.
     """
 
+    # Three seconds, not six hundred milliseconds. A real call to a hosted
+    # fast model takes 300–800ms on a good day and several times that on a
+    # bad one, so a sub-second deadline was firing on calls that were working
+    # — and every one of those cost the turn its retrieval. This catches a
+    # call that has genuinely hung and leaves a slow one alone.
     formulation_timeout_seconds: float = _env_float(
-        "LUMEN_FORMULATION_TIMEOUT_SECONDS", 0.6
+        "LUMEN_FORMULATION_TIMEOUT_SECONDS", 3.0
     )
     formulation_context_turns: int = _env_int("LUMEN_FORMULATION_CONTEXT_TURNS", 4)
     max_triggers_per_turn: int = _env_int("LUMEN_MAX_TRIGGERS_PER_TURN", 3)
     max_keywords_per_trigger: int = _env_int("LUMEN_MAX_TRIGGER_KEYWORDS", 6)
     era_vocabulary_limit: int = _env_int("LUMEN_ERA_VOCABULARY_LIMIT", 50)
     session_max_turns: int = _env_int("LUMEN_SESSION_MAX_TURNS", 200)
-    formulation_max_workers: int = _env_int("LUMEN_FORMULATION_MAX_WORKERS", 4)
 
-    # Eight seconds, not three. The three-second window was chosen to stay
-    # inside the time somebody spends reading the previous reply; a longer
-    # pause before a considered answer is normal in this kind of
-    # conversation, and an answer that missed the one relevant thing is not.
-    retrieval_budget_seconds: float = _env_float("LUMEN_RETRIEVAL_BUDGET_SECONDS", 8.0)
+    # Wider than it was, because a longer deadline means each turn holds its
+    # worker for longer. An abandoned call cannot be stopped and finishes on
+    # its own, so the pool has to have room for the one being waited on plus
+    # the ones nobody is waiting on any more.
+    formulation_max_workers: int = _env_int("LUMEN_FORMULATION_MAX_WORKERS", 8)
+
+    # Twenty seconds, and the history of this number is the argument for it.
+    # It began at three, to stay inside the time somebody spends reading the
+    # previous reply. It went to eight once it was clear that a pause before
+    # a considered answer is normal here and a missed connection is not. It
+    # is now twenty, for the same reason carried to its end: the search
+    # contains a model call, an embedding call and an index lookup, and any
+    # of the three can have a slow minute without being broken. Waiting is
+    # cheap and recoverable. Answering somebody as though their history were
+    # not there is neither.
+    retrieval_budget_seconds: float = _env_float("LUMEN_RETRIEVAL_BUDGET_SECONDS", 20.0)
     semantic_pass_timeout_seconds: float = _env_float(
-        "LUMEN_PASS_A_TIMEOUT_SECONDS", 6.0
+        "LUMEN_PASS_A_TIMEOUT_SECONDS", 15.0
     )
+
+    # The anchor lookups read the graph and call no model, so this used to be
+    # half a second. That stopped being safe when the single-writer lock
+    # landed: these reads now serialise against an import's write
+    # transaction and can wait for as long as one runs. Five seconds is not
+    # how long the lookup takes — it is how long it may sit behind somebody
+    # else's write before giving up.
     structural_pass_timeout_seconds: float = _env_float(
-        "LUMEN_PASS_B_TIMEOUT_SECONDS", 0.5
+        "LUMEN_PASS_B_TIMEOUT_SECONDS", 5.0
     )
 
     # More matches are fetched than kept, for the reason the pipeline fetches
@@ -354,7 +384,7 @@ class QueryConfig:
     # because it answers the question before this one.
     carry_forward_turns: int = _env_int("LUMEN_CARRY_FORWARD_TURNS", 1)
     deferred_penalty: float = _env_float("LUMEN_DEFERRED_PENALTY", 0.9)
-    retrieval_max_workers: int = _env_int("LUMEN_RETRIEVAL_MAX_WORKERS", 4)
+    retrieval_max_workers: int = _env_int("LUMEN_RETRIEVAL_MAX_WORKERS", 8)
 
 
 @dataclass(frozen=True)
@@ -599,8 +629,15 @@ class ProviderConfig:
     # How long to wait for a model, and how hard to try again when a call fails
     # for reasons that have nothing to do with the answer (a dropped
     # connection, a busy server, a hit rate limit).
-    timeout_seconds: float = _env_float("LUMEN_LLM_TIMEOUT_SECONDS", 60.0)
-    thinking_timeout_seconds: float = _env_float("LUMEN_THINKING_TIMEOUT_SECONDS", 180.0)
+    #
+    # Both are deliberately longer than any call should need. Nobody is
+    # waiting on these — the live conversation bounds itself from outside, in
+    # QueryConfig — so the only thing a short timeout achieves here is
+    # throwing away work that was about to succeed and making the pipeline
+    # re-run it. A long entry given to a reasoning model is genuinely slow,
+    # and slow is not the same as stuck.
+    timeout_seconds: float = _env_float("LUMEN_LLM_TIMEOUT_SECONDS", 120.0)
+    thinking_timeout_seconds: float = _env_float("LUMEN_THINKING_TIMEOUT_SECONDS", 300.0)
     max_attempts: int = _env_int("LUMEN_LLM_MAX_ATTEMPTS", 3)
     backoff_base_seconds: float = _env_float("LUMEN_LLM_BACKOFF_BASE", 0.5)
     backoff_max_seconds: float = _env_float("LUMEN_LLM_BACKOFF_MAX", 8.0)

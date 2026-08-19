@@ -35,7 +35,7 @@ from lumen.query.chat import (
 from lumen.query.conversation import ConversationStore
 from lumen.query.formulation import QueryFormulator
 from lumen.query.memory import ConversationMemory
-from lumen.query.prompting import PromptComposer
+from lumen.query.prompting import PersonaStore, PromptComposer
 from lumen.query.session import SessionRegistry
 from lumen.schemas.enums import ModelRole
 
@@ -94,12 +94,15 @@ def build_runner(config: AppConfig | None = None) -> Iterator[ChatRunner]:
         config=settings.chat,
     )
 
-    # Retries off for the turn reader, as everywhere else: a call that has
-    # already missed a sub-second deadline gains nothing from a second go.
-    no_retries = replace(settings.providers, max_attempts=1)
+    # One retry for the turn reader, where every other call in the system
+    # gets three. It used to get none: under a sub-second deadline a second
+    # attempt could not have finished. The deadline is seconds now, and a
+    # dropped connection at half a second leaves room for one more go — so
+    # the turn keeps its retrieval instead of losing it to a blip.
+    one_retry = replace(settings.providers, max_attempts=2)
     formulator = QueryFormulator(
         llm=get_llm_provider(
-            ModelRole.LIGHTWEIGHT, replace(settings, providers=no_retries)
+            ModelRole.LIGHTWEIGHT, replace(settings, providers=one_retry)
         ),
         graph=graph,
         config=settings.query,
@@ -111,6 +114,7 @@ def build_runner(config: AppConfig | None = None) -> Iterator[ChatRunner]:
         composer=PromptComposer(config=settings.chat),
         memory=memory,
         sessions=sessions,
+        personas=PersonaStore(settings=store.settings),
         llm=get_llm_provider(ModelRole.CONVERSATION, settings),
         speech=_quiet(lambda: get_speech_provider(settings))
         if settings.chat.voice_enabled

@@ -50,6 +50,8 @@ from lumen.query.formulation import QueryFormulator
 from lumen.query.memory import ConversationMemory
 from lumen.query.memory.contracts import Recollection
 from lumen.query.prompting import ChatPrompt, PromptComposer
+from lumen.query.prompting.persona import Persona
+from lumen.query.prompting.settings import PersonaStore
 from lumen.query.retrieval import ConversationalRetriever
 from lumen.query.session import ChatSession, SessionRegistry
 from lumen.schemas.query import ChatTurn, RetrievalSignal
@@ -73,6 +75,11 @@ class ChatEngine:
     The voice is optional and separate. A deployment with no speech model
     configured still holds a perfectly good typed conversation, and nothing
     here has to know the difference.
+
+    So is the persona. Without one, everybody gets the wording Lumen ships
+    with; with one, whoever is talking gets whatever they have rewritten. It
+    is resolved here rather than inside the composer because this is the one
+    object in the chain that knows who is speaking.
     """
 
     def __init__(
@@ -85,6 +92,7 @@ class ChatEngine:
         sessions: SessionRegistry,
         llm: StreamingLLMProvider,
         speech: TTSProvider | None = None,
+        personas: PersonaStore | None = None,
         config: ChatConfig | None = None,
     ) -> None:
         self._formulator = formulator
@@ -94,6 +102,7 @@ class ChatEngine:
         self._sessions = sessions
         self._llm = llm
         self._speech = speech
+        self._personas = personas
         self._config = config or ChatConfig()
 
     # ------------------------------------------------------------------
@@ -159,7 +168,11 @@ class ChatEngine:
         bundle = self._retriever.retrieve(signal, session)
         recollection = self._memory.recall(conversation.session_id)
         prompt = self._composer.compose(
-            bundle=bundle, signal=signal, recollection=recollection, now=at
+            bundle=bundle,
+            signal=signal,
+            recollection=recollection,
+            now=at,
+            persona=self._persona_for(user_id),
         )
 
         yield _what_was_gathered(signal, bundle, prompt, recollection)
@@ -167,6 +180,21 @@ class ChatEngine:
         yield from self._answer(conversation.session_id, prompt, speak=speak)
 
         self._tidy_up(conversation.session_id)
+
+    def _persona_for(self, user_id: str) -> Persona | None:
+        """
+        How this person has asked to be spoken to, if they have said.
+
+        Nothing when no store was given, which is the ordinary state for a
+        test and for any caller that has not wired settings up. `resolve`
+        handles its own failures, so there is nothing to catch here — an
+        instruction that cannot be read comes back as the default rather than
+        as an exception, because a turn is not worth refusing over the
+        wording of a paragraph.
+        """
+        if self._personas is None:
+            return None
+        return self._personas.resolve(user_id)
 
     # ------------------------------------------------------------------
     # Writing the reply

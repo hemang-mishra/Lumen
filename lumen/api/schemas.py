@@ -1121,3 +1121,89 @@ class ReviewCountView(BaseModel):
     def of(cls, counts: QueueCounts) -> "ReviewCountView":
         """Build one from what the queue reported."""
         return cls(**counts.model_dump())
+
+
+class PersonaSectionView(BaseModel):
+    """
+    One section of the instruction, as a settings screen needs to show it.
+
+    Carries the person's wording and the default side by side, and says
+    which of the two is actually in use. A screen with only the effective
+    text cannot draw the difference between "they wrote this" and "this is
+    what Lumen ships with", which is the one thing somebody editing it needs
+    to know before they change anything.
+
+    Attributes:
+        name: Which section this is.
+        text: What is actually sent to the model.
+        default: What Lumen ships with, always, whether or not it is in use.
+        overridden: True when the person wrote this themselves.
+        max_length: The longest this section may be, so a form can say so
+            before a save is refused rather than after.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    name: str
+    text: str
+    default: str
+    overridden: bool
+    max_length: int
+
+
+class PersonaView(BaseModel):
+    """
+    How the assistant is instructed to talk to one person.
+
+    The fixed sections are handed back as text with no way to set them. They
+    are shown rather than hidden on purpose: somebody deciding whether to
+    trust this with the worst week of their life is entitled to read what it
+    has been told to do when they are in real distress. Being unable to edit
+    it is the point; being unable to see it would be a different thing.
+
+    Attributes:
+        sections: The parts this person may change.
+        safety: The distress instruction, appended to every ordinary turn.
+        crisis: What replaces the whole instruction in acute distress.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    sections: list[PersonaSectionView]
+    safety: str
+    crisis: str
+
+
+class PersonaUpdateRequest(BaseModel):
+    """
+    A change to one or more sections.
+
+    Every field is optional and every one distinguishes three states, which
+    is why they are typed the way they are. Left out entirely, a section is
+    untouched. Sent as text, it is stored. Sent empty or as null, the
+    override is removed and the default comes back — which is what clearing
+    a box on a form means.
+
+    Attributes:
+        identity: Who the assistant is to them.
+        how_to_be: How it behaves — length, questions, directness.
+        how_to_use_the_notes: How visible their own history may be.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    identity: str | None = None
+    how_to_be: str | None = None
+    how_to_use_the_notes: str | None = None
+
+    def changes(self) -> dict[str, str | None]:
+        """
+        Only the sections this request actually mentioned.
+
+        Built from what was set rather than from every field, so a request
+        naming one section cannot silently clear the other two.
+        """
+        return {
+            name: getattr(self, name)
+            for name in self.model_fields_set
+        }

@@ -245,13 +245,16 @@ class TestBuildingTheTurnReaderAtStartup:
 
         assert _build_formulator(AppConfig(), graph_store) is None
 
-    def test_a_configured_model_is_built_without_retries(
+    def test_a_configured_model_is_built_with_one_retry_not_three(
         self, monkeypatch, graph_store
     ):
-        # This one call has a deadline in fractions of a second. A retry has
-        # already missed it, and only guarantees the wait is spent twice.
+        # Somebody is waiting on this call, so it does not get the three
+        # attempts everything else gets. It does get one more than none:
+        # the backoff starts at half a second and the deadline is seconds,
+        # so a dropped connection costs a retry rather than the whole turn's
+        # retrieval.
         from lumen.api.main import _build_formulator
-        from lumen.config import AppConfig, ProviderConfig
+        from lumen.config import AppConfig, ProviderConfig, QueryConfig
 
         monkeypatch.setenv("GEMINI_API_KEY", "test-key")
         config = AppConfig(providers=ProviderConfig(lightweight_provider="fake"))
@@ -259,7 +262,12 @@ class TestBuildingTheTurnReaderAtStartup:
         formulator = _build_formulator(config, graph_store)
         try:
             assert formulator is not None
-            assert formulator._llm._config.max_attempts == 1
+            assert formulator._llm._config.max_attempts == 2
+            assert formulator._llm._config.max_attempts < AppConfig().providers.max_attempts
+
+            # The retry only makes sense while it fits inside the deadline.
+            backoff = formulator._llm._config.backoff_base_seconds
+            assert backoff < QueryConfig().formulation_timeout_seconds
         finally:
             formulator.close()
 
