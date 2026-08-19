@@ -24,6 +24,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from lumen.graph.provider import EdgeRow, GraphSlice
 from lumen.graph.queries import node_type_of, tidy_edge, tidy_row
+from lumen.review.contracts import QueueCounts, ResolutionChoice
 from lumen.schemas.query import RetrievalSignal
 
 
@@ -1077,3 +1078,46 @@ def _as_moment(value: Any, *, default: datetime | None = None) -> Any:
         return datetime.fromisoformat(str(value))
     except (TypeError, ValueError):
         return default
+
+
+# ---------------------------------------------------------------------------
+# The review queue
+# ---------------------------------------------------------------------------
+
+
+class ReviewResolveRequest(BaseModel):
+    """
+    One answer to one question.
+
+    Only the answer is accepted. Everything else about what happens next —
+    which records are written, which links, what the note says — comes from
+    what was saved when the question was raised, so a caller cannot use this
+    to write something nobody proposed.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    choice: ResolutionChoice
+
+
+class ReviewCountView(BaseModel):
+    """
+    How much is waiting, for a badge.
+
+    Cheap on purpose. This is polled from every screen, so it answers with
+    counts and one date rather than assembling any cards.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    pending: int = Field(ge=0)
+    visible: int = Field(ge=0)
+    parked: int = Field(ge=0)
+    cap: int = Field(ge=1)
+    at_capacity: bool = False
+    oldest_asked_at: datetime | None = None
+
+    @classmethod
+    def of(cls, counts: QueueCounts) -> "ReviewCountView":
+        """Build one from what the queue reported."""
+        return cls(**counts.model_dump())

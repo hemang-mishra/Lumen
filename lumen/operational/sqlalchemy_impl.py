@@ -21,7 +21,7 @@ from contextlib import contextmanager
 from datetime import UTC, date, datetime, timedelta
 from typing import Any
 
-from sqlalchemy import Engine, delete, func, select
+from sqlalchemy import Engine, delete, func, or_, select
 from sqlalchemy.orm import Session, sessionmaker
 
 from lumen.config import AppConfig, OperationalConfig
@@ -65,10 +65,20 @@ from lumen.operational.schemas import (
     UserSettingRecord,
     WriteLogEntry,
 )
-from lumen.schemas.enums import HitlResolutionChoice, SignalStrength, SourceModality
+from lumen.schemas.enums import (
+    HitlResolutionChoice,
+    ReconciliationAction,
+    SignalStrength,
+    SourceModality,
+)
 from lumen.schemas.pipeline import BufferMessage, SessionDecayEvent
 
 logger = logging.getLogger(__name__)
+
+
+# The shape saved proposals are written in. Stored beside each one so a
+# later change to that shape can be migrated rather than guessed at.
+_PROPOSAL_SCHEMA_VERSION = 1
 
 
 # How strongly a signal counts when ordering the review queue. Higher wins.
@@ -833,6 +843,68 @@ class SqlAlchemyHitlQueueRepository:
             ).all()
             return [_to_hitl_record(row) for row in rows]
 
+    def list_visible(
+        self, user_id: str, *, now: datetime, limit: int = 20
+    ) -> list[HitlQueueItemRecord]:
+        with self._sessions.session() as db:
+            rows = db.scalars(
+                select(models.HitlQueueItem)
+                .where(
+                    models.HitlQueueItem.user_id == user_id,
+                    models.HitlQueueItem.status
+                    == HitlItemStatus.PENDING_HITL.value,
+                    or_(
+                        models.HitlQueueItem.snoozed_until.is_(None),
+                        models.HitlQueueItem.snoozed_until <= now,
+                    ),
+                )
+                # Ties first, then stronger signals, then oldest first.
+                .order_by(
+                    models.HitlQueueItem.priority_rank.asc(),
+                    models.HitlQueueItem.signal_rank.desc(),
+                    models.HitlQueueItem.created_at.asc(),
+                )
+                .limit(limit)
+            ).all()
+            return [_to_hitl_record(row) for row in rows]
+
+    def list_parked(self, user_id: str) -> list[HitlQueueItemRecord]:
+        with self._sessions.session() as db:
+            rows = db.scalars(
+                select(models.HitlQueueItem)
+                .where(
+                    models.HitlQueueItem.user_id == user_id,
+                    models.HitlQueueItem.status
+                    == HitlItemStatus.SUSPENDED_QUEUE_FULL.value,
+                )
+                .order_by(
+                    models.HitlQueueItem.priority_rank.asc(),
+                    models.HitlQueueItem.signal_rank.desc(),
+                    models.HitlQueueItem.created_at.asc(),
+                )
+            ).all()
+            return [_to_hitl_record(row) for row in rows]
+
+    def find_auto_resolvable(
+        self, user_id: str, *, cutoff: datetime
+    ) -> list[HitlQueueItemRecord]:
+        with self._sessions.session() as db:
+            rows = db.scalars(
+                select(models.HitlQueueItem)
+                .where(
+                    models.HitlQueueItem.user_id == user_id,
+                    models.HitlQueueItem.status
+                    == HitlItemStatus.PENDING_HITL.value,
+                    # Never something nobody has touched. A count of at least
+                    # one is the only evidence that the question was seen.
+                    models.HitlQueueItem.snooze_count >= 1,
+                    models.HitlQueueItem.last_snoozed_at.is_not(None),
+                    models.HitlQueueItem.last_snoozed_at < cutoff,
+                )
+                .order_by(models.HitlQueueItem.last_snoozed_at.asc())
+            ).all()
+            return [_to_hitl_record(row) for row in rows]
+
     def count_pending(self, user_id: str) -> int:
         open_statuses = [status.value for status in OPEN_HITL_STATUSES]
         with self._sessions.session() as db:
@@ -843,6 +915,21 @@ class SqlAlchemyHitlQueueRepository:
                     .where(
                         models.HitlQueueItem.user_id == user_id,
                         models.HitlQueueItem.status.in_(open_statuses),
+                    )
+                )
+                or 0
+            )
+
+    def count_asked(self, user_id: str) -> int:
+        with self._sessions.session() as db:
+            return int(
+                db.scalar(
+                    select(func.count())
+                    .select_from(models.HitlQueueItem)
+                    .where(
+                        models.HitlQueueItem.user_id == user_id,
+                        models.HitlQueueItem.status
+                        == HitlItemStatus.PENDING_HITL.value,
                     )
                 )
                 or 0
@@ -863,20 +950,79 @@ class SqlAlchemyHitlQueueRepository:
         item_id: str,
         status: HitlItemStatus,
         resolution_choice: HitlResolutionChoice | None = None,
+        resolved_action: ReconciliationAction | None = None,
     ) -> HitlQueueItemRecord:
         with self._sessions.session() as db:
             row = db.get(models.HitlQueueItem, item_id)
             if row is None:
                 raise RecordNotFoundError(f"no review item with id {item_id!r}")
 
+            settling = status in (
+                HitlItemStatus.RESOLVED,
+                HitlItemStatus.AUTO_RESOLVED,
+            )
+            already_settled = HitlItemStatus(row.status) not in OPEN_HITL_STATUSES
+            if settling and already_settled:
+                # Two taps on one card, or a sweep racing somebody answering.
+                # Letting the second one through would write the same change
+                # to the graph a second time.
+                raise IllegalStateTransitionError(
+                    f"review item {item_id!r} was already settled as {row.status}"
+                )
+
             row.status = status.value
             if resolution_choice is not None:
                 row.resolution_choice = resolution_choice.value
-            if status in (HitlItemStatus.RESOLVED, HitlItemStatus.AUTO_RESOLVED):
+            if resolved_action is not None:
+                row.resolved_action = resolved_action.value
+            if settling:
                 row.resolved_at = _utcnow()
+                # Nothing is hidden once it is answered. Leaving the date
+                # behind would keep a settled item out of any view that reads
+                # it, which is confusing rather than harmful, and free to fix.
+                row.snoozed_until = None
 
             db.flush()
             return _to_hitl_record(row)
+
+    def snooze(
+        self, item_id: str, *, until: datetime, at: datetime
+    ) -> HitlQueueItemRecord:
+        with self._sessions.session() as db:
+            row = db.get(models.HitlQueueItem, item_id)
+            if row is None:
+                raise RecordNotFoundError(f"no review item with id {item_id!r}")
+            if HitlItemStatus(row.status) not in OPEN_HITL_STATUSES:
+                raise IllegalStateTransitionError(
+                    f"review item {item_id!r} is already settled"
+                )
+
+            row.snooze_count += 1
+            row.last_snoozed_at = at
+            row.snoozed_until = until
+            db.flush()
+            return _to_hitl_record(row)
+
+    def save_proposal(self, audit_node_id: str, payload: str) -> None:
+        with self._sessions.session() as db:
+            row = db.get(models.HitlProposal, audit_node_id)
+            if row is None:
+                db.add(
+                    models.HitlProposal(
+                        audit_node_id=audit_node_id,
+                        payload=payload,
+                        schema_version=_PROPOSAL_SCHEMA_VERSION,
+                    )
+                )
+            else:
+                row.payload = payload
+                row.schema_version = _PROPOSAL_SCHEMA_VERSION
+            db.flush()
+
+    def get_proposal(self, audit_node_id: str) -> str | None:
+        with self._sessions.session() as db:
+            row = db.get(models.HitlProposal, audit_node_id)
+            return row.payload if row else None
 
 
 class SqlAlchemyUserSettingsRepository:
@@ -1386,8 +1532,10 @@ def _to_hitl_record(row: models.HitlQueueItem) -> HitlQueueItemRecord:
         created_at=_aware(row.created_at),
         snooze_count=row.snooze_count,
         last_snoozed_at=_aware(row.last_snoozed_at),
+        snoozed_until=_aware(row.snoozed_until),
         resolved_at=_aware(row.resolved_at),
         resolution_choice=row.resolution_choice,
+        resolved_action=row.resolved_action,
         priority_rank=row.priority_rank,
         signal_rank=row.signal_rank,
     )

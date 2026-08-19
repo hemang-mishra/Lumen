@@ -385,7 +385,9 @@ def _think_and_save(
 
     escalated = 0
     if result.outcome is not None:
-        escalated = bookkeeping.queue_escalations(result.outcome, ops=ops, job=job)
+        escalated = bookkeeping.queue_escalations(
+            result.outcome, ops=ops, job=job, config=config
+        )
 
     return EpisodeOutcome(
         episode_id=episode_id,

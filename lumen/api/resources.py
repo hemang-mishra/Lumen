@@ -30,8 +30,10 @@ from lumen.config import AppConfig
 from lumen.graph.provider import GraphProvider, ReadOnlyGraph
 from lumen.ingest.worker import IngestResources, IngestWorker, build_resources
 from lumen.providers.factory import get_llm_provider
+from lumen.providers.protocols import EmbeddingProvider
 from lumen.query import ConversationalRetriever
 from lumen.schemas.enums import ModelRole
+from lumen.vector.provider import VectorProvider
 
 logger = logging.getLogger(__name__)
 
@@ -86,6 +88,23 @@ class LazySearchStack:
                 self._retriever = self._build()
                 logger.info("the conversational search stack is open")
             return self._retriever
+
+    def vectors(self) -> VectorProvider:
+        """
+        The search index, opened if this is the first thing to want it.
+
+        Handed out so anything else needing to write to the index borrows
+        this one rather than opening its own. A file-backed index takes a
+        lock, so a second handle on the same folder inside one process is
+        refused outright.
+        """
+        with self._lock:
+            return self._shared_resources().vectors
+
+    def embedder(self) -> EmbeddingProvider:
+        """The embedding model, borrowed from the same shared resources."""
+        with self._lock:
+            return self._shared_resources().embedder
 
     def close(self) -> None:
         """Release the thread pool, and the index if this opened its own."""

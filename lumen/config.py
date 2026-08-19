@@ -116,12 +116,21 @@ class OperationalConfig:
       LUMEN_OPS_DB_ECHO          — "true" to log every SQL statement
       LUMEN_SESSION_DECAY_MINUTES — idle minutes before a session is processed
       LUMEN_HITL_QUEUE_CAP       — maximum items allowed in the review queue
+      LUMEN_HITL_SNOOZE_HOURS    — how long a deferred item stays out of sight
+      LUMEN_HITL_AUTO_RESOLVE_DAYS — days after deferring before an item
+                                     settles itself
+
+    The two review-queue timings are settings rather than constants because
+    they are the pace at which the system asks somebody for their attention,
+    and the right pace is a matter of how they use it.
     """
 
     db_url: str = _env("LUMEN_OPS_DB_URL", "sqlite:///./lumen_ops.db")
     echo_sql: bool = _env_bool("LUMEN_OPS_DB_ECHO", False)
     session_decay_minutes: int = _env_int("LUMEN_SESSION_DECAY_MINUTES", 120)
     hitl_queue_cap: int = _env_int("LUMEN_HITL_QUEUE_CAP", 40)
+    hitl_snooze_hours: int = _env_int("LUMEN_HITL_SNOOZE_HOURS", 24)
+    hitl_auto_resolve_days: int = _env_int("LUMEN_HITL_AUTO_RESOLVE_DAYS", 7)
 
 
 @dataclass(frozen=True)

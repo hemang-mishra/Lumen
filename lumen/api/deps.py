@@ -30,6 +30,7 @@ from lumen.graph.provider import ReadOnlyGraph
 from lumen.ingest import IngestWorker
 from lumen.operational.repositories import OperationalStore
 from lumen.pipeline.macroextraction.service import MacroextractionService
+from lumen.review.service import ReviewService
 from lumen.providers.errors import ProviderError
 from lumen.query import (
     ConversationalRetriever,
@@ -98,6 +99,22 @@ def get_reporter(request: Request) -> MacroextractionService:
     if reporter is None:
         raise Unavailable("building reports", "this deployment cannot write reports")
     return reporter
+
+
+def get_reviewer(request: Request) -> ReviewService:
+    """
+    The thing that answers review questions.
+
+    Narrow in the same way as the other two objects here that can change the
+    graph. What a route can do with one of these is list what is waiting,
+    answer one, defer one, or run the housekeeping. There is no way to reach
+    the graph through it, so no route can grow a way to write something
+    nobody was asked about.
+    """
+    reviewer = getattr(request.app.state, "reviewer", None)
+    if reviewer is None:
+        raise Unavailable("the review queue", "this deployment cannot answer reviews")
+    return reviewer
 
 
 def get_formulator(request: Request) -> QueryFormulator:

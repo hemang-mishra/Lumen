@@ -24,6 +24,11 @@ import kuzu
 from lumen.graph import queries
 from lumen.graph.provider import EdgeRow, GraphProvider, GraphSlice
 from lumen.schemas.base import GraphNode
+from lumen.schemas.enums import (
+    DecisionStatus,
+    HitlResolutionChoice,
+    ReconciliationAction,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -123,6 +128,10 @@ EDGE_REGISTRY: list[tuple[str, str, str]] = [
 
     # superseded_by — principle version chain
     ("AdoptedPrincipleNode", "AdoptedPrincipleNode", "superseded_by"),
+
+    # superseded_by_dec — a held-back decision and the note of how it was
+    # finally answered
+    ("DecisionAuditNode", "DecisionAuditNode", "superseded_by_dec"),
 
     # failed_extraction — validation-failed observations
     ("EpisodeNode", "ObservationNode", "failed_extraction"),
@@ -1415,6 +1424,62 @@ class KuzuGraphProvider(GraphProvider):
             {"node_id": node_id},
         )
         logger.debug("Marked %s superseded at %s", node_id, at.isoformat())
+
+    def resolve_decision(
+        self,
+        node_id: str,
+        *,
+        choice: HitlResolutionChoice,
+        action: ReconciliationAction,
+        at: datetime,
+    ) -> None:
+        """
+        Stamp a decision that was waiting on somebody as answered.
+
+        Only the waiting stops. What the decision was — which action it
+        favoured, how sure it was, what it nearly chose instead — is left
+        exactly as written, because the point of the note is that it can
+        still be questioned years later.
+        """
+        self._execute(
+            "MATCH (d:DecisionAuditNode) WHERE d.node_id = $node_id "
+            "SET d.hitl_resolved = true, "
+            "d.hitl_resolution_timestamp = $at, "
+            "d.hitl_resolution_user_choice = $choice, "
+            "d.status = $status",
+            {
+                "node_id": node_id,
+                "at": at.isoformat(),
+                "choice": choice.value,
+                "status": DecisionStatus.ACTIVE.value,
+            },
+        )
+        logger.debug(
+            "Decision %s answered as %s (%s)", node_id, choice.value, action.value
+        )
+
+    def dismiss_decision(self, node_id: str, *, at: datetime) -> None:
+        """
+        Withdraw a question nobody can answer any more.
+
+        Nothing was done and nothing will be. The note keeps everything it
+        said about the decision and stops claiming somebody is going to look
+        at it, which is the only part of it that had stopped being true.
+        """
+        self._execute(
+            "MATCH (d:DecisionAuditNode) WHERE d.node_id = $node_id "
+            "SET d.hitl_resolved = true, "
+            "d.hitl_resolution_timestamp = $at, "
+            "d.hitl_resolution_user_choice = $choice, "
+            "d.status = $status",
+            {
+                "node_id": node_id,
+                "at": at.isoformat(),
+                "choice": HitlResolutionChoice.DISMISSED_UNANSWERABLE.value,
+                "status": DecisionStatus.DISMISSED.value,
+            },
+        )
+        logger.debug("Decision %s withdrawn as unanswerable", node_id)
 
     def record_reinforcement(self, node_id: str, *, at: datetime) -> None:
         """Add one to a belief or pattern's evidence, and note when."""

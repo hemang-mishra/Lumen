@@ -21,7 +21,7 @@ from pydantic import BaseModel, ConfigDict, Field, SerializeAsAny, model_validat
 
 from lumen.observability.trace import get_trace_id
 from lumen.schemas.base import GraphNode
-from lumen.schemas.edges import LogicalEdgeType, LumenEdge
+from lumen.schemas.edges import EDGE_MODELS, LogicalEdgeType, LumenEdge
 from lumen.schemas.enums import (
     BookkeepingOperation,
     CandidateRetrievalSource,
@@ -29,6 +29,7 @@ from lumen.schemas.enums import (
     EntryClass,
     EpisodeRunStatus,
     HitlEntryType,
+    HitlResolutionChoice,
     PipelineStage,
     QualityGateDecision,
     ReconciliationAction,
@@ -38,6 +39,7 @@ from lumen.schemas.enums import (
     StructuralAnchorType,
 )
 from lumen.schemas.nodes import (
+    NODE_MODELS,
     CausalChainNode,
     CausalStepNode,
     DecisionAuditNode,
@@ -549,9 +551,14 @@ class PlannedBookkeeping(BaseModel):
     dates and whether a version is still the current one.
 
     Attributes:
-        operation: Which of the three changes to make.
+        operation: Which change to make.
         node_id: The record to change.
         at: The moment to record against it.
+        choice: What a person decided, for the one operation that records an
+            answer to a question. Unset for every other operation.
+        resolved_action: What was done as a result of that answer. Carried
+            alongside the choice because "they took the second reading" does
+            not say what the second reading was.
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -559,6 +566,8 @@ class PlannedBookkeeping(BaseModel):
     operation: BookkeepingOperation
     node_id: str = Field(min_length=1)
     at: datetime
+    choice: HitlResolutionChoice | None = None
+    resolved_action: ReconciliationAction | None = None
 
 
 class GraphWritePlan(BaseModel):
@@ -657,6 +666,253 @@ _REFERENCE_FIELDS: tuple[str, ...] = (
 )
 
 
+class SavedNode(BaseModel):
+    """
+    A record that has been worked out but not yet written, kept as plain data.
+
+    A plan holds records as their shared base type, which is fine while it
+    stays in memory and loses the difference between a belief and a pattern
+    as soon as it is written down. So the kind is stored beside the fields,
+    and reading it back rebuilds the real thing — with all of its own rules
+    still enforced.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    node_type: str = Field(min_length=1)
+    fields: dict[str, Any] = Field(default_factory=dict)
+    searchable_text: str | None = None
+
+    @classmethod
+    def of(cls, planned: PlannedNode) -> "SavedNode":
+        """Put one planned record into the form it is stored in."""
+        return cls(
+            node_type=planned.node_type,
+            fields=planned.node.model_dump(mode="json"),
+            searchable_text=planned.searchable_text,
+        )
+
+    def restored(self) -> PlannedNode:
+        """Rebuild the planned record, as the kind of record it really is."""
+        model = NODE_MODELS.get(self.node_type)
+        if model is None:
+            raise ValueError(f"no such kind of record: {self.node_type}")
+        return PlannedNode(
+            node_type=self.node_type,
+            node=model.model_validate(self.fields),
+            searchable_text=self.searchable_text,
+        )
+
+
+class SavedEdge(BaseModel):
+    """
+    A link that has been worked out but not yet written, kept as plain data.
+
+    Stored the same way and for the same reason as a saved record. A link
+    read back as its base type would lose the decision that produced it and
+    the sentence some kinds of link carry.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    logical_type: LogicalEdgeType
+    table: str = Field(min_length=1)
+    from_node_id: str = Field(min_length=1)
+    to_node_id: str = Field(min_length=1)
+    edge_kind: str = Field(min_length=1)
+    fields: dict[str, Any] = Field(default_factory=dict)
+
+    @classmethod
+    def of(cls, planned: PlannedEdge) -> "SavedEdge":
+        """Put one planned link into the form it is stored in."""
+        return cls(
+            logical_type=planned.logical_type,
+            table=planned.table,
+            from_node_id=planned.from_node_id,
+            to_node_id=planned.to_node_id,
+            edge_kind=type(planned.edge).__name__,
+            fields=planned.edge.model_dump(mode="json"),
+        )
+
+    def restored(self) -> PlannedEdge:
+        """Rebuild the planned link, as the kind of link it really is."""
+        model = EDGE_MODELS.get(self.edge_kind)
+        if model is None:
+            raise ValueError(f"no such kind of link: {self.edge_kind}")
+        return PlannedEdge(
+            logical_type=self.logical_type,
+            table=self.table,
+            from_node_id=self.from_node_id,
+            to_node_id=self.to_node_id,
+            edge=model.model_validate(self.fields),
+        )
+
+    def restamped(self, decision_id: str) -> "SavedEdge":
+        """
+        The same link, pointed at a different decision note.
+
+        Only links that record which decision made them are changed. A
+        structural link does not claim to have been decided, so there is
+        nothing on it to move.
+        """
+        if "decision_id" not in self.fields:
+            return self
+        return self.model_copy(
+            update={"fields": {**self.fields, "decision_id": decision_id}}
+        )
+
+
+class ProposalVariant(BaseModel):
+    """
+    One thing the system was prepared to do, kept whole so it can be done
+    later.
+
+    This is a real, finished piece of writing — the same records, links and
+    small updates that would have landed had the decision not been held
+    back. Keeping the writing rather than a description of it is what makes
+    answering a question days later cost nothing and produce exactly what
+    was offered at the time.
+
+    Attributes:
+        action: What this variant does.
+        target_node_id: The existing record it acts on, if any.
+        target_type: Which kind of record that is.
+        confidence: How sure the model was about this reading.
+        reason: The model's one-line justification for it.
+        retrieval_source: Whether the record involved was found by meaning
+            or by an anchor. A fact about the search that offered it, so it
+            carries onto whatever note eventually records the answer.
+        anchor_type: Which anchor found it, where one did.
+        anchor_value: That anchor's value.
+        nodes: Records to create, in the order they must be created.
+        edges: Links to create.
+        bookkeeping: Small updates to records that already exist.
+        primary_edge_table: The link that is the point of the action, named
+            so reversing it later has something to aim at.
+        primary_edge_id: That link's handle.
+        delta_description: What changed, where this variant changes
+            something.
+        summary: A short, plain description of what taking this would mean.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    action: ReconciliationAction
+    target_node_id: str | None = None
+    target_type: str | None = None
+    confidence: float = Field(default=0.0, ge=0.0, le=1.0)
+    reason: str = ""
+    retrieval_source: CandidateRetrievalSource = CandidateRetrievalSource.SEMANTIC
+    anchor_type: StructuralAnchorType | None = None
+    anchor_value: str | None = None
+    nodes: list[SavedNode] = Field(default_factory=list)
+    edges: list[SavedEdge] = Field(default_factory=list)
+    bookkeeping: list[PlannedBookkeeping] = Field(default_factory=list)
+    primary_edge_table: str | None = None
+    primary_edge_id: str | None = None
+    delta_description: str | None = None
+    summary: str = ""
+
+    @property
+    def writes_nothing(self) -> bool:
+        """
+        True when taking this variant changes nothing in the graph.
+
+        A real outcome, not a failure. A finding that does not warrant a
+        lasting record of its own stays with the entry it came from, and
+        that is the commonest thing that can happen to it.
+        """
+        return not (self.nodes or self.edges or self.bookkeeping)
+
+    def writes_the_same_as(self, other: "ProposalVariant") -> bool:
+        """
+        Whether taking this and taking the other come to the same thing.
+
+        Two answers that write the same records and links are one answer
+        wearing two labels. Offering both as buttons asks somebody to choose
+        between a thing and itself.
+        """
+        def writing(variant: "ProposalVariant") -> str:
+            return variant.model_dump_json(
+                include={"nodes", "edges", "bookkeeping"}
+            )
+
+        return writing(self) == writing(other)
+
+
+class FrozenProposal(BaseModel):
+    """
+    Everything needed to carry out a held-back decision at some later date.
+
+    Saved the moment the system decides to ask rather than act. Without it
+    the only thing surviving is a note saying what the system was leaning
+    towards, which is not enough to write anything: the new wording for a
+    changed belief, or the shape of a new record, would have to be invented
+    a second time and would not match what the person was shown.
+
+    Attributes:
+        audit_node_id: The decision note this belongs to, and the key it is
+            stored under.
+        entry_type: Why the item is waiting, which decides how it is shown.
+        source_node_id: The finding the question is about.
+        source_type: Which kind of record that is.
+        source_text: What the finding says, so a card can be drawn without
+            a graph read.
+        episode_id: The piece of writing it came from.
+        event_date: The day that writing belongs to.
+        episode_index: Where the episode sat within its entry.
+        frozen_at: When this was saved.
+        primary: What the system recommended.
+        runner_up: The second reading, where there was one close enough to
+            be worth offering.
+        fallback: Recording the finding as its own separate thing. Always
+            present, because it is the answer to "no, this is something
+            else" and the answer nobody-answered-in-time resolves to.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    audit_node_id: str = Field(min_length=1)
+    entry_type: HitlEntryType
+    source_node_id: str = Field(min_length=1)
+    source_type: str = Field(min_length=1)
+    source_text: str = ""
+    episode_id: str = Field(min_length=1)
+    event_date: date
+    episode_index: int = Field(default=1, ge=1)
+    frozen_at: datetime
+    primary: ProposalVariant
+    runner_up: ProposalVariant | None = None
+    fallback: ProposalVariant
+
+    @property
+    def can_change_anything(self) -> bool:
+        """
+        Whether any answer to this question would change the history.
+
+        A question every answer to which writes nothing is not a question.
+        Asking it anyway spends the one thing the review queue is built to
+        protect — somebody's attention — and returns nothing for it.
+        """
+        return any(
+            not variant.writes_nothing
+            for variant in (self.primary, self.runner_up, self.fallback)
+            if variant is not None
+        )
+
+    @property
+    def saying_no_means_doing_nothing(self) -> bool:
+        """
+        Whether turning the recommendation down leaves nothing to write.
+
+        True when the recommendation is already "record this on its own",
+        because then the usual alternative — record it on its own — is the
+        same answer. What "no" means there is: leave the finding with the
+        entry it came from and create no standing record.
+        """
+        return self.primary.writes_the_same_as(self.fallback)
+
+
 class HitlEscalation(BaseModel):
     """
     One item reconciliation could not settle on its own, described well
@@ -670,6 +926,10 @@ class HitlEscalation(BaseModel):
         signal_strength: How much weight the item carries, which is what
             decides where it sits in the queue.
         summary: A short, plain description of what needs deciding.
+        proposal: Everything that was about to be written, kept so the
+            question can be answered later without asking a model again.
+            Unset only for an escalation raised before anything had been
+            planned at all.
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -680,6 +940,7 @@ class HitlEscalation(BaseModel):
     entry_type: HitlEntryType
     signal_strength: SignalStrength = SignalStrength.STANDARD
     summary: str = Field(min_length=1)
+    proposal: FrozenProposal | None = None
 
 
 class ReconciliationResult(PipelineDTO):
@@ -879,6 +1140,10 @@ __all__ = [
     "PlannedEdge",
     "PlannedBookkeeping",
     "GraphWritePlan",
+    "SavedNode",
+    "SavedEdge",
+    "ProposalVariant",
+    "FrozenProposal",
     "HitlEscalation",
     "ReconciliationResult",
     "ReconciliationOutcome",

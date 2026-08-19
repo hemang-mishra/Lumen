@@ -19,6 +19,7 @@ from lumen.operational.enums import BufferStatus, JobStatus, StageStatus
 from lumen.pipeline.orchestration import episode as episode_module
 from lumen.pipeline.orchestration import run_pipeline
 from lumen.schemas.enums import (
+    DecisionStatus,
     EntryClass,
     EpisodeRunStatus,
     PipelineStage,
@@ -528,17 +529,71 @@ class TestWhenTheConversationCannotBeUpdated:
         assert "could not update the conversation" in caplog.text
 
 
+# A finding the system wants to keep as a lasting record but is not sure
+# enough about. Both halves matter: below the bar, so it is held back, and
+# promotable, so answering it either way actually changes something.
+UNSURE_ABOUT_A_PATTERN = json.dumps(
+    {
+        "decisions": [
+            {
+                "item_index": 1,
+                "primary": {
+                    "action": "BRANCH",
+                    "confidence": 0.5,
+                    "reason": "this might be a pattern, or might be one day",
+                },
+                "new_node": {
+                    "kind": "PATTERN",
+                    "name": "comparison_spiral",
+                    "statement": "Comparing himself to others is what hurts",
+                    "domain": "SELF_CONCEPT",
+                },
+            }
+        ],
+        "people": [],
+    }
+)
+
+
 class TestUndecidedItems:
     def test_they_reach_the_review_queue(self, run, decayed_session, ops_store):
         # Without this, every undecided item produced before the review
         # screen exists would be silently discarded — and those are exactly
         # the items the system was least sure about.
-        report = run(decayed_session())
+        report = run(
+            decayed_session(), overrides={"decision": UNSURE_ABOUT_A_PATTERN}
+        )
 
         assert sum(e.escalations for e in report.episodes) > 0
         assert ops_store.hitl.count_pending("local") > 0
 
     def test_an_episode_holding_one_is_marked_as_open(self, run, decayed_session):
-        report = run(decayed_session())
+        report = run(
+            decayed_session(), overrides={"decision": UNSURE_ABOUT_A_PATTERN}
+        )
 
         assert report.episodes[0].status is EpisodeRunStatus.SUSPENDED
+
+    def test_one_nobody_could_answer_differently_is_never_asked(
+        self, run, decayed_session, ops_store
+    ):
+        # The default entry's held-back items are all findings that belong to
+        # the day they happened. Whatever a person said about them, nothing
+        # would be written — so there is no question, and asking would spend
+        # attention for nothing.
+        run(decayed_session())
+
+        assert ops_store.hitl.count_pending("local") == 0
+
+    def test_and_its_note_says_nothing_was_done(
+        self, run, decayed_session, graph_store
+    ):
+        # Not left reading as though somebody is going to look at it, which
+        # is what every screen that shows a decision would otherwise claim.
+        run(decayed_session())
+
+        notes = graph_store.find_nodes(
+            ["DecisionAuditNode"], active_only=False, limit=100
+        )
+        closed = [n for n in notes if n.get("status") == DecisionStatus.DISMISSED.value]
+        assert closed, "a question nobody was asked should be closed, not left waiting"

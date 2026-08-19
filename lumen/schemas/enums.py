@@ -179,7 +179,22 @@ class LifecycleNodeStatus(StrEnum):
 
 
 class DecisionStatus(StrEnum):
-    """See Schema.md DecisionAuditNode status lifecycle."""
+    """
+    Where a recorded decision stands.
+
+    ACTIVE               — carried out; it is part of the history now.
+    ROLLED_BACK          — carried out and since reversed.
+    PENDING_HITL         — a tie nobody has broken yet.
+    BELOW_THRESHOLD      — one clear reading, not sure enough to act on.
+    SUSPENDED_QUEUE_FULL — waiting outside a full review queue.
+    EXTRACTION_FAILED    — the finding could not be read properly.
+    DISMISSED            — the question is closed and nothing was done.
+        Distinct from every other state on purpose: it is not active, because
+        no change was made, and it is not waiting, because nobody is going to
+        be asked. Reached three ways — the person said no, the question could
+        no longer be answered at all, or every answer it had would have
+        changed nothing, so there was never a question worth asking.
+    """
 
     ACTIVE = "ACTIVE"
     ROLLED_BACK = "ROLLED_BACK"
@@ -187,6 +202,7 @@ class DecisionStatus(StrEnum):
     BELOW_THRESHOLD = "BELOW_THRESHOLD"
     SUSPENDED_QUEUE_FULL = "SUSPENDED_QUEUE_FULL"
     EXTRACTION_FAILED = "EXTRACTION_FAILED"
+    DISMISSED = "DISMISSED"
 
 
 class ReportStatus(StrEnum):
@@ -598,28 +614,57 @@ class HitlEntryType(StrEnum):
 
 class BookkeepingOperation(StrEnum):
     """
-    The only three changes ever made to a record that already exists.
+    The only changes ever made to a record that already exists.
 
     Nothing a person wrote is touched by any of them — they move counts,
-    dates and a status flag, and nothing else.
+    dates and status flags, and nothing else.
 
     MARK_SUPERSEDED       — a newer version of this belief or pattern exists.
     RECORD_REINFORCEMENT  — one more piece of evidence for it, and when.
     TOUCH_PERSON          — this person was mentioned again, and when.
+    MARK_HITL_RESOLVED    — a decision that was waiting on somebody now has
+                            their answer. Stamps who decided what and when,
+                            and moves the decision out of its waiting state.
+                            What the decision was — the action, the
+                            confidences, the runner-up — is never touched.
     """
 
     MARK_SUPERSEDED = "MARK_SUPERSEDED"
     RECORD_REINFORCEMENT = "RECORD_REINFORCEMENT"
     TOUCH_PERSON = "TOUCH_PERSON"
+    MARK_HITL_RESOLVED = "MARK_HITL_RESOLVED"
 
 
 class HitlResolutionChoice(StrEnum):
-    """See Schema.md DecisionAuditNode.hitl_resolution_user_choice."""
+    """
+    What was decided about a queued item, as it is written to the graph.
+
+    ACTION_A   — the reading the system recommended was taken.
+    ACTION_B   — the second reading was taken instead.
+    CREATE_NEW — neither reading; the finding was recorded as its own thing.
+    AUTO_BRANCH_AFTER_SNOOZE — nobody answered in time after deferring it
+        once, so it became its own thing without them. Kept apart from
+        CREATE_NEW even though the graph write is identical, because "they
+        chose this" and "they ran out of time" are different facts and only
+        one of them is a decision.
+    DISMISSED_UNANSWERABLE — the question was withdrawn because it could no
+        longer be answered: what it was going to write was never kept, so
+        there is nothing to carry out.
+    DECLINED — the person said no. The finding stays part of the entry it
+        came from and never becomes a standing record of its own. Nothing is
+        deleted; what does not happen is the promotion.
+
+    The last two write nothing to the history at all. Both are recorded
+    rather than dropped, so it still shows that Lumen hesitated here and how
+    that ended.
+    """
 
     ACTION_A = "ACTION_A"
     ACTION_B = "ACTION_B"
     CREATE_NEW = "CREATE_NEW"
     AUTO_BRANCH_AFTER_SNOOZE = "AUTO_BRANCH_AFTER_SNOOZE"
+    DISMISSED_UNANSWERABLE = "DISMISSED_UNANSWERABLE"
+    DECLINED = "DECLINED"
 
 
 class DialogueAct(StrEnum):

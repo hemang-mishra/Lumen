@@ -40,8 +40,10 @@ from lumen.pipeline.reconciliation.contracts import (
     ItemDecision,
     SettledDecision,
 )
+from lumen.pipeline.reconciliation.freeze import freeze
 from lumen.providers.protocols import LLMProvider
 from lumen.schemas.enums import (
+    DecisionStatus,
     HitlEntryType,
     ObservationStatus,
     Provenance,
@@ -49,13 +51,20 @@ from lumen.schemas.enums import (
     ReconciliationStatus,
     SignalStrength,
 )
-from lumen.schemas.nodes import EventNode, ObservationNode, SessionNode
+from lumen.schemas.nodes import (
+    DecisionAuditNode,
+    EventNode,
+    ObservationNode,
+    SessionNode,
+)
 from lumen.schemas.pipeline import (
     ExtractionResult,
+    FrozenProposal,
     GraphWritePlan,
     HitlEscalation,
     MicroextractionInput,
     PlannedBookkeeping,
+    PlannedNode,
     ReconciliationOutcome,
     ReconciliationResult,
     RetrievalResult,
@@ -416,11 +425,24 @@ def _assemble(
 
     for sequence, decision in enumerate(settled, start=1):
         piece, audit = plan.plan_for(decision, context, sequence=sequence)
+        escalation = (
+            _escalation_of(decision, audit, context) if decision.is_refused else None
+        )
+
+        # A question every answer to which would write nothing is not a
+        # question. Asking it anyway spends the one thing the review queue
+        # exists to protect, and returns nothing for it — so the decision is
+        # closed here instead, saying plainly that nothing was done.
+        if escalation is not None and not _worth_asking(escalation):
+            audit = audit.model_copy(update={"status": DecisionStatus.DISMISSED})
+            piece = _with_note(piece, audit)
+            escalation = None
+
         fragment = fragment.merged_with(piece)
         audits.append(audit)
         results.append(_result_of(decision, audit))
-        if decision.is_refused:
-            escalations.append(_escalation_of(decision, audit))
+        if escalation is not None:
+            escalations.append(escalation)
 
     person_nodes, person_edges, person_updates = people.resolve_people(
         [decision.item for decision in settled],
@@ -478,26 +500,95 @@ def _result_of(decision: SettledDecision, audit) -> ReconciliationResult:
     )
 
 
-def _escalation_of(decision: SettledDecision, audit) -> HitlEscalation:
+def _escalation_of(
+    decision: SettledDecision, audit, context: plan.PlanContext
+) -> HitlEscalation:
     """
     Describe one undecided item well enough to ask about it later.
 
     Its weight is carried across because that is what decides the order
     people see things in. A critical finding waiting behind twenty ordinary
     ones is a queue nobody finishes.
+
+    What the decision was about to write is carried too. That working is
+    thrown away the moment this function returns otherwise, and rebuilding it
+    days later would mean asking a model to invent the same wording twice and
+    hoping the second attempt matched what the person was shown.
     """
+    entry_type = (
+        HitlEntryType.AMBIGUOUS_TIE
+        if decision.refusal is GateRule.TIE
+        else HitlEntryType.BELOW_THRESHOLD
+    )
     return HitlEscalation(
         audit_node_id=audit.node_id,
         source_node_id=decision.item.node_id,
         episode_id=decision.item.episode_id,
-        entry_type=(
-            HitlEntryType.AMBIGUOUS_TIE
-            if decision.refusal is GateRule.TIE
-            else HitlEntryType.BELOW_THRESHOLD
-        ),
+        entry_type=entry_type,
         signal_strength=decision.item.signal_strength or SignalStrength.STANDARD,
         summary=_waiting_summary(decision),
+        proposal=_frozen(decision, context, audit.node_id, entry_type),
     )
+
+
+def _worth_asking(escalation: HitlEscalation) -> bool:
+    """
+    Whether putting this to a person could change anything.
+
+    Nothing kept means nothing to replay, and that is worth asking about —
+    the person can still see the question and withdraw it. What is not worth
+    asking is a question whose every answer writes the same nothing: the
+    finding stays part of its entry whatever is said, so there is no decision
+    to make.
+    """
+    proposal = escalation.proposal
+    if proposal is None:
+        return True
+    return proposal.can_change_anything
+
+
+def _with_note(fragment: plan.PlanFragment, audit: DecisionAuditNode) -> plan.PlanFragment:
+    """
+    The same fragment, carrying a revised note of the decision.
+
+    The note is built before it is known whether anybody will be asked, so
+    closing a question that was never worth asking means putting the settled
+    note back in place of the waiting one.
+    """
+    return fragment.model_copy(
+        update={
+            "nodes": [
+                PlannedNode(node_type="DecisionAuditNode", node=audit)
+                if planned.node.node_id == audit.node_id
+                else planned
+                for planned in fragment.nodes
+            ]
+        }
+    )
+
+
+def _frozen(
+    decision: SettledDecision,
+    context: plan.PlanContext,
+    audit_id: str,
+    entry_type: HitlEntryType,
+) -> FrozenProposal | None:
+    """
+    Keep what this decision was about to do, if it can be worked out.
+
+    A failure here loses the ability to answer one question later, which is
+    bad. Letting it stop the run would lose the whole entry, which is worse —
+    so it is logged and the item still reaches the queue, where it will be
+    reported as having nothing recorded to carry out.
+    """
+    try:
+        return freeze(decision, context, audit_id=audit_id, entry_type=entry_type)
+    except Exception:
+        logger.warning(
+            "could not keep what an undecided item was about to write",
+            extra={"audit_node_id": audit_id},
+        )
+        return None
 
 
 def _waiting_summary(decision: SettledDecision) -> str:

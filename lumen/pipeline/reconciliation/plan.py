@@ -143,7 +143,7 @@ def plan_for(
     writes = (
         _ActionWrites()
         if decision.is_refused
-        else _BUILDERS.get(decision.action, _nothing)(decision, context, audit_id)
+        else _action_writes(decision, context, audit_id)
     )
 
     audit = _audit_note(decision, context, audit_id, writes.primary_edge)
@@ -154,6 +154,37 @@ def plan_for(
         )
     )
     return fragment, audit
+
+
+def writes_for(
+    decision: SettledDecision, context: PlanContext, *, audit_id: str
+) -> tuple[PlanFragment, PlannedEdge | None]:
+    """
+    What one action comes to on its own, without its decision note.
+
+    The same translation `plan_for` uses, offered on its own for the one
+    caller that needs the writing separately: a decision held back for a
+    person is saved in this form and carried out later under a note that
+    does not exist yet.
+
+    Refusal is deliberately not consulted here. The caller asking for this
+    already knows the decision was held back, and is asking what it would
+    have done.
+    """
+    writes = _action_writes(decision, context, audit_id)
+    return writes.fragment, writes.primary_edge
+
+
+def edge_handle(edge: PlannedEdge | None) -> str | None:
+    """The stored handle of a link, or None where the action wrote none."""
+    return _edge_handle(edge)
+
+
+def _action_writes(
+    decision: SettledDecision, context: PlanContext, audit_id: str
+) -> "_ActionWrites":
+    """Look up and run the builder for one action."""
+    return _BUILDERS.get(decision.action, _nothing)(decision, context, audit_id)
 
 
 # ---------------------------------------------------------------------------

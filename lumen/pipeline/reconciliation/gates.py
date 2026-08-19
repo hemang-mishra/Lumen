@@ -117,6 +117,9 @@ def interpret(
         answer.runner_up.action if answer.runner_up else ""
     )
     target = _target_of(item, answer.primary)
+    runner_up_target = (
+        _target_of(item, answer.runner_up) if answer.runner_up else None
+    )
 
     settled = SettledDecision(
         item=item,
@@ -127,6 +130,9 @@ def interpret(
         runner_up_action=runner_up_action,
         runner_up_confidence=(
             _clamp(answer.runner_up.confidence) if answer.runner_up else None
+        ),
+        runner_up_target_node_id=(
+            runner_up_target.node_id if runner_up_target else None
         ),
         reason=answer.primary.reason,
         escalated=escalated,
@@ -236,6 +242,11 @@ def check_tie(decision: SettledDecision, context: GateContext) -> SettledDecisio
     thing and 0.90 sure of a different one is not a preference for the
     first; it is a model that cannot tell them apart, saying so in the only
     way it can.
+
+    Both readings are kept as the decision is relabelled. The label says the
+    system has no preference; the two readings are the question somebody is
+    going to be asked, and losing the leading one would leave a tie with only
+    one side to it.
     """
     if decision.runner_up_action is None or decision.runner_up_confidence is None:
         return decision
@@ -244,7 +255,11 @@ def check_tie(decision: SettledDecision, context: GateContext) -> SettledDecisio
     if abs(decision.confidence - decision.runner_up_confidence) >= TIE_WINDOW:
         return decision
     return decision.model_copy(
-        update={"action": ReconciliationAction.AMBIGUOUS}
+        update={
+            "action": ReconciliationAction.AMBIGUOUS,
+            "tied_action": decision.action,
+            "tied_confidence": decision.confidence,
+        }
     ).refuse(GateRule.TIE)
 
 

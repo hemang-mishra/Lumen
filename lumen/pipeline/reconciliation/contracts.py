@@ -308,6 +308,15 @@ class SettledDecision(BaseModel):
         confidence: How sure the deciding model was.
         runner_up_action: The second-best reading.
         runner_up_confidence: How sure the model was about that one.
+        runner_up_target_node_id: The existing record the second reading
+            pointed at. Kept because a tie is a question with two answers,
+            and an answer nobody recorded the target of cannot be taken.
+        tied_action: The reading that was leading when a tie was declared,
+            and the confidence that went with it. `action` becomes AMBIGUOUS
+            at that moment, which is right — the system has no preference —
+            but it would otherwise erase the first of the two readings, and
+            those two readings are the entire question being asked.
+        tied_confidence: How sure the model was about that first reading.
         reason: The model's one-line justification.
         refusal: Set when the decision will not be carried out, saying why.
             A refused decision writes nothing and waits for a person.
@@ -344,6 +353,9 @@ class SettledDecision(BaseModel):
     confidence: float = Field(default=0.0, ge=0.0, le=1.0)
     runner_up_action: ReconciliationAction | None = None
     runner_up_confidence: float | None = Field(default=None, ge=0.0, le=1.0)
+    runner_up_target_node_id: str | None = None
+    tied_action: ReconciliationAction | None = None
+    tied_confidence: float | None = Field(default=None, ge=0.0, le=1.0)
     reason: str = ""
     refusal: GateRule | None = None
     altered_by: GateRule | None = None

@@ -139,7 +139,20 @@ class RegulatesEdge(ReconciliationEdge):
     regulation_summary: str = Field(min_length=1)
 
 
+# Every kind of link, by its own name. Same reason as the records: a link
+# held as its base type loses which kind it was as soon as it is stored, and
+# the fields that go with that kind become unreadable.
+EDGE_MODELS: dict[str, type[LumenEdge]] = {
+    "LumenEdge": LumenEdge,
+    "ReconciliationEdge": ReconciliationEdge,
+    "EvolvedFromEdge": EvolvedFromEdge,
+    "DialecticEdge": DialecticEdge,
+    "RegulatesEdge": RegulatesEdge,
+}
+
+
 __all__ = [
+    "EDGE_MODELS",
     "LogicalEdgeType",
     "LumenEdge",
     "ReconciliationEdge",
@@ -212,6 +225,10 @@ LOGICAL_TO_PHYSICAL: dict[tuple[LogicalEdgeType, str, str], str] = {
     (LogicalEdgeType.ADOPTED_AS, "ObservationNode", "AdoptedPrincipleNode"): "adopted_as_obs",
     (LogicalEdgeType.ADOPTED_AS, "SessionNode", "AdoptedPrincipleNode"): "adopted_as_sess",
     (LogicalEdgeType.SUPERSEDED_BY, "AdoptedPrincipleNode", "AdoptedPrincipleNode"): "superseded_by",
+    # A decision that waited for somebody, pointing at the note of what they
+    # decided. Two notes rather than one rewritten note, so the graph keeps
+    # saying that the system hesitated before anyone answered.
+    (LogicalEdgeType.SUPERSEDED_BY, "DecisionAuditNode", "DecisionAuditNode"): "superseded_by_dec",
     (LogicalEdgeType.FAILED_EXTRACTION, "EpisodeNode", "ObservationNode"): "failed_extraction",
 }
 

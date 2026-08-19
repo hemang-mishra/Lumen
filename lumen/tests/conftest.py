@@ -2161,3 +2161,215 @@ def narrative_provider():
         )
 
     return _build
+
+
+# ---------------------------------------------------------------------------
+# The review queue
+#
+# Two kinds of helper. One builds a saved proposal the way the reconciliation
+# stage builds it, so the tests answer the same thing the pipeline would have
+# written. The other puts a question into the queue, because most of what is
+# worth testing here is about an item that already exists.
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def moment():
+    """The one moment the review tests stamp everything with."""
+    return MOMENT
+
+
+@pytest.fixture
+def plan_context():
+    """The surroundings a decision is translated into writing against."""
+
+    def _build(*, history=None, exists=None, anchor: bool = True):
+        from lumen.pipeline.reconciliation.plan import PlanContext
+
+        return PlanContext(
+            at=MOMENT,
+            event_date=TODAY,
+            history=history or {},
+            exists=exists or (lambda _node_id: False),
+            anchor_node_id="evt_anchor" if anchor else None,
+            anchor_node_type="EventNode" if anchor else None,
+            episode_index=1,
+        )
+
+    return _build
+
+
+@pytest.fixture
+def historical(sample_pattern, sample_belief):
+    """
+    An existing record read back in full, as reconciliation reads it.
+
+    A next version is built from every field of the record it follows, so a
+    preview would not be enough here.
+    """
+
+    def _build(node=None, *, node_type: str = "PatternNode"):
+        from lumen.pipeline.reconciliation.contracts import HistoricalNode
+
+        node = node or (sample_pattern if node_type == "PatternNode" else sample_belief)
+        row = node.to_graph_dict()
+        row["_label"] = node_type
+        return HistoricalNode(
+            node_id=node.node_id,
+            node_type=node_type,
+            preview=row.get("pattern_name") or row.get("belief_statement") or "",
+            valid_from=MOMENT,
+            row=row,
+        )
+
+    return _build
+
+
+@pytest.fixture
+def make_proposal(make_settled, plan_context, historical, sample_pattern):
+    """
+    Build a saved proposal the same way the pipeline builds one.
+
+    Deliberately goes through the real freezing rather than assembling a
+    proposal by hand: what these tests are checking is that what was saved
+    can actually be carried out, and a hand-built one would only prove that
+    the test author agreed with themselves.
+    """
+
+    def _build(
+        action=None,
+        *,
+        target_node_id: str | None = None,
+        runner_up=None,
+        runner_up_target: str | None = None,
+        entry_type=None,
+        audit_id: str = "d_2026_06_11_01_001",
+        item=None,
+        refusal=None,
+        **extra,
+    ):
+        from lumen.pipeline.reconciliation.contracts import GateRule
+        from lumen.pipeline.reconciliation.freeze import freeze
+        from lumen.schemas.enums import HitlEntryType, ReconciliationAction
+
+        action = action or ReconciliationAction.REINFORCE
+        entry_type = entry_type or (
+            HitlEntryType.AMBIGUOUS_TIE if runner_up else HitlEntryType.BELOW_THRESHOLD
+        )
+        known = historical(sample_pattern)
+        history = {known.node_id: known}
+
+        decision = make_settled(
+            action,
+            item=item,
+            target_node_id=(
+                known.node_id if target_node_id is None else target_node_id
+            ),
+            target_type="PatternNode",
+            runner_up=runner_up,
+            runner_up_confidence=0.5 if runner_up else None,
+            runner_up_target_node_id=runner_up_target,
+            **extra,
+        ).refuse(refusal or (GateRule.TIE if runner_up else GateRule.BELOW_THRESHOLD))
+
+        return freeze(
+            decision,
+            plan_context(history=history),
+            audit_id=audit_id,
+            entry_type=entry_type,
+        )
+
+    return _build
+
+
+@pytest.fixture
+def queued(ops_store, make_proposal):
+    """
+    Put one question into the queue, with what it was going to write.
+
+    Returns the queue row, since almost everything worth checking starts from
+    an item that is already waiting.
+    """
+
+    def _build(
+        proposal=None,
+        *,
+        user_id: str = "tester",
+        status=None,
+        signal=None,
+        snooze_count: int = 0,
+        last_snoozed_at=None,
+        snoozed_until=None,
+        save_proposal: bool = True,
+        item_id: str | None = None,
+    ):
+        from lumen.operational.enums import HitlItemStatus
+        from lumen.operational.schemas import HitlQueueItemRecord
+
+        proposal = proposal or make_proposal()
+        record = HitlQueueItemRecord(
+            id=item_id or f"hitl_{proposal.audit_node_id}",
+            user_id=user_id,
+            audit_node_id=proposal.audit_node_id,
+            entry_type=proposal.entry_type,
+            signal_strength=signal or SignalStrength.STANDARD,
+            status=status or HitlItemStatus.PENDING_HITL,
+            observation_id=proposal.source_node_id,
+            episode_id=proposal.episode_id,
+            recommended_action=proposal.primary.action,
+            candidate_a_node_id=proposal.primary.target_node_id,
+            confidence_a=proposal.primary.confidence,
+            context_summary=proposal.primary.summary,
+            created_at=MOMENT,
+            snooze_count=snooze_count,
+            last_snoozed_at=last_snoozed_at,
+        )
+        ops_store.hitl.enqueue(record)
+        if save_proposal:
+            ops_store.hitl.save_proposal(
+                proposal.audit_node_id, proposal.model_dump_json()
+            )
+        if snoozed_until is not None:
+            ops_store.hitl.snooze(
+                record.id, until=snoozed_until, at=last_snoozed_at or MOMENT
+            )
+        return ops_store.hitl.get(record.id)
+
+    return _build
+
+
+@pytest.fixture
+def config_with_cap():
+    """Settings with the review queue's ceiling set to a given number."""
+
+    def _build(cap: int):
+        from dataclasses import replace
+
+        from lumen.config import AppConfig
+
+        settings = AppConfig()
+        return replace(
+            settings, operational=replace(settings.operational, hitl_queue_cap=cap)
+        )
+
+    return _build
+
+
+@pytest.fixture
+def reviewer(graph_store, ops_store, vector_store, embedder):
+    """
+    A review service wired to the test databases.
+
+    Given real stores rather than stand-ins, because the thing most worth
+    checking is that answering a question actually changes the graph.
+    """
+    from lumen.config import AppConfig
+    from lumen.review.service import ReviewService
+
+    return ReviewService(
+        config=AppConfig(),
+        graph=graph_store,
+        ops=ops_store,
+        open_vectors=lambda: vector_store,
+        open_embedder=lambda: embedder,
+    )

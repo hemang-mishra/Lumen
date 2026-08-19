@@ -15,6 +15,7 @@ from typing import TYPE_CHECKING, Any, NamedTuple, Protocol
 
 if TYPE_CHECKING:
     from lumen.schemas.base import GraphNode
+    from lumen.schemas.enums import HitlResolutionChoice, ReconciliationAction
 
 
 class EdgeRow(NamedTuple):
@@ -352,6 +353,35 @@ class GraphProvider(ReadOnlyGraph, Protocol):
 
     def touch_person(self, node_id: str, *, at: datetime) -> None:
         """Note that a person was mentioned again, and when."""
+        ...
+
+    def dismiss_decision(self, node_id: str, *, at: datetime) -> None:
+        """
+        Withdraw a question that can no longer be answered.
+
+        Used where what the decision was about to write was never kept, so
+        there is nothing left to carry out. Records that the question was
+        dropped rather than settled — nothing is written to the history, and
+        the note stops claiming somebody is going to look at it.
+        """
+        ...
+
+    def resolve_decision(
+        self,
+        node_id: str,
+        *,
+        choice: "HitlResolutionChoice",
+        action: "ReconciliationAction",
+        at: datetime,
+    ) -> None:
+        """
+        Record that a decision which was waiting on somebody now has an answer.
+
+        Stamps what was chosen and when, and takes the decision out of its
+        waiting state. Everything the note says about the original decision
+        stays as it was — this adds the answer rather than rewriting the
+        question.
+        """
         ...
 
     def close(self) -> None:

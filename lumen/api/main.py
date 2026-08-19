@@ -37,7 +37,7 @@ from fastapi.staticfiles import StaticFiles
 from lumen.api.deps import get_graph, get_ops
 from lumen.api.errors import register_error_handlers
 from lumen.api.resources import LazyChatStack, LazySearchStack
-from lumen.api.routes import chat, debug, graph, ingest, query, reports
+from lumen.api.routes import chat, debug, graph, hitl, ingest, query, reports
 from lumen.api.schemas import HealthView
 from lumen.config import AppConfig
 from lumen.env import load_env
@@ -49,6 +49,7 @@ from lumen.operational.repositories import OperationalStore
 from lumen.operational.sqlalchemy_impl import build_operational_store
 from lumen.providers.errors import ProviderError
 from lumen.pipeline.macroextraction.service import MacroextractionService
+from lumen.review.service import ReviewService
 from lumen.providers.factory import get_llm_provider
 from lumen.query import (
     ConversationMemory,
@@ -92,6 +93,7 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
     app.include_router(query.router)
     app.include_router(chat.router)
     app.include_router(reports.router)
+    app.include_router(hitl.router)
 
     # Not mounted at all when uploads are switched off, rather than mounted
     # and refusing. A deployment that says it only reads should not have a
@@ -175,6 +177,13 @@ def _lifespan_for(settings: AppConfig):
         app.state.ops = store
         app.state.reporter = MacroextractionService(
             config=settings, graph=provider, ops=store
+        )
+        app.state.reviewer = ReviewService(
+            config=settings,
+            graph=provider,
+            ops=store,
+            open_vectors=search.vectors,
+            open_embedder=search.embedder,
         )
         app.state.formulator = formulator
         app.state.ingest = worker

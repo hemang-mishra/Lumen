@@ -18,7 +18,6 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Callable
-from datetime import datetime
 
 from lumen.graph.provider import GraphProvider
 from lumen.pipeline.orchestration.contracts import (
@@ -33,25 +32,46 @@ from lumen.vector.provider import VectorProvider
 
 logger = logging.getLogger(__name__)
 
+def _mark_hitl_resolved(graph: GraphProvider, update: PlannedBookkeeping) -> None:
+    """
+    Stamp a waiting decision with the answer somebody gave it.
+
+    An instruction that does not say what was decided is refused rather than
+    applied. Marking a decision answered without recording the answer would
+    leave a note claiming somebody settled it and no way to find out how.
+    """
+    if update.choice is None or update.resolved_action is None:
+        raise GraphWriteFailed(
+            f"answer for {update.node_id} does not say what was decided"
+        )
+    graph.resolve_decision(
+        update.node_id,
+        choice=update.choice,
+        action=update.resolved_action,
+        at=update.at,
+    )
+
+
 # The small changes allowed to a record that already exists, and the one
 # method each is allowed to call.
 #
 # A lookup rather than a chain of if-statements so that the complete list of
-# ways an existing record can change is one readable block. Adding a fourth
+# ways an existing record can change is one readable block. Adding a fifth
 # means adding a line here, which is a visible act; growing a branch in the
 # middle of a save is not.
-BookkeepingCall = Callable[[GraphProvider, str, datetime], None]
+BookkeepingCall = Callable[[GraphProvider, PlannedBookkeeping], None]
 
 BOOKKEEPING_OPERATIONS: dict[BookkeepingOperation, BookkeepingCall] = {
     BookkeepingOperation.MARK_SUPERSEDED: (
-        lambda graph, node_id, at: graph.mark_superseded(node_id, at=at)
+        lambda graph, update: graph.mark_superseded(update.node_id, at=update.at)
     ),
     BookkeepingOperation.RECORD_REINFORCEMENT: (
-        lambda graph, node_id, at: graph.record_reinforcement(node_id, at=at)
+        lambda graph, update: graph.record_reinforcement(update.node_id, at=update.at)
     ),
     BookkeepingOperation.TOUCH_PERSON: (
-        lambda graph, node_id, at: graph.touch_person(node_id, at=at)
+        lambda graph, update: graph.touch_person(update.node_id, at=update.at)
     ),
+    BookkeepingOperation.MARK_HITL_RESOLVED: _mark_hitl_resolved,
 }
 
 
@@ -136,16 +156,16 @@ def _apply_bookkeeping(
     Make one small change to a record that already exists.
 
     The operation is looked up rather than branched on, so there is no way
-    to reach anything but the three named changes, and no way for a field
-    name to be passed in. Nothing the person wrote can be touched from here
-    even by mistake.
+    to reach anything but the named changes, and no way for a field name to
+    be passed in. Nothing the person wrote can be touched from here even by
+    mistake.
     """
     call = BOOKKEEPING_OPERATIONS.get(operation.operation)
     if call is None:
         raise GraphWriteFailed(
             f"no such bookkeeping operation: {operation.operation}"
         )
-    call(graph, operation.node_id, operation.at)
+    call(graph, operation)
 
 
 def _write_index(

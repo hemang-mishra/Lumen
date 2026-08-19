@@ -331,7 +331,13 @@ be a surprise.
 requires an audit record and an extraction failure has none). Until that changes they must
 be reachable from the episode instead (FR-S5-6), not silently absent.
 
-**Backed by:** nothing. Entirely **Needs API** (Goal 18).
+**Backed by:** `GET /hitl`, `GET /hitl/count`, `GET /hitl/{id}`,
+`POST /hitl/{id}/resolve`, `POST /hitl/{id}/snooze`, `POST /hitl/sweep` (Goal 18). Each
+card arrives with its answers already worked out, so the screen chooses a layout and sends
+back which button was pressed — it never composes a graph write. FR-S7-5's snooze hides an
+item for 24 hours rather than leaving it in place, and a card reports whether its
+recommendation has been overtaken since it was raised, which the screen should show rather
+than let a person tap into a conflict.
 
 ### S8 — Reports
 
@@ -549,7 +555,7 @@ Ordered by how much they block. Each needs a decision about which goal owns it.
 | API-3 | A reconciliation-shaped read of an episode | S5 | Decisions, reconciliation edges, and the historical records that were connected to — with their text. `get_episode_contents` follows containment edges only. |
 | API-4 | Trigger attribution on runs, and pending runs | S4 | So one list can cover imports and live sessions, and so a buffering session is visible before it starts. |
 | API-5 | Resolve ids to what the record says, in run output | S4 | Or a batch "describe these ids" read the front end can call. Either way, P6 is not satisfiable today. |
-| API-6 | Review queue: list, resolve, snooze | S7 | Goal 18. |
+| API-6 | Review queue: list, count, detail, resolve, snooze, sweep | S7 | **Built** (Goal 18). |
 | API-7 | Reports: list, read, trends | S8 | Goal 17. |
 | API-8 | A day/calendar index | S2 | Cheaper and more honest than filtering episode lists client-side. |
 | API-9 | Text search over records | S6 | Hybrid search exists inside retrieval; nothing exposes it. |

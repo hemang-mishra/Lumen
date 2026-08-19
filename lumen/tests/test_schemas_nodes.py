@@ -301,7 +301,7 @@ class TestRuleAmbiguousNeverActive:
         data = sample_decision_audit.model_dump()
         data["action"] = "AMBIGUOUS"
         data["status"] = "ACTIVE"
-        with pytest.raises(ValidationError, match="PENDING_HITL"):
+        with pytest.raises(ValidationError, match="never acts on its own"):
             DecisionAuditNode(**data)
 
     def test_ambiguous_with_pending_hitl_accepted(self, sample_decision_audit):

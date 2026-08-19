@@ -37,9 +37,11 @@ from lumen.operational.schemas import (
 )
 from lumen.pipeline.orchestration.compose import coreference_map_id
 from lumen.pipeline.orchestration.contracts import CommitReport
+from lumen.review import capacity
 from lumen.schemas.enums import PipelineStage
 from lumen.schemas.pipeline import (
     CoreferenceMap,
+    HitlEscalation,
     ReconciliationOutcome,
     SessionDecayEvent,
 )
@@ -222,6 +224,7 @@ def queue_escalations(
     *,
     ops: OperationalStore,
     job: PipelineJobRecord,
+    config: AppConfig | None = None,
 ) -> int:
     """
     Put everything the system could not settle in front of the person.
@@ -234,9 +237,18 @@ def queue_escalations(
     the same undecided items, and asking the person the same question twice
     is worse than not asking at all.
 
+    Past the queue's ceiling, items are parked rather than asked — and parked
+    is not decided. They wait outside until answering something else makes
+    room. Nothing is ever guessed to keep the queue short.
+
+    What each item was about to write is saved alongside it, because that
+    working is the only thing that makes the question answerable later.
+
     Returns how many were newly added.
     """
     decisions = {result.audit_node_id: result for result in outcome.results}
+    cap = (config or AppConfig()).operational.hitl_queue_cap
+    asked = ops.hitl.count_asked(job.user_id)
     added = 0
 
     for escalation in outcome.escalations:
@@ -244,6 +256,9 @@ def queue_escalations(
             continue
 
         decision = decisions.get(escalation.audit_node_id)
+        status = capacity.entry_status(pending=asked, cap=cap)
+        runner_up = _runner_up_of(escalation)
+
         ops.hitl.enqueue(
             HitlQueueItemRecord(
                 id=f"hitl_{escalation.audit_node_id}",
@@ -251,7 +266,7 @@ def queue_escalations(
                 audit_node_id=escalation.audit_node_id,
                 entry_type=escalation.entry_type,
                 signal_strength=escalation.signal_strength,
-                status=HitlItemStatus.PENDING_HITL,
+                status=status,
                 trace_id=job.trace_id,
                 job_id=job.job_id,
                 observation_id=escalation.source_node_id,
@@ -259,12 +274,38 @@ def queue_escalations(
                 recommended_action=decision.action if decision else None,
                 candidate_a_node_id=decision.target_node_id if decision else None,
                 confidence_a=decision.confidence if decision else None,
+                candidate_b_node_id=runner_up.target_node_id if runner_up else None,
+                confidence_b=runner_up.confidence if runner_up else None,
                 context_summary=escalation.summary,
             )
         )
+        if escalation.proposal is not None:
+            ops.hitl.save_proposal(
+                escalation.audit_node_id,
+                escalation.proposal.model_dump_json(),
+            )
+        else:
+            logger.warning(
+                "an undecided item was queued with nothing recorded to carry out",
+                extra={"audit_node_id": escalation.audit_node_id},
+            )
+
+        if status is HitlItemStatus.PENDING_HITL:
+            asked += 1
         added += 1
 
+    if added:
+        logger.info(
+            "undecided items queued",
+            extra={"added": added, "asked": asked, "cap": cap},
+        )
     return added
+
+
+def _runner_up_of(escalation: HitlEscalation):
+    """The second reading a tie offered, where one was kept."""
+    proposal = escalation.proposal
+    return proposal.runner_up if proposal is not None else None
 
 
 def close_job(
