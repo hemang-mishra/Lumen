@@ -104,6 +104,19 @@ class ErasureInitiator(StrEnum):
     AUTOMATED_RETENTION_POLICY = "AUTOMATED_RETENTION_POLICY"
 
 
+class ErasureScope(StrEnum):
+    """
+    How much of somebody's history an erasure covers.
+
+    ALL   — everything, for a person leaving.
+    ENTRY — one piece of writing and what was read out of it, for a person
+            who regrets one evening rather than the whole record.
+    """
+
+    ALL = "ALL"
+    ENTRY = "ENTRY"
+
+
 class ErasureStatus(StrEnum):
     """How far an erasure run got."""
 

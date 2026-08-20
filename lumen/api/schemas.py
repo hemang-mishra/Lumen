@@ -1207,3 +1207,182 @@ class PersonaUpdateRequest(BaseModel):
             name: getattr(self, name)
             for name in self.model_fields_set
         }
+
+
+# ---------------------------------------------------------------------------
+# Maintenance — erasure, the long-history scan, and explaining a ranking
+# ---------------------------------------------------------------------------
+
+
+class ErasurePreviewView(BaseModel):
+    """
+    What an erasure would cover, having changed nothing.
+
+    Everything an irreversible operation should say before it runs: how much,
+    of what kinds, and what it will *not* reach — because the last one is the
+    thing somebody would otherwise only discover afterwards.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    scope: str
+    entry_id: str | None = None
+    records_by_kind: dict[str, int] = Field(default_factory=dict)
+    total_records: int = 0
+    vectors: int = 0
+    conversations: int = 0
+    not_reached: list[str] = Field(default_factory=list)
+
+
+class ErasureRequestBody(BaseModel):
+    """
+    An ask to erase, and the word that proves it was meant.
+
+    The confirmation is a field rather than a header or a query parameter so
+    that it cannot be supplied by a link somebody clicked.
+
+    Attributes:
+        scope: "ALL" or "ENTRY".
+        entry_id: Which piece of writing, when the scope is one of them.
+        confirmation: The phrase this deployment requires.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    scope: Literal["ALL", "ENTRY"] = "ENTRY"
+    entry_id: str | None = None
+    confirmation: str = ""
+
+
+class ErasureReportView(BaseModel):
+    """What an erasure did, and what it could not do."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    audit_id: str
+    scope: str
+    entry_id: str | None = None
+    status: str
+    records_anonymized: int = 0
+    vectors_deleted: int = 0
+    operational_rows_cleared: int = 0
+    entry_ids_affected: list[str] = Field(default_factory=list)
+    failures: list[str] = Field(default_factory=list)
+
+
+class ErasureAuditView(BaseModel):
+    """
+    One receipt from the log of erasures.
+
+    Carries a hash where a name would be. A record proving somebody's data
+    was removed should not itself say whose.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    id: str
+    user_id_hash: str
+    erased_at: datetime
+    nodes_anonymized: int
+    embeddings_deleted: int
+    entry_ids_affected: list[str] = Field(default_factory=list)
+    initiated_by: str
+    status: str
+
+
+class ErasureAuditListView(BaseModel):
+    """Every erasure recorded, newest first."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    audits: list[ErasureAuditView]
+    count: int
+
+
+class ProofInstanceView(BaseModel):
+    """One occasion behind a long-running pattern."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    episode_id: str
+    date: str
+    excerpt: str = ""
+
+
+class ProofChainView(BaseModel):
+    """A pattern with years of separate occasions behind it."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    record_id: str
+    record_type: str
+    label: str
+    total_instances: int
+    span_days: int
+    span_years: float
+    summary: str
+    key_instances: list[ProofInstanceView] = Field(default_factory=list)
+
+
+class ProofChainListView(BaseModel):
+    """Everything the whole-history scan found, strongest first."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    chains: list[ProofChainView]
+    count: int
+
+
+class RecordScoreView(BaseModel):
+    """
+    Why one record ranks where it does, taken apart.
+
+    The ranking uses the product of these. A single number cannot answer
+    "why is this third?", which makes a ranking nobody can explain — and a
+    ranking nobody can explain is one nobody can fix.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    node_id: str
+    node_type: str
+    signal_weight: float
+    recency_weight: float
+    trust_weight: float
+    frequency_weight: float
+    multiplier: float
+    age_band: str
+    quiet_days: int
+    last_seen: datetime | None = None
+    query_frequency: int = 0
+
+
+# ---------------------------------------------------------------------------
+# Events — what the product did while nobody was asking
+# ---------------------------------------------------------------------------
+
+
+class EventView(BaseModel):
+    """One thing that happened, as a client receives it."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    kind: str
+    at: str
+    payload: dict[str, Any] = Field(default_factory=dict)
+
+
+class EventListView(BaseModel):
+    """
+    The short backlog, for a page that has just opened.
+
+    `listeners` is here because "nothing is happening" and "nothing is
+    connected" look identical from a page that sees no events, and they are
+    fixed differently.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    events: list[EventView]
+    count: int
+    listeners: int = 0

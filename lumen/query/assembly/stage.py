@@ -26,8 +26,8 @@ import logging
 from datetime import UTC, datetime
 
 from lumen.config import ChatConfig
-from lumen.query.assembly import select, templates
-from lumen.query.assembly.budget import policy_for
+from lumen.query.assembly import block, select, templates
+from lumen.query.assembly.budget import estimate_tokens, policy_for
 from lumen.query.assembly.contracts import AssembledContext
 from lumen.query.retrieval.contracts import RetrievalBundle, RetrievedNode
 from lumen.schemas.enums import EmotionalRegister
@@ -56,6 +56,7 @@ class ContextAssembler:
         *,
         now: datetime | None = None,
         deferred: bool = False,
+        alert: str | None = None,
     ) -> AssembledContext:
         """
         Compress what was fetched into what this turn can carry.
@@ -65,6 +66,10 @@ class ContextAssembler:
         nothing about what is chosen — only how the block introduces itself,
         since context about a moment that has passed should not be read as
         though it were about this one.
+
+        `alert` is passed in rather than looked up. This object is a pure
+        function of what it is handed and reaching a store from inside it
+        would be the first exception to that.
         """
         moment = now or datetime.now(UTC)
         policy = policy_for(signal.emotional_register, self._config)
@@ -74,6 +79,9 @@ class ContextAssembler:
         # block says so rather than reading as though it were current.
         deferred = deferred or bool(bundle.carried_forward)
 
+        # In crisis nothing is offered, and that includes the alert. Being
+        # told the system has noticed you changing, in the middle of a bad
+        # ten minutes, is the opposite of what this is for.
         if not policy.injects_anything:
             return self._nothing(
                 signal,
@@ -90,8 +98,15 @@ class ContextAssembler:
             )
             for node in ordered
         ]
+        # The alert is charged to the same allowance as everything else, and
+        # taken off the top rather than added afterwards. A line that is
+        # exempt from the budget is a line that grows the prompt every time
+        # the scan fires.
+        spent_on_alert = _alert_cost(alert, self._config)
         kept, dropped = select.choose(
-            rendered, policy=policy, config=self._config
+            rendered,
+            policy=policy.with_less_room(spent_on_alert),
+            config=self._config,
         )
 
         context = AssembledContext(
@@ -99,8 +114,9 @@ class ContextAssembler:
             dropped=tuple(dropped),
             emotional_register=signal.emotional_register,
             token_budget=policy.max_tokens,
-            estimated_tokens=sum(item.tokens for item in kept),
+            estimated_tokens=sum(item.tokens for item in kept) + spent_on_alert,
             deferred=deferred,
+            alert=alert,
             search_failed=unreachable,
         )
         _log(context, signal, offered=len(bundle.candidates))
@@ -140,17 +156,30 @@ class ContextAssembler:
         )
 
 
+def _alert_cost(alert: str | None, config) -> int:
+    """
+    What a line about something shifting costs the briefing's allowance.
+
+    Counted the same way every other line is, so the ceiling means the same
+    thing whatever the briefing is made of.
+    """
+    if not alert:
+        return 0
+    return estimate_tokens(
+        f"{block.ALERT_HEADING}\n{alert}", chars_per_token=config.chars_per_token
+    )
+
+
 def _ordered(
     candidates: tuple[RetrievedNode, ...], now: datetime
 ) -> list[RetrievedNode]:
     """
     The records in the order they should be offered.
 
-    Retrieval has already ranked them, so this only settles ties — and it
-    settles them towards the more recent, because between two equally
-    relevant things the live one is the one worth mentioning. Deliberately
-    *not* a decay curve: how much age should cost is a question with its own
-    goal, and guessing at it here would mean building it twice.
+    Retrieval has already ranked them, and age is part of that ranking now,
+    so this only settles ties — and it settles them towards the more recent,
+    because between two equally relevant things the live one is the one
+    worth mentioning.
     """
     return sorted(
         candidates,

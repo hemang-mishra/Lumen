@@ -26,11 +26,12 @@ from __future__ import annotations
 import logging
 import queue
 import threading
+from collections.abc import Callable
 from dataclasses import dataclass
 
 from lumen.config import AppConfig
 from lumen.graph.provider import GraphProvider
-from lumen.operational.enums import ImportStatus
+from lumen.operational.enums import BufferStatus, ImportStatus
 from lumen.operational.repositories import OperationalStore
 from lumen.pipeline.orchestration import run_pipeline
 from lumen.providers.factory import get_embedding_provider, get_llm_provider
@@ -44,6 +45,28 @@ logger = logging.getLogger(__name__)
 
 # Told to stop.
 _STOP = object()
+
+
+@dataclass(frozen=True)
+class _Import:
+    """One uploaded conversation waiting its turn."""
+
+    import_id: str
+
+
+@dataclass(frozen=True)
+class _Session:
+    """
+    One conversation Lumen held itself, waiting its turn.
+
+    A separate kind from an import rather than a flag, so the queue says what
+    each piece of work is and the loop cannot mistake one for the other. They
+    differ only in bookkeeping — an import has a record somebody is watching
+    and a conversation has only itself — but that difference decides which
+    table gets written when something fails.
+    """
+
+    session_id: str
 
 
 @dataclass
@@ -82,9 +105,30 @@ class IngestResources:
         self.vectors.close()
 
 
-def build_resources(config: AppConfig, graph: GraphProvider) -> IngestResources:
+def open_index(config: AppConfig) -> VectorProvider:
     """
-    Open everything a run needs, except the graph, which is borrowed.
+    Open the search index on its own, with no model involved.
+
+    Separate from the rest because deleting from the index needs nothing
+    that writing to it needs. Somebody erasing their data must be able to,
+    on a deployment whose model credentials have long since expired.
+    """
+    vectors = QdrantVectorProvider(
+        location=config.vector.location,
+        collection_name=config.vector.collection_name,
+        vector_size=config.vector.vector_size,
+    )
+    vectors.init_collection()
+    return vectors
+
+
+def build_resources(
+    config: AppConfig,
+    graph: GraphProvider,
+    vectors: VectorProvider | None = None,
+) -> IngestResources:
+    """
+    Open everything a run needs, except what is handed in already open.
 
     The graph is passed in rather than opened because it cannot be opened
     twice. Kuzu is embedded and takes a file lock, so a second provider on
@@ -93,22 +137,21 @@ def build_resources(config: AppConfig, graph: GraphProvider) -> IngestResources:
     internally, so the routes reading from it and this thread writing to it
     do not collide.
 
+    The index is optional for the same reason: a file-backed one takes a
+    lock too, so anything that has already opened one hands it over rather
+    than letting a second be opened underneath it.
+
     Raises:
         ProviderError: No model is configured, or the configured one cannot
             be reached. Left to propagate, because an import that cannot
             reach a model has not failed halfway — it has not started, and
             the caller should be told that plainly.
     """
-    vectors = QdrantVectorProvider(
-        location=config.vector.location,
-        collection_name=config.vector.collection_name,
-        vector_size=config.vector.vector_size,
-    )
-    vectors.init_collection()
+    index = vectors or open_index(config)
 
     return IngestResources(
         graph=graph,
-        vectors=vectors,
+        vectors=index,
         embedder=get_embedding_provider(config),
         lightweight=get_llm_provider(ModelRole.LIGHTWEIGHT, config),
         thinking=get_llm_provider(ModelRole.THINKING, config),
@@ -130,6 +173,7 @@ class IngestWorker:
         ops: OperationalStore,
         graph: GraphProvider,
         resources: IngestResources | None = None,
+        announce: Callable[[str, dict], None] | None = None,
     ) -> None:
         """
         Args:
@@ -140,11 +184,15 @@ class IngestWorker:
                 tests; built on first use otherwise, so that a service with
                 no model configured still starts and still serves every
                 route that does not need one.
+            announce: Told when a run starts and finishes. This is how a page
+                watching hears about a run without anything in here knowing
+                that pages exist. Left out, runs happen silently.
         """
         self._config = config
         self._ops = ops
         self._graph = graph
         self._resources = resources
+        self._announce = announce
         self._queue: queue.Queue = queue.Queue()
         self._thread: threading.Thread | None = None
         self._lock = threading.Lock()
@@ -187,8 +235,23 @@ class IngestWorker:
 
     def submit(self, import_id: str) -> None:
         """Queue one import. Returns immediately."""
-        self._queue.put(import_id)
+        self._queue.put(_Import(import_id))
         logger.info("import queued", extra={"import_id": import_id})
+
+    def submit_session(self, session_id: str) -> None:
+        """
+        Queue one conversation Lumen held itself. Returns immediately.
+
+        The same queue and the same thread as an import, because it is the
+        same work: a finished conversation going through the pipeline. Sharing
+        the queue is what keeps two entries from being written at once, and
+        sharing the thread is what keeps the models opened once.
+
+        What differs is only the bookkeeping. An import has a record somebody
+        is watching; a conversation has only itself.
+        """
+        self._queue.put(_Session(session_id))
+        logger.info("conversation queued", extra={"session_id": session_id})
 
     def stop(self, timeout: float = 30.0) -> None:
         """
@@ -218,13 +281,20 @@ class IngestWorker:
         return self._queue.qsize()
 
     def _drain(self) -> None:
-        """Take imports off the queue until told to stop."""
+        """Take work off the queue until told to stop."""
         while True:
             item = self._queue.get()
             try:
                 if item is _STOP:
                     return
-                self.run_once(str(item))
+                if isinstance(item, _Session):
+                    self.run_session(item.session_id)
+                elif isinstance(item, _Import):
+                    self.run_once(item.import_id)
+                else:
+                    # A bare identifier, from before the queue carried two
+                    # kinds of work. Read as an import, which is what it was.
+                    self.run_once(str(item))
             finally:
                 self._queue.task_done()
 
@@ -249,6 +319,7 @@ class IngestWorker:
             return
 
         self._ops.imports.update_status(import_id, ImportStatus.RUNNING)
+        self._say("run_started", {"import_id": import_id, "source": "import"})
 
         try:
             resources = self.ensure_ready()
@@ -291,10 +362,107 @@ class IngestWorker:
                 "nodes_written": report.nodes_written,
             },
         )
+        self._say(
+            "run_finished",
+            {
+                "import_id": import_id,
+                "status": report.job_status,
+                "episodes": len(report.episodes),
+                "nodes_written": report.nodes_written,
+            },
+        )
+
+    def run_session(self, session_id: str) -> None:
+        """
+        Take one finished conversation all the way through the pipeline.
+
+        The sibling of `run_once`, without the import record. Never raises,
+        for the same reason: this runs on a background thread with nobody
+        watching, and the only thing worse than a conversation that failed to
+        process is a worker that stopped because one did.
+
+        A failure puts the conversation back to decayed rather than leaving it
+        dispatched. Dispatched means somebody owns it, and after this nobody
+        does — leaving it there is how a conversation is never looked at
+        again.
+        """
+        self._say("run_started", {"session_id": session_id, "source": "conversation"})
+        try:
+            resources = self.ensure_ready()
+            event = self._ops.buffers.build_decay_event(session_id)
+            report = run_pipeline(
+                event,
+                graph=resources.graph,
+                vectors=resources.vectors,
+                embedder=resources.embedder,
+                lightweight=resources.lightweight,
+                thinking=resources.thinking,
+                ops=self._ops,
+                config=self._config,
+            )
+        except Exception:
+            logger.exception(
+                "a finished conversation could not be processed",
+                extra={"session_id": session_id},
+            )
+            self._release(session_id)
+            self._say("run_finished", {"session_id": session_id, "status": "FAILED"})
+            return
+
+        logger.info(
+            "a finished conversation became history",
+            extra={
+                "session_id": session_id,
+                "job_status": report.job_status,
+                "episodes": len(report.episodes),
+                "nodes_written": report.nodes_written,
+            },
+        )
+        self._say(
+            "run_finished",
+            {
+                "session_id": session_id,
+                "status": report.job_status,
+                "episodes": len(report.episodes),
+                "nodes_written": report.nodes_written,
+            },
+        )
+
+    def _say(self, kind: str, payload: dict) -> None:
+        """
+        Mention that something happened, if anybody asked to be told.
+
+        Never lets a listener cost a run. Whoever is watching is a
+        convenience; the entry being written is not.
+        """
+        if self._announce is None:
+            return
+        try:
+            self._announce(kind, payload)
+        except Exception:  # noqa: BLE001 — a listener is never worth a run
+            logger.warning("something listening to the worker failed", exc_info=True)
+
+    def _release(self, session_id: str) -> None:
+        """
+        Let go of a conversation that could not be processed.
+
+        Put back to decayed rather than to open: it is still finished, and
+        re-opening it would make a conversation somebody walked away from look
+        live again.
+        """
+        try:
+            self._ops.buffers.mark_status(session_id, BufferStatus.DECAYED)
+        except Exception:
+            logger.warning(
+                "a conversation could not be released after failing",
+                exc_info=True,
+                extra={"session_id": session_id},
+            )
 
     def _fail(self, import_id: str, reason: str) -> None:
         """Record that an import will not be finishing, and why."""
         self._ops.imports.update_status(import_id, ImportStatus.FAILED, error=reason)
+        self._say("run_finished", {"import_id": import_id, "status": "FAILED"})
 
     def __enter__(self) -> IngestWorker:
         self.start()

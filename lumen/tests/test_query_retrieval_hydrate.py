@@ -20,7 +20,7 @@ from lumen.graph.rows import (
     preview_of,
     signal_of,
 )
-from lumen.query.retrieval.hydrate import has_id, to_node
+from lumen.query.retrieval.hydrate import Weighting, has_id, to_node
 from lumen.schemas.enums import (
     Domain,
     RetrievalPass,
@@ -30,14 +30,24 @@ from lumen.schemas.enums import (
 )
 
 
+# A fixed moment, so nothing in this file depends on the day it is run.
+NOW = datetime(2026, 6, 15, 12, tzinfo=UTC)
+WEIGHING = Weighting.at(NOW)
+
+
 def row(**fields):
     """One stored row, in the wide shape the graph answers with."""
     return {"node_id": "n_1", "_label": "PatternNode", **fields}
 
 
+def read(stored, **how):
+    """Read a row into a candidate, against this file's fixed moment."""
+    return to_node(stored, weighting=how.pop("weighting", WEIGHING), **how)
+
+
 class TestReadingARow:
     def test_the_kind_of_record_survives(self):
-        node = to_node(row(), found_by=RetrievalPass.SEMANTIC, similarity=0.5)
+        node = read(row(), found_by=RetrievalPass.SEMANTIC, similarity=0.5)
 
         assert node.node_type == "PatternNode"
 
@@ -56,7 +66,7 @@ class TestReadingARow:
         assert len(preview_of({"content": "x" * 500})) == 240
 
     def test_the_area_of_life_is_read_where_the_record_names_one(self):
-        node = to_node(
+        node = read(
             row(domain="SELF_CONCEPT"), found_by=RetrievalPass.SEMANTIC, similarity=0.5
         )
 
@@ -65,24 +75,24 @@ class TestReadingARow:
     def test_a_record_naming_no_area_leaves_it_unset(self):
         # True of every individual observation, and the reason the
         # sensitivity gate has a rule for it.
-        node = to_node(row(), found_by=RetrievalPass.SEMANTIC, similarity=0.5)
+        node = read(row(), found_by=RetrievalPass.SEMANTIC, similarity=0.5)
 
         assert node.domain is None
 
     def test_an_unknown_area_is_treated_as_none_rather_than_failing(self):
-        node = to_node(
+        node = read(
             row(domain="ASTROLOGY"), found_by=RetrievalPass.SEMANTIC, similarity=0.5
         )
 
         assert node.domain is None
 
     def test_a_record_naming_no_period_leaves_it_unset(self):
-        node = to_node(row(), found_by=RetrievalPass.SEMANTIC, similarity=0.5)
+        node = read(row(), found_by=RetrievalPass.SEMANTIC, similarity=0.5)
 
         assert node.era_tag is None
 
     def test_a_blank_period_counts_as_none(self):
-        node = to_node(
+        node = read(
             row(era_tag="   "), found_by=RetrievalPass.SEMANTIC, similarity=0.5
         )
 
@@ -90,10 +100,10 @@ class TestReadingARow:
 
     def test_the_period_of_life_is_read_from_either_column(self):
         # Patterns and beliefs call it one thing, episodes another.
-        tagged = to_node(
+        tagged = read(
             row(era_tag="hostel"), found_by=RetrievalPass.SEMANTIC, similarity=0.5
         )
-        episode = to_node(
+        episode = read(
             row(_label="EpisodeNode", historical_era="hostel"),
             found_by=RetrievalPass.SEMANTIC,
             similarity=0.5,
@@ -102,7 +112,7 @@ class TestReadingARow:
         assert tagged.era_tag == episode.era_tag == "hostel"
 
     def test_lists_come_back_as_lists(self):
-        node = to_node(
+        node = read(
             row(raw_evidence='["what they said"]'),
             found_by=RetrievalPass.SEMANTIC,
             similarity=0.5,
@@ -111,7 +121,7 @@ class TestReadingARow:
         assert node.properties["raw_evidence"] == ["what they said"]
 
     def test_empty_columns_are_dropped(self):
-        node = to_node(
+        node = read(
             row(pattern_description="", era_tag=None),
             found_by=RetrievalPass.SEMANTIC,
             similarity=0.5,
@@ -123,7 +133,7 @@ class TestReadingARow:
 
 class TestWhenItHappened:
     def test_the_moment_it_happened_is_preferred(self):
-        node = to_node(
+        node = read(
             row(
                 occurred_at="2026-06-01T10:00:00+00:00",
                 valid_from="2026-06-02T10:00:00+00:00",
@@ -136,7 +146,7 @@ class TestWhenItHappened:
 
     def test_a_standing_record_falls_back_to_when_it_became_true(self):
         # A belief has no single moment it occurred.
-        node = to_node(
+        node = read(
             row(valid_from="2026-06-02T10:00:00+00:00"),
             found_by=RetrievalPass.SEMANTIC,
             similarity=0.5,
@@ -145,7 +155,7 @@ class TestWhenItHappened:
         assert node.occurred_at == datetime(2026, 6, 2, 10, tzinfo=UTC)
 
     def test_a_trailing_z_is_understood(self):
-        node = to_node(
+        node = read(
             row(occurred_at="2026-06-01T10:00:00Z"),
             found_by=RetrievalPass.SEMANTIC,
             similarity=0.5,
@@ -154,7 +164,7 @@ class TestWhenItHappened:
         assert node.occurred_at == datetime(2026, 6, 1, 10, tzinfo=UTC)
 
     def test_an_unreadable_date_costs_the_ordering_and_not_the_turn(self):
-        node = to_node(
+        node = read(
             row(occurred_at="last Tuesday"),
             found_by=RetrievalPass.SEMANTIC,
             similarity=0.5,
@@ -169,21 +179,21 @@ class TestWhenItHappened:
         # have them thrown away as unparseable.
         moment = datetime(2026, 6, 1, 10, tzinfo=UTC)
 
-        node = to_node(
+        node = read(
             row(occurred_at=moment), found_by=RetrievalPass.SEMANTIC, similarity=0.5
         )
 
         assert node.occurred_at == moment
 
     def test_a_record_with_no_date_at_all_leaves_it_unset(self):
-        node = to_node(row(), found_by=RetrievalPass.SEMANTIC, similarity=0.5)
+        node = read(row(), found_by=RetrievalPass.SEMANTIC, similarity=0.5)
 
         assert node.occurred_at is None
 
 
 class TestScoring:
     def test_a_measured_match_is_weighted_by_the_record(self):
-        node = to_node(
+        node = read(
             row(signal_strength="CRITICAL"),
             found_by=RetrievalPass.SEMANTIC,
             similarity=0.5,
@@ -193,7 +203,7 @@ class TestScoring:
         assert node.similarity == pytest.approx(0.5)
 
     def test_an_anchor_match_uses_the_configured_base_and_no_measurement(self):
-        node = to_node(
+        node = read(
             row(),
             found_by=RetrievalPass.STRUCTURAL,
             anchor_type=StructuralAnchorType.NAMED_PERSON,
@@ -205,12 +215,12 @@ class TestScoring:
         assert node.rank_score == pytest.approx(0.6)
 
     def test_a_match_with_neither_scores_nothing(self):
-        node = to_node(row(), found_by=RetrievalPass.STRUCTURAL)
+        node = read(row(), found_by=RetrievalPass.STRUCTURAL)
 
         assert node.rank_score == 0.0
 
     def test_the_reason_that_led_there_is_carried(self):
-        node = to_node(
+        node = read(
             row(),
             found_by=RetrievalPass.STRUCTURAL,
             trigger_type=TriggerType.NAMED_PERSON,

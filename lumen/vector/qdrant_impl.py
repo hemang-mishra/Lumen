@@ -251,6 +251,33 @@ class QdrantVectorProvider(VectorProvider):
             if hit.payload and "node_id" in hit.payload
         ]
 
+    def delete(self, node_ids: list[str]) -> int:
+        """
+        Remove these nodes' vectors from the index.
+
+        Point identifiers are derived from node names the same way they are
+        when written, so nothing has to be looked up first. Ids the index has
+        never seen are simply not there to remove, which is the state being
+        asked for anyway.
+        """
+        if not node_ids:
+            return 0
+
+        points = [_point_id(node_id) for node_id in node_ids]
+        present = len(
+            self.client.retrieve(
+                collection_name=self.collection_name,
+                ids=points,
+                with_vectors=False,
+                with_payload=False,
+            )
+        )
+        self.client.delete(
+            collection_name=self.collection_name, points_selector=points
+        )
+        logger.info("Deleted %d vectors from %s", present, self.collection_name)
+        return present
+
     def get_vectors(self, node_ids: list[str]) -> dict[str, list[float]]:
         """
         Read back the stored vector for each of these nodes.

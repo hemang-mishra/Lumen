@@ -7,19 +7,23 @@ forgot on a timer would keep losing exactly the long-running things it exists
 to hold on to.
 
 What happens instead is that a quiet pattern counts for less when history is
-searched, and crossing either threshold is reported. The second threshold is
-the interesting one: past a year, the record genuinely cannot say whether
+searched, and crossing a threshold is reported. The last one is the
+interesting one: past a year, the record genuinely cannot say whether
 something resolved or simply stopped being written down, and the honest
 response is to ask rather than to assume either.
+
+How much a quiet pattern is worth is not decided here. It is the same
+question search ranking answers, and it is answered in one place so a report
+can never state a number that nothing actually uses.
 """
 
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timezone
-from typing import Any
 
-from lumen.config import MacroConfig
+from lumen.config import MacroConfig, ScoringConfig
+from lumen.graph import scoring
+from lumen.graph.rows import as_utc, last_seen_at
 from lumen.pipeline.macroextraction.contracts import AgingPattern, WindowCorpus
 from lumen.schemas.enums import PatternAgeBand
 
@@ -34,9 +38,14 @@ RE_INTERROGATION_PROMPT = (
 )
 
 
-def age_patterns(corpus: WindowCorpus, *, config: MacroConfig) -> list[AgingPattern]:
+def age_patterns(
+    corpus: WindowCorpus,
+    *,
+    config: MacroConfig,
+    scoring_config: ScoringConfig | None = None,
+) -> list[AgingPattern]:
     """
-    Every live pattern that has been quiet long enough to be worth less.
+    Every live pattern that has been quiet long enough to be worth reporting.
 
     Measured against the end of the window rather than against today, so a
     report produced late says the same thing as one produced on time. A
@@ -45,38 +54,40 @@ def age_patterns(corpus: WindowCorpus, *, config: MacroConfig) -> list[AgingPatt
 
     Deliberately not limited to what appeared in the window. These patterns
     are here precisely because they did not.
+
+    How long counts as quiet enough to mention is this report's own opinion —
+    a pattern nobody has written about for five weeks is not news. What that
+    quiet costs the pattern is not: that comes from the shared curve.
     """
-    ends_at = _utc(corpus.window.period_end)
-    cooling_after = max(config.cooling_days, 0)
-    dormant_after = max(config.dormant_days, cooling_after + 1)
+    weights = scoring_config or ScoringConfig()
+    ends_at = as_utc(corpus.window.period_end)
+    report_after = max(config.aging_report_days, 0)
 
     aged: list[AgingPattern] = []
 
     for record in corpus.all_patterns:
-        last_seen = _moment(
-            record.get("last_reinforced_at")
-            or record.get("valid_from")
-            or record.get("created_at")
-        )
+        last_seen = last_seen_at(record)
         if last_seen is None:
             continue
 
-        quiet_days = (ends_at - _utc(last_seen)).days
-        if quiet_days <= cooling_after:
+        quiet_days = scoring.quiet_days(last_seen, ends_at)
+        if quiet_days <= report_after:
             continue
 
-        dormant = quiet_days > dormant_after
+        band = scoring.age_band(last_seen, ends_at, config=weights)
         aged.append(
             AgingPattern(
                 pattern_id=str(record.get("node_id")),
                 label=str(record.get("pattern_name") or record.get("node_id")),
-                band=PatternAgeBand.DORMANT if dormant else PatternAgeBand.COOLING,
+                band=band,
                 last_reinforced=last_seen,
                 days_since_last_seen=quiet_days,
-                weight_multiplier=(
-                    config.dormant_multiplier if dormant else config.cooling_multiplier
+                weight_multiplier=scoring.recency_weight(
+                    last_seen, ends_at, config=weights
                 ),
-                re_interrogation_prompt=RE_INTERROGATION_PROMPT if dormant else None,
+                re_interrogation_prompt=(
+                    RE_INTERROGATION_PROMPT if band is PatternAgeBand.DORMANT else None
+                ),
             )
         )
 
@@ -84,26 +95,6 @@ def age_patterns(corpus: WindowCorpus, *, config: MacroConfig) -> list[AgingPatt
     # ones a person is least likely to raise on their own.
     aged.sort(key=lambda item: (-item.days_since_last_seen, item.pattern_id))
     return aged[: max(config.aging_limit, 1)]
-
-
-def _moment(value: Any) -> datetime | None:
-    """Read a stored timestamp back, or nothing if it cannot be read."""
-    if isinstance(value, datetime):
-        return value
-    if value in (None, ""):
-        return None
-    try:
-        return datetime.fromisoformat(str(value))
-    except ValueError:
-        logger.debug("could not read %r as a moment", value)
-        return None
-
-
-def _utc(moment: datetime) -> datetime:
-    """A moment with a timezone, reading a bare one as UTC."""
-    if moment.tzinfo is None:
-        return moment.replace(tzinfo=timezone.utc)
-    return moment.astimezone(timezone.utc)
 
 
 __all__ = ["RE_INTERROGATION_PROMPT", "age_patterns"]

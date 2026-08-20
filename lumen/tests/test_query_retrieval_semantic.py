@@ -89,8 +89,16 @@ class TestFindingWhatResembles:
             make_trigger(TriggerType.PATTERN_MENTION), texts=["the invented record"]
         )
 
-        assert found.candidates[0].similarity == pytest.approx(1.0, abs=1e-6)
-        assert found.candidates[0].rank_score == pytest.approx(2.0, abs=1e-6)
+        found_node = found.candidates[0]
+
+        assert found_node.similarity == pytest.approx(1.0, abs=1e-6)
+        # The weighted number is the measurement times everything the record
+        # is worth, which for a weighty one can reach twice what the
+        # similarity field allows.
+        assert found_node.rank_score == pytest.approx(
+            1.0 * 2.0 * found_node.recency_weight * found_node.trust_weight,
+            abs=1e-6,
+        )
 
     def test_the_reason_that_led_there_is_recorded(
         self, search, seed_observation, make_trigger

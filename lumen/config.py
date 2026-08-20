@@ -522,14 +522,15 @@ class MacroConfig:
     ignored_lesson_days: int = _env_int("LUMEN_MACRO_IGNORED_LESSON_DAYS", 14)
     ignored_lesson_lookback_days: int = _env_int("LUMEN_MACRO_IGNORED_LOOKBACK_DAYS", 180)
 
-    # When a quiet pattern is worth less, and when it is quiet enough that
-    # nobody can tell from the record whether it resolved or just stopped
-    # being written down. The multipliers are reported here and applied to
-    # search ranking elsewhere.
-    cooling_days: int = _env_int("LUMEN_MACRO_COOLING_DAYS", 180)
-    dormant_days: int = _env_int("LUMEN_MACRO_DORMANT_DAYS", 365)
-    cooling_multiplier: float = _env_float("LUMEN_MACRO_COOLING_MULTIPLIER", 0.85)
-    dormant_multiplier: float = _env_float("LUMEN_MACRO_DORMANT_MULTIPLIER", 0.5)
+    # How quiet a pattern has to have gone before a report mentions it at all.
+    # A pattern nobody has written about for five weeks is not news; one
+    # nobody has written about for half a year is.
+    aging_report_days: int = _env_int("LUMEN_MACRO_AGING_REPORT_DAYS", 180)
+
+    # How long a quiet pattern is worth less for is not settled here. It is
+    # the same question search ranking answers, and two answers to one
+    # question means a report stating a number the system does not use, so
+    # both read ScoringConfig.
 
     # What counts as an identity-level shift rather than a few patterns
     # moving independently, and how far back the comparison reaches.
@@ -542,6 +543,112 @@ class MacroConfig:
     narrative_max_chars: int = _env_int("LUMEN_MACRO_NARRATIVE_MAX_CHARS", 20000)
     narrative_attempts: int = _env_int("LUMEN_MACRO_NARRATIVE_ATTEMPTS", 2)
     narrative_excerpt_chars: int = _env_int("LUMEN_MACRO_EXCERPT_CHARS", 220)
+
+
+@dataclass(frozen=True)
+class ScoringConfig:
+    """
+    How much a stored record is worth when history is searched.
+
+    Four things change what a record counts for: how strong a signal it was
+    when it was written, how long ago it was last true of the person, whether
+    they confirmed it themselves or an assistant suggested it, and how often
+    it has turned out to be worth showing.
+
+    They live together in one place because more than one part of Lumen ranks
+    records, and if two of them disagreed about what a record is worth, the
+    same record would come out in a different order depending on who asked.
+
+    Every number here can be turned off with one switch, so today's ranking
+    can be compared against the old one without changing any code.
+    """
+
+    decay_enabled: bool = _env_bool("LUMEN_DECAY_ENABLED", True)
+
+    # How many days of quiet it takes to move a record into each band. A
+    # record younger than the first is worth its full value.
+    fresh_days: int = _env_int("LUMEN_DECAY_FRESH_DAYS", 30)
+    cooling_days: int = _env_int("LUMEN_DECAY_COOLING_DAYS", 180)
+    dormant_days: int = _env_int("LUMEN_DECAY_DORMANT_DAYS", 365)
+
+    # What a record in each band is worth. Nothing ever reaches zero: an old
+    # record ranks lower, and is still reachable.
+    cooling_weight: float = _env_float("LUMEN_DECAY_COOLING_WEIGHT", 0.85)
+    stale_weight: float = _env_float("LUMEN_DECAY_STALE_WEIGHT", 0.70)
+    dormant_weight: float = _env_float("LUMEN_DECAY_DORMANT_WEIGHT", 0.50)
+
+    # What something the assistant suggested and the person never confirmed
+    # is worth beside something they said themselves.
+    unverified_weight: float = _env_float("LUMEN_TRUST_UNVERIFIED", 0.5)
+
+    # How much each time a record proved useful lifts it, and the ceiling on
+    # that lift. The ceiling is the point: being shown makes a record more
+    # likely to be shown again, and without a cap that loop runs away.
+    frequency_enabled: bool = _env_bool("LUMEN_FREQUENCY_ENABLED", True)
+    frequency_step: float = _env_float("LUMEN_FREQUENCY_STEP", 0.1)
+    frequency_cap: float = _env_float("LUMEN_FREQUENCY_CAP", 1.5)
+
+
+@dataclass(frozen=True)
+class MaintenanceConfig:
+    """
+    Settings for the jobs that run over the whole history rather than a window.
+
+    Erasing somebody's data and scanning every year of it for a long-running
+    pattern have nothing in common except that both walk everything, both take
+    a while, and both need to be told how much to do at once so a live
+    conversation is not left waiting behind them.
+    """
+
+    # How many records are rewritten in one go. Each batch is its own
+    # transaction, so the graph is locked for a moment at a time rather than
+    # for the whole sweep.
+    erasure_batch_size: int = _env_int("LUMEN_ERASURE_BATCH", 200)
+
+    # What a request has to say back before anything is erased. Erasure
+    # cannot be undone, so it cannot be reached by a request that merely
+    # arrives at the right address.
+    erasure_confirm_phrase: str = _env("LUMEN_ERASURE_CONFIRM", "ERASE")
+
+    # How many separate occasions a pattern needs before its history is worth
+    # laying out, and how many of those occasions to show.
+    proof_min_instances: int = _env_int("LUMEN_PROOF_MIN_INSTANCES", 10)
+    proof_key_instances: int = _env_int("LUMEN_PROOF_KEY_INSTANCES", 5)
+
+
+@dataclass(frozen=True)
+class SchedulerConfig:
+    """
+    How often the product does the things nobody presses a button for.
+
+    Everything here is an interval, and the intervals are generous on
+    purpose. None of these jobs is urgent — a report written an hour late is
+    the same report — and the cost of asking too often is a laptop that never
+    settles.
+    """
+
+    enabled: bool = _env_bool("LUMEN_SCHEDULER_ENABLED", True)
+
+    # How often the clock wakes at all. Every job's own interval is rounded
+    # up to this, so it is the shortest anything can happen.
+    poll_seconds: float = _env_float("LUMEN_SCHEDULER_POLL_SECONDS", 60.0)
+
+    # How long between each job. Looking for finished conversations is the
+    # frequent one, because it is the only one somebody might be waiting on.
+    watch_every_seconds: int = _env_int("LUMEN_WATCH_EVERY_SECONDS", 300)
+    reports_every_seconds: int = _env_int("LUMEN_REPORTS_EVERY_SECONDS", 3600)
+    shadow_every_seconds: int = _env_int("LUMEN_SHADOW_EVERY_SECONDS", 3600)
+    sweep_every_seconds: int = _env_int("LUMEN_SWEEP_EVERY_SECONDS", 21600)
+
+    # How many finished conversations to hand over in one go. A cap rather
+    # than a suggestion: somebody importing a year of history at once should
+    # not have every day of it dispatched in the same minute.
+    max_dispatch_per_tick: int = _env_int("LUMEN_MAX_DISPATCH_PER_TICK", 5)
+
+    # How many recent events to keep for a page that has just connected.
+    # Nothing here is a record — it is what somebody missed while opening a
+    # tab, and everything worth keeping is readable from its own endpoint.
+    event_history: int = _env_int("LUMEN_EVENT_HISTORY", 50)
 
 
 @dataclass(frozen=True)
@@ -792,6 +899,9 @@ class AppConfig:
     chat: ChatConfig = field(default_factory=ChatConfig)
     ingest: IngestConfig = field(default_factory=IngestConfig)
     macro: MacroConfig = field(default_factory=MacroConfig)
+    scoring: ScoringConfig = field(default_factory=ScoringConfig)
+    scheduler: SchedulerConfig = field(default_factory=SchedulerConfig)
+    maintenance: MaintenanceConfig = field(default_factory=MaintenanceConfig)
 
     # The personal build has one user. Multi-user deployments set this per request.
     user_id: str = _env("LUMEN_USER_ID", "local")

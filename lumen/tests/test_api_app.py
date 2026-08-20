@@ -73,9 +73,36 @@ class TestTheTestPages:
         assert response.status_code == 200
         assert "Lumen" in response.text
 
-    def test_all_three_are_there(self, api_client):
-        for page in ("index.html", "trace.html", "chat.html"):
+    def test_every_page_is_there(self, api_client):
+        pages = (
+            "index.html",
+            "episodes.html",
+            "review.html",
+            "reports.html",
+            "maintenance.html",
+            "activity.html",
+            "trace.html",
+            "chat.html",
+        )
+        for page in pages:
             assert api_client.get(f"/ui/{page}").status_code == 200, page
+
+    def test_every_page_can_be_reached_from_every_other(self, api_client):
+        # A page nothing links to is one nobody finds.
+        pages = (
+            "index.html",
+            "episodes.html",
+            "review.html",
+            "reports.html",
+            "maintenance.html",
+            "activity.html",
+            "trace.html",
+            "chat.html",
+        )
+        for page in pages:
+            text = api_client.get(f"/ui/{page}").text
+            for other in pages:
+                assert f'href="{other}"' in text, (page, other)
 
     def test_they_say_what_they_are(self, api_client):
         # These exist to make the pipeline visible while it is being built.
@@ -90,6 +117,11 @@ class TestTheTestPages:
         offenders = [
             path.name
             for path in static.glob("*.js")
+            if "innerHTML" in path.read_text()
+        ]
+        offenders += [
+            path.name
+            for path in static.glob("*.html")
             if "innerHTML" in path.read_text()
         ]
 
@@ -354,6 +386,21 @@ class TestTheApiCannotWrite:
         #   /hitl/sweep — settles items that ran out of time and lets parked
         #     ones in. It can write to the graph, by exactly the same path as
         #     a person answering, and only for items already deferred once.
+        #
+        #   /maintenance/erasure — the only route in this service that
+        #     removes anything, and the only one that cannot be undone. It is
+        #     narrow in the same way as the others: what it holds is not a
+        #     graph handle but the thing that forgets, and it refuses outright
+        #     without the confirmation phrase this deployment asks for. The
+        #     phrase is in the body rather than a header or a query parameter
+        #     precisely so this cannot be reached by a link somebody clicked.
+        #     Its preview, which is where anybody sensible starts, is a GET
+        #     and changes nothing.
+        #
+        #   /maintenance/proof-chains — a read, despite being a POST. It
+        #     walks every year of somebody's history and costs real time, and
+        #     behind a GET a browser or a crawler could start one by
+        #     accident. It writes nothing.
         spec = api_client.get("/openapi.json").json()
 
         posts = {
@@ -374,6 +421,8 @@ class TestTheApiCannotWrite:
             "/hitl/{item_id}/dismiss",
             "/hitl/{item_id}/snooze",
             "/hitl/sweep",
+            "/maintenance/erasure",
+            "/maintenance/proof-chains",
         }
 
     def test_the_upload_routes_cannot_reach_the_graph_themselves(self):

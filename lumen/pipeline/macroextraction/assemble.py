@@ -29,6 +29,7 @@ from lumen.pipeline.macroextraction.contracts import (
 )
 from lumen.schemas.enums import (
     NarrativeStatus,
+    PatternAgeBand,
     ReportStatus,
     ReportType,
     SignalStrength,
@@ -48,7 +49,6 @@ REPORT_SCHEMA_VERSION = 1
 # "this was not built" from "this period had no feeling in it".
 DEFERRED_SECTIONS: tuple[str, ...] = (
     "emotional_valence",
-    "proof_chains",
     "prospective_memory",
 )
 
@@ -199,6 +199,7 @@ def build(
         "relationship_arcs": _arcs(facts, narrative),
         "biographical_gaps_raised": _gaps(facts, narrative),
         "pattern_aging": _aging(facts),
+        "proof_chains": _proof_chains(facts),
         "archetype_shift": _shift(facts, narrative),
         "active_contradictions": _contradictions(facts, narrative),
     }
@@ -422,14 +423,45 @@ def _aging(facts: ComputedFacts) -> dict[str, list[dict[str, Any]]]:
             row["re_interrogation_prompt"] = item.re_interrogation_prompt
         return row
 
+    def band(wanted: PatternAgeBand) -> list[dict[str, Any]]:
+        return [entry(item) for item in facts.pattern_aging if item.band is wanted]
+
     return {
-        "cooling_patterns": [
-            entry(item) for item in facts.pattern_aging if item.band.value == "COOLING"
-        ],
-        "dormant_patterns": [
-            entry(item) for item in facts.pattern_aging if item.band.value == "DORMANT"
-        ],
+        "cooling_patterns": band(PatternAgeBand.COOLING) + band(PatternAgeBand.STALE),
+        "dormant_patterns": band(PatternAgeBand.DORMANT),
     }
+
+
+def _proof_chains(facts: ComputedFacts) -> list[dict[str, Any]]:
+    """
+    The patterns with years of evidence behind them.
+
+    Every number here was counted rather than described, and the examples are
+    named by episode, so a person can follow any line of it back to what they
+    actually wrote.
+    """
+    return [
+        {
+            "record_id": chain.record_id,
+            "record_type": chain.record_type,
+            "label": chain.label,
+            "total_instances": chain.total_instances,
+            "span_days": chain.span_days,
+            "span_years": chain.span_years,
+            "chain_summary": chain.summary,
+            "first_seen": _moment(chain.first_seen),
+            "last_seen": _moment(chain.last_seen),
+            "key_instances": [
+                {
+                    "episode_id": instance.episode_id,
+                    "date": instance.happened_at.date().isoformat(),
+                    "excerpt_summary": instance.excerpt,
+                }
+                for instance in chain.key_instances
+            ],
+        }
+        for chain in facts.proof_chains
+    ]
 
 
 def _shift(facts: ComputedFacts, narrative: NarrativeResult) -> dict[str, Any]:

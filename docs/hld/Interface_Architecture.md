@@ -50,6 +50,15 @@ To prevent this graph pollution and avoid high computational costs, Lumen uses *
 
 2. **Session Decay Trigger**: The system waits for a session to decay (2 hours of inactivity within that `session_label`, configurable via `LUMEN_SESSION_DECAY_MINUTES` — see `lumen.config.OperationalConfig`). If a user returns after decay and continues on the **same `session_label`**, new turns append to that buffer. If the user opens a new chat or imports a file with a different `session_label` on the same day, a new buffer is created. After final decay or manual "End Session", the buffer is sent to Step 0.
 
+   **Who notices** (Goal 20): a background watcher on the BFF's one scheduler thread, every
+   five minutes by default. It takes only conversations Lumen held itself — an imported one
+   belongs to the importer, and two owners for one conversation is how a single evening
+   becomes two sets of history. Ownership is taken with a single conditional write
+   (open → dispatched), so whoever loses the race sees it is no longer open and moves on;
+   looking and then acting leaves a gap exactly wide enough for the importer to be in it.
+   A run that fails puts the conversation back to decayed rather than leaving it dispatched,
+   because dispatched means somebody owns it and after a failure nobody does.
+
 3. **Multi-Session Same Day**: A day may produce multiple independent sessions. Each session is independently preprocessed and extracted. The `SessionNode` in the graph carries `(event_date, session_label)` as a composite key. When querying "what did we discuss today?", the UI enumerates all `session_label` values for that `event_date`.
 
 4. **Extraction**: Step 0 runs Dialogue Act Classification on each session buffer independently. Episodes are segmented within the buffer and fed through Steps 1–4. Cross-session connections (e.g., June 27 B referencing June 21 content) are resolved at the Retrieval and Reconciliation layers — not at the buffer level.

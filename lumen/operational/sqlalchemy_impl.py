@@ -16,15 +16,16 @@ import hashlib
 import logging
 import threading
 import uuid
-from collections.abc import Generator
+from collections.abc import Generator, Sequence
 from contextlib import contextmanager
 from datetime import UTC, date, datetime, timedelta
 from typing import Any
 
-from sqlalchemy import Engine, delete, func, or_, select
+from sqlalchemy import Engine, delete, func, or_, select, update
 from sqlalchemy.orm import Session, sessionmaker
 
 from lumen.config import AppConfig, OperationalConfig
+from lumen.graph import redaction
 from lumen.observability.trace import get_trace_id, new_trace_id
 from lumen.operational import models
 from lumen.operational.engine import create_ops_engine, create_session_factory
@@ -443,6 +444,29 @@ class SqlAlchemySessionBufferRepository:
                 triggered_at=_aware(buffer.decayed_at) or _utcnow(),
             )
 
+    def claim_for_processing(self, session_id: str, *, at: datetime) -> bool:
+        """
+        Move one conversation from open to dispatched, and say whether we did.
+
+        A single conditional update rather than a read followed by a write.
+        The database decides who won, which is the only place that decision
+        can be made correctly.
+        """
+        with self._sessions.session() as db:
+            claimed = db.execute(
+                update(models.SessionBuffer)
+                .where(
+                    models.SessionBuffer.session_id == session_id,
+                    models.SessionBuffer.status == BufferStatus.OPEN.value,
+                )
+                .values(status=BufferStatus.DISPATCHED.value, decayed_at=at)
+            ).rowcount
+            db.flush()
+
+        if claimed:
+            logger.info("conversation claimed", extra={"session_id": session_id})
+        return bool(claimed)
+
     def mark_status(self, session_id: str, status: BufferStatus) -> SessionBufferRecord:
         with self._sessions.session() as db:
             buffer = self._require_buffer(db, session_id)
@@ -451,6 +475,72 @@ class SqlAlchemySessionBufferRepository:
                 buffer.decayed_at = _utcnow()
             db.flush()
             return _to_buffer_record(buffer)
+
+    def list_session_ids(self, user_id: str, *, limit: int = 100_000) -> list[str]:
+        with self._sessions.session() as db:
+            return list(
+                db.scalars(
+                    select(models.SessionBuffer.session_id)
+                    .where(models.SessionBuffer.user_id == user_id)
+                    .order_by(models.SessionBuffer.session_id)
+                    .limit(max(int(limit), 1))
+                ).all()
+            )
+
+    def purge_content(
+        self,
+        user_id: str,
+        *,
+        at: datetime,
+        session_ids: Sequence[str] | None = None,
+    ) -> int:
+        """
+        Blank every message and summary, keeping every row that held one.
+
+        Done as two statements rather than by walking rows, because an
+        erasure covers a whole history and a person who has talked daily for
+        a year has tens of thousands of messages.
+        """
+        marker = redaction.erased_marker(at)
+        with self._sessions.session() as db:
+            wanted = self._buffer_ids(db, user_id, session_ids)
+            if not wanted:
+                return 0
+
+            changed = db.execute(
+                update(models.BufferMessage)
+                .where(models.BufferMessage.session_id.in_(wanted))
+                .values(content=marker)
+            ).rowcount
+            db.execute(
+                update(models.SessionBuffer)
+                .where(models.SessionBuffer.session_id.in_(wanted))
+                .values(rolling_summary=None)
+            )
+            db.flush()
+
+        logger.info(
+            "conversation content erased",
+            extra={"buffers": len(wanted), "messages": changed},
+        )
+        return int(changed)
+
+    def _buffer_ids(
+        self, db: Session, user_id: str, session_ids: Sequence[str] | None
+    ) -> list[str]:
+        """
+        Which of this person's conversations an erasure covers.
+
+        Narrowing by user even when sessions are named is the point: an
+        identifier arriving from outside must never reach somebody else's
+        conversation just because it was spelled correctly.
+        """
+        query = select(models.SessionBuffer.session_id).where(
+            models.SessionBuffer.user_id == user_id
+        )
+        if session_ids is not None:
+            query = query.where(models.SessionBuffer.session_id.in_(list(session_ids)))
+        return list(db.scalars(query).all())
 
     def _require_buffer(self, db: Session, session_id: str) -> models.SessionBuffer:
         row = db.get(models.SessionBuffer, session_id)
@@ -764,6 +854,20 @@ class SqlAlchemyCoreferenceMapRepository:
             db.flush()
             return record.id
 
+    def purge(self, *, session_ids: Sequence[str] | None = None) -> int:
+        """Remove the notes on who was being referred to."""
+        with self._sessions.session() as db:
+            statement = delete(models.CoreferenceMapRecord)
+            if session_ids is not None:
+                statement = statement.where(
+                    models.CoreferenceMapRecord.session_id.in_(list(session_ids))
+                )
+            removed = db.execute(statement).rowcount
+            db.flush()
+
+        logger.info("coreference notes removed", extra={"removed": int(removed)})
+        return int(removed)
+
     def get(self, map_id: str) -> CoreferenceRecord | None:
         with self._sessions.session() as db:
             row = db.get(models.CoreferenceMapRecord, map_id)
@@ -1008,6 +1112,49 @@ class SqlAlchemyHitlQueueRepository:
             db.flush()
             return _to_hitl_record(row)
 
+    def purge_content(
+        self,
+        user_id: str,
+        *,
+        at: datetime,
+        audit_node_ids: Sequence[str] | None = None,
+    ) -> int:
+        """
+        Blank what the waiting questions were about, and drop their answers.
+
+        The proposals go entirely rather than being blanked. A frozen answer
+        is nothing but records waiting to be written, so there is no shape
+        left once the words are gone — and one that survived an erasure could
+        be answered afterwards and write the erased text straight back.
+        """
+        marker = redaction.erased_marker(at)
+        with self._sessions.session() as db:
+            query = select(models.HitlQueueItem.audit_node_id).where(
+                models.HitlQueueItem.user_id == user_id
+            )
+            if audit_node_ids is not None:
+                query = query.where(
+                    models.HitlQueueItem.audit_node_id.in_(list(audit_node_ids))
+                )
+            wanted = list(db.scalars(query).all())
+            if not wanted:
+                return 0
+
+            changed = db.execute(
+                update(models.HitlQueueItem)
+                .where(models.HitlQueueItem.audit_node_id.in_(wanted))
+                .values(context_summary=marker)
+            ).rowcount
+            db.execute(
+                delete(models.HitlProposal).where(
+                    models.HitlProposal.audit_node_id.in_(wanted)
+                )
+            )
+            db.flush()
+
+        logger.info("queued questions erased", extra={"items": int(changed)})
+        return int(changed)
+
     def save_proposal(self, audit_node_id: str, payload: str) -> None:
         with self._sessions.session() as db:
             row = db.get(models.HitlProposal, audit_node_id)
@@ -1076,6 +1223,19 @@ class SqlAlchemyUserSettingsRepository:
             )
             return bool(result.rowcount)
 
+    def purge(self, user_id: str) -> int:
+        """Remove everything this person has configured."""
+        with self._sessions.session() as db:
+            removed = db.execute(
+                delete(models.UserSetting).where(
+                    models.UserSetting.user_id == user_id
+                )
+            ).rowcount
+            db.flush()
+
+        logger.info("settings erased", extra={"removed": int(removed)})
+        return int(removed)
+
     def get_records(self, user_id: str) -> list[UserSettingRecord]:
         """Read a user's settings with their timestamps, newest change last."""
         with self._sessions.session() as db:
@@ -1131,6 +1291,36 @@ class SqlAlchemyDataErasureAuditRepository:
         with self._sessions.session() as db:
             row = db.get(models.DataErasureAudit, record_id)
             return _to_erasure_record(row) if row else None
+
+    def finish(
+        self,
+        record_id: str,
+        *,
+        status: ErasureStatus,
+        nodes_anonymized: int,
+        embeddings_deleted: int,
+        entry_ids_affected: Sequence[str] = (),
+    ) -> StoredErasureAudit:
+        with self._sessions.session() as db:
+            row = db.get(models.DataErasureAudit, record_id)
+            if row is None:
+                raise RecordNotFoundError(f"no erasure record with id {record_id!r}")
+            row.status = status.value
+            row.nodes_anonymized = nodes_anonymized
+            row.embeddings_deleted = embeddings_deleted
+            row.entry_ids_affected = list(entry_ids_affected)
+            db.flush()
+            closed = _to_erasure_record(row)
+
+        logger.info(
+            "erasure finished",
+            extra={
+                "record_id": record_id,
+                "status": status.value,
+                "nodes_anonymized": nodes_anonymized,
+            },
+        )
+        return closed
 
     def list_for_user(self, user_id: str) -> list[StoredErasureAudit]:
         user_id_hash = _hash_user_id(user_id)
@@ -1230,6 +1420,31 @@ class SqlAlchemyImportRepository:
 
             db.flush()
             return _to_import_record(row)
+
+    def purge_content(
+        self,
+        user_id: str,
+        *,
+        at: datetime,
+        session_ids: Sequence[str] | None = None,
+    ) -> int:
+        """Blank the readable part of what was uploaded, keeping the record."""
+        marker = redaction.erased_marker(at)
+        with self._sessions.session() as db:
+            statement = update(models.ImportedConversation).where(
+                models.ImportedConversation.user_id == user_id
+            )
+            if session_ids is not None:
+                statement = statement.where(
+                    models.ImportedConversation.session_id.in_(list(session_ids))
+                )
+            changed = db.execute(
+                statement.values(title=marker, filename=marker)
+            ).rowcount
+            db.flush()
+
+        logger.info("upload titles erased", extra={"imports": int(changed)})
+        return int(changed)
 
     def get_batch(self, batch_id: str) -> ImportBatch | None:
         with self._sessions.session() as db:

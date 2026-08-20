@@ -646,14 +646,34 @@ a date — so a date filter does not apply to them and they are never excluded b
 
 ### Temporal Decay
 
-Temporal decay applies to `PatternNode` and `BeliefNode` instances during retrieval scoring. Nodes are **never deleted** due to age. They are downweighted.
+Temporal decay applies to **every live content record** during retrieval scoring, not
+only to `PatternNode` and `BeliefNode`. Nodes are **never deleted** due to age. They are
+downweighted, and the floor is `0.50`.
 
-| `last_reinforced_at` Age | Decay Multiplier |
-|---|---|
-| < 30 days | 1.0 (no decay) |
-| 30 – 180 days | 0.85 |
-| 180 – 365 days | 0.70 |
-| > 365 days | 0.50 |
+| Age | Band | Decay Multiplier |
+|---|---|---|
+| < 30 days | `FRESH` | 1.0 (no decay) |
+| 30 – 180 days | `COOLING` | 0.85 |
+| 180 – 365 days | `STALE` | 0.70 |
+| > 365 days | `DORMANT` | 0.50 |
+
+**Which date is measured** depends on what the record can say, in this order:
+`last_reinforced_at` → `occurred_at` → `valid_from` → `created_at`. A belief or a pattern
+is stamped every time it is evidenced again and uses the first; everything else falls back
+to when it happened. A record with no readable date is **not** decayed — a missing date
+must never be read as "very old".
+
+> **Divergence, recorded (Goal 19).** This section previously scoped decay to beliefs and
+> patterns, while `Extraction/Architecture.md` scoped it to the "age of observation". Both
+> could not be followed. The query layer retrieves observations, episodes and lessons too,
+> and decaying a belief while treating the three-year-old note it came from as though it
+> happened today is not defensible. One curve now applies to all of them.
+
+**One curve, one vocabulary.** The four bands above are the same four the macroextraction
+report uses to describe a quiet pattern, and the multiplier a report states is read from
+the same function retrieval applies. Before Goal 19 the report carried its own coarser
+bands (0.85 past 180 days, 0.5 past a year) and nothing applied them, so a report could
+state a number the system did not use.
 
 ---
 
@@ -662,8 +682,9 @@ Temporal decay applies to `PatternNode` and `BeliefNode` instances during retrie
 ```
 final_score = cosine_similarity(query_vector, node_vector)
             × signal_weight_multiplier
-            × recency_weight(last_reinforced_at)
+            × recency_weight(last_seen_at)
             × trust_weight(verification_status)
+            × frequency_weight(query_frequency)
 ```
 
 See [`Extraction/Architecture.md`](../Extraction/Architecture.md) for which layer applies
@@ -683,8 +704,10 @@ rather than something recorded.
 **Recency weight function:**
 
 ```python
-def recency_weight(last_reinforced_at: datetime, now: datetime) -> float:
-    age_days = (now - last_reinforced_at).days
+def recency_weight(last_seen_at: datetime | None, now: datetime) -> float:
+    if last_seen_at is None:
+        return 1.0                      # a missing date is not evidence of age
+    age_days = max((now - last_seen_at).days, 0)   # a future date is a clock, not a record
     if age_days < 30:
         return 1.0
     elif age_days < 180:
@@ -694,6 +717,25 @@ def recency_weight(last_reinforced_at: datetime, now: datetime) -> float:
     else:
         return 0.50
 ```
+
+**Frequency weight function.** A record surfaced in a conversation before is slightly more
+likely to be the relevant one again. The cap is what makes this safe: being shown makes a
+record more likely to be shown, and without a ceiling the loop compounds.
+
+```python
+def frequency_weight(query_frequency: int) -> float:
+    return min(1.0 + 0.1 * query_frequency, 1.5)
+```
+
+`query_frequency` is incremented when a record **reaches the assistant**, not when a search
+returns it, and at most **once per record per day**. Counting every candidate would make it
+a measure of what the search engine likes rather than of what helped — and that number then
+feeds back into what the search engine finds. Counting every turn of one conversation would
+let a single afternoon outrank years of history permanently. Only `PatternNode` and
+`BeliefNode` carry the counter; every other kind is skipped.
+
+Each factor can be switched off (`LUMEN_DECAY_ENABLED`, `LUMEN_FREQUENCY_ENABLED`), so a
+ranking with and without them can be compared without a code change.
 
 ---
 
@@ -760,7 +802,7 @@ DELETE /users/{user_id}/data
 
 This triggers an asynchronous anonymization pass:
 
-1. **Content node anonymization:** All `content`, `belief_statement`, `pattern_description`, `lesson_statement`, `loop_description`, `raw_evidence`, `episode_summary`, and `contradiction_summary` fields are replaced with `[ERASED: {iso_date}]`.
+1. **Content node anonymization:** Every column holding something a person wrote is replaced with `[ERASED: {iso_date}]`. The full table-by-table list lives in `lumen/graph/redaction.py`, where **every** node table is listed — including the ones holding no words at all, so a new kind of record cannot silently keep its text through an erasure. Columns holding a list keep a list (`["[ERASED: …]"]`) rather than becoming a bare sentence; a column holding a list of *records* (`lifecycle_history`) keeps each record's shape and dates and loses only its free text.
 
 2. **PersonEntityNode anonymization:** `canonical_name` → `[ERASED_PERSON_{sha256_hash_8}]`. All `aliases` → `[ERASED_ALIAS]`.
 
@@ -770,9 +812,11 @@ This triggers an asynchronous anonymization pass:
 
 5. **Graph structure is preserved:** Node IDs, edge structure, timestamps, node types, signal strengths, and version chains are all retained.
 
-6. **Embeddings:** All embedding vectors for the user's nodes are deleted (fully reconstructable from content, so content erasure alone is insufficient).
+6. **Embeddings:** All embedding vectors for the user's nodes are deleted (fully reconstructable from content, so content erasure alone is insufficient). The count recorded is how many vectors were **actually** removed, not how many were asked about — a compliance record that claims more than happened is worse than none.
 
-7. **Audit log:** A `DataErasureAuditRecord` is written to the **Operational DB** (SQLite/PostgreSQL). Contains no user content.
+7. **The operational database is cleared too** — *added in Goal 19, and not in the original procedure.* The graph holds what was *read out of* somebody's writing; the working database holds the writing itself. Anonymising only the graph would leave their actual sentences on disk in four other tables: `buffer_messages.content`, `session_buffers.rolling_summary`, `coreference_maps` (which is made entirely of other people's names), `hitl_proposals.payload` (frozen records waiting to be written), plus `hitl_queue.context_summary`, `imports.title`/`filename` and, for a whole erasure, `user_settings`. Frozen proposals are **deleted** rather than blanked: one surviving an erasure could be answered afterwards and write the erased text straight back.
+
+8. **Audit log:** A `DataErasureAuditRecord` is written to the **Operational DB** (SQLite/PostgreSQL). Contains no user content and no readable identifier. It is opened **before** any of the work starts and closed with the counts afterwards: an erasure that dies halfway leaves a history partly forgotten, and the only thing worse is one partly forgotten with nothing saying so. A step that fails is recorded and the sweep continues — stopping at the first refusal leaves more words behind than carrying on and reporting what could not be reached. Nothing is rolled back, because putting the words back would undo what was asked for.
 
 ### DataErasureAuditRecord (Operational DB)
 
@@ -799,7 +843,27 @@ record:
 DELETE /users/{user_id}/entries/{entry_id}
 ```
 
-Anonymizes all nodes whose `entry_id` or `episode_id` traces back to the specified entry. Same anonymization rules apply.
+Anonymizes all nodes whose `entry_id` or `episode_id` traces back to the specified entry, plus the causal steps belonging to those episodes. Same anonymization rules apply.
+
+**What single-entry erasure does not reach, stated plainly.** Standing beliefs and patterns
+drawn from that entry *and others* are untouched, as are `PersonEntityNode` records, which
+belong to more than one entry. A belief built from that evening and nine others is not a
+copy of that evening, and rewriting it would erase the other nine as collateral. The
+preview names these limits before anything runs, rather than leaving them to be discovered
+afterwards.
+
+### Asking before doing
+
+Erasure is irreversible, so it is the one operation with a preview: a call that counts what
+would go, names what will not be reached, and changes nothing. Running it requires an
+explicit confirmation phrase in the request body (`LUMEN_ERASURE_CONFIRM`, default
+`"ERASE"`) — not a header or a query parameter, so it cannot be supplied by a link somebody
+clicked. An entry nobody ever wrote is **refused** rather than succeeding quietly, and only
+one erasure runs at a time.
+
+The sweep runs in batches (`LUMEN_ERASURE_BATCH`, default 200), each its own transaction, so
+the graph's write lock is held for a moment at a time rather than for the whole sweep and a
+live conversation is not left waiting behind it.
 
 ---
 

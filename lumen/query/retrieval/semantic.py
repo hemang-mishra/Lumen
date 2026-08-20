@@ -37,7 +37,7 @@ from lumen.query.retrieval.contracts import (
     SearchUnavailable,
     Tally,
 )
-from lumen.query.retrieval.hydrate import has_id, to_node
+from lumen.query.retrieval.hydrate import Weighting, has_id, to_node
 from lumen.schemas.enums import ObservationType, RetrievalPass, TriggerType
 from lumen.schemas.query import RetrievalTrigger
 from lumen.vector.provider import ScoredHit, VectorProvider
@@ -116,6 +116,7 @@ def find_by_resemblance(
     embedder: EmbeddingProvider,
     llm: LLMProvider,
     config: QueryConfig,
+    weighting: Weighting | None = None,
 ) -> PassAResult:
     """
     Invent a record per reason, search for each, and keep the best few.
@@ -131,6 +132,8 @@ def find_by_resemblance(
     """
     if not triggers:
         return PassAResult()
+
+    weighing = weighting or Weighting.at()
 
     text = hyde.write_search_text(turn_text, triggers, provider=llm)
     embedded, failed = hyde.to_vectors(text, embedder=embedder)
@@ -151,7 +154,9 @@ def find_by_resemblance(
             tally=tally,
         )
         seen += len(hits)
-        for node in _read_back(hits, trigger, graph=graph, tally=tally):
+        for node in _read_back(
+            hits, trigger, graph=graph, tally=tally, weighting=weighing
+        ):
             held = found.get(node.node_id)
             # One record can answer two reasons. It is offered once, under
             # whichever reason matched it more closely.
@@ -184,6 +189,7 @@ def _read_back(
     *,
     graph: ReadOnlyGraph,
     tally: Tally,
+    weighting: Weighting,
 ) -> list[RetrievedNode]:
     """
     Read the matches out of the graph and keep the ones worth offering.
@@ -217,6 +223,7 @@ def _read_back(
         kept.append(
             to_node(
                 row,
+                weighting=weighting,
                 found_by=RetrievalPass.SEMANTIC,
                 trigger_type=trigger.trigger_type,
                 # The honest closeness, not the weighted number used for

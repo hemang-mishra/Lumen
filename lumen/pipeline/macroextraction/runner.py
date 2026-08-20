@@ -36,6 +36,7 @@ from lumen.pipeline.macroextraction import (
     commit,
     corpus,
     narrative,
+    proof,
     shadow,
     windows,
 )
@@ -46,9 +47,15 @@ from lumen.pipeline.macroextraction.contracts import (
     ReportOutcome,
 )
 from lumen.providers.protocols import LLMProvider
-from lumen.schemas.enums import MacroRunStatus, NarrativeStatus
+from lumen.schemas.enums import MacroRunStatus, NarrativeStatus, ReportType
 
 logger = logging.getLogger(__name__)
+
+# The reports that are long enough to be worth a look over the whole history.
+# A weekly report is about seven days; five years of evidence would drown it.
+PROOF_REPORT_TYPES: frozenset[ReportType] = frozenset(
+    {ReportType.MONTHLY, ReportType.QUARTERLY}
+)
 
 
 def run_report(
@@ -117,7 +124,10 @@ def run_report(
             duration_ms=_since(started),
         )
 
-    facts = analytics.compute(gathered, config=settings.macro)
+    facts = analytics.compute(
+        gathered, config=settings.macro, scoring_config=settings.scoring
+    )
+    facts = _with_proof_chains(facts, window, graph=graph, config=settings)
     written = _narrate(facts, provider=thinking, config=settings)
 
     node, episode_ids = assemble.build(
@@ -293,6 +303,40 @@ def _log_outcome(outcome: ReportOutcome, facts: ComputedFacts) -> None:
             "duration_ms": outcome.duration_ms,
         },
     )
+
+
+def _with_proof_chains(
+    facts: ComputedFacts,
+    window: MacroWindow,
+    *,
+    graph: GraphProvider,
+    config: AppConfig,
+) -> ComputedFacts:
+    """
+    Add the long-running patterns, for the reports long enough to want them.
+
+    Only the monthly and quarterly ones. This reads the whole history rather
+    than a window, and a weekly report is a look at seven days — putting
+    five years of evidence in it would drown the thing it is for.
+
+    A failure costs the section and not the report. Everything else in the
+    document was already counted before this runs.
+    """
+    if window.report_type not in PROOF_REPORT_TYPES:
+        return facts
+
+    try:
+        chains = proof.find_proof_chains(graph, config=config.maintenance)
+    except Exception:
+        logger.warning(
+            "the whole-history scan for long-running patterns did not finish, "
+            "so this report goes out without that section",
+            exc_info=True,
+            extra={"report_type": window.report_type.value},
+        )
+        return facts
+
+    return facts.model_copy(update={"proof_chains": chains})
 
 
 def _since(started: float) -> int:

@@ -77,6 +77,11 @@ class AssembledContext(BaseModel):
             in acute distress — as opposed to there being nothing to offer.
         deferred: True when this arrived too late for the turn it was fetched
             for and is being carried into the next one.
+        alert: One line saying that several things appear to be moving at
+            once, when the recent scan found that. Rare, and never shown to
+            somebody who sounds like they are in the middle of a bad ten
+            minutes — a system that interrupts a hard moment to report on
+            itself has misread what it is for.
         search_failed: True when the history could not be looked up at all —
             as opposed to being looked up and coming back empty. Carried this
             far because those two produce the same empty briefing, and an
@@ -94,6 +99,7 @@ class AssembledContext(BaseModel):
     estimated_tokens: int = Field(default=0, ge=0)
     suppressed: bool = False
     deferred: bool = False
+    alert: str | None = None
     search_failed: bool = False
 
     @property

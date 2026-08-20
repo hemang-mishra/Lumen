@@ -88,6 +88,23 @@ class VectorProvider(Protocol):
         """
         ...
 
+    def delete(self, node_ids: list[str]) -> int:
+        """
+        Remove these nodes' vectors from the index.
+
+        Needed because a vector is a reconstruction of the words it was made
+        from. Rewriting a record's text and leaving its position in the index
+        would leave the record still findable by everything it used to say,
+        which is not forgetting anything.
+
+        Ids with nothing stored are not an error. A record whose vector was
+        never written is already in the state this is asked for. Returns how
+        many vectors were actually removed, not how many were asked about —
+        the number goes into a record of what an erasure did, and one that
+        claims more than happened is worse than none.
+        """
+        ...
+
     def close(self) -> None:
         """Release database resources."""
         ...

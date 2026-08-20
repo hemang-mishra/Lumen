@@ -281,8 +281,9 @@ final_score = cosine_similarity × signal_weight_multiplier × recency_weight ×
 |---|---|---|
 | `cosine_similarity` | Stage 2 and the query layer | Comes straight from the vector store. |
 | `signal_weight_multiplier` | Stage 2 and the query layer | Available on the node itself, and it decides which candidates Reconciliation ever sees. A `CRITICAL` node ranked just below the cut on raw distance has to be able to climb back above it. |
-| `recency_weight` | Query layer (temporal decay, Goal 19) | Needs aged data to be meaningful, and Stage 2's candidate set is small enough that decay would mostly reorder things Reconciliation will judge on content anyway. |
-| `trust_weight` | Query layer | Same. |
+| `recency_weight` | Query layer (temporal decay, **shipped in Goal 19**) | Needs aged data to be meaningful, and Stage 2's candidate set is small enough that decay would mostly reorder things Reconciliation will judge on content anyway. |
+| `trust_weight` | Query layer (**shipped in Goal 19**) | Same. |
+| `frequency_weight` | Query layer (**added in Goal 19**) | Nothing in the graph knows what has actually helped except the counter the query layer keeps. Capped at 1.5×, because being shown makes a record more likely to be shown. |
 
 **What is stored versus what is ranked on.** `CandidateNode.similarity_score` is bounded
 `0.0–1.0` and holds the **raw cosine**. The weighted score is a ranking step, not a
@@ -308,14 +309,26 @@ There is no automatic promotion based on reinforcement count. An unverified insi
 
 ### Recency Weight Decay
 
-| Age of observation | `recency_weight` |
-|---|---|
-| < 30 days | 1.00 |
-| 30–179 days | 0.85 |
-| 180–364 days | 0.70 |
-| ≥ 365 days | 0.50 |
+| Age of the record | Band | `recency_weight` |
+|---|---|---|
+| < 30 days | `FRESH` | 1.00 |
+| 30–179 days | `COOLING` | 0.85 |
+| 180–364 days | `STALE` | 0.70 |
+| ≥ 365 days | `DORMANT` | 0.50 |
 
 Recency decay ensures that the retrieval layer reflects how the user currently is, not just what has the most historical volume. Older patterns are not deleted — they are reachable, but ranked lower unless explicitly queried.
+
+**Which age.** Whichever date the record can honestly give: `last_reinforced_at` for a
+belief or a pattern, falling back to `occurred_at`, `valid_from`, then `created_at`. This
+section previously said "age of observation" while `Graph/Schema.md` scoped decay to
+beliefs and patterns; the two are reconciled in Goal 19, and the curve now applies to every
+live content record. A record with no readable date is not decayed at all, and neither is
+one dated in the future — a clock disagreement is not a fact about a record.
+
+**Anchor matches decay too, and survive it.** The floor of 0.50 is what makes this safe:
+the anchor lookups exist to reach material that resemblance never would, and half of that
+material is old on purpose. Age costs such a record its place in the order, never its place
+in the answer.
 
 ---
 

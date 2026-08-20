@@ -553,14 +553,22 @@ class PatternTrend(StrEnum):
 
 class PatternAgeBand(StrEnum):
     """
-    How long a pattern has gone without being seen again.
+    How long a record has gone without being seen again.
 
-    COOLING — quiet for a while, and worth less weight than it was.
+    FRESH   — recent enough to count for everything it is worth.
+    COOLING — quiet for a while, and worth a little less than it was.
+    STALE   — quiet long enough that it describes how the person was rather
+              than how they are.
     DORMANT — quiet for so long that nobody can tell from the record alone
               whether it resolved or simply stopped being written down.
+
+    The same four bands decide both how a record ranks in a search and what
+    a report says about it, so the two can never disagree.
     """
 
+    FRESH = "FRESH"
     COOLING = "COOLING"
+    STALE = "STALE"
     DORMANT = "DORMANT"
 
 

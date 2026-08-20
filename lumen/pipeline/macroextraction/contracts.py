@@ -447,6 +447,67 @@ class AgingPattern(BaseModel):
     re_interrogation_prompt: str | None = None
 
 
+class ProofInstance(BaseModel):
+    """One occasion behind a long-running pattern."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    episode_id: str = Field(min_length=1)
+    happened_at: datetime
+    excerpt: str = ""
+
+
+class ProofChain(BaseModel):
+    """
+    The evidence that one thing about a person has been true for years.
+
+    Kept apart from the ageing report on purpose. That one says a pattern has
+    gone quiet; this one says a pattern has kept coming back, and the two are
+    opposite findings that happen to be about the same kind of record.
+
+    Attributes:
+        record_id: The pattern or lesson being proved.
+        record_type: Which of the two it is.
+        label: What it says, shortened.
+        total_instances: How many separate occasions there have been.
+        span_days: How far back the earliest reaches from the latest.
+        first_seen: The earliest occasion.
+        last_seen: The most recent.
+        key_instances: A handful spread across the span, oldest first.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    record_id: str = Field(min_length=1)
+    record_type: str = ""
+    label: str = ""
+    total_instances: int = Field(ge=0)
+    span_days: int = Field(ge=0)
+    first_seen: datetime
+    last_seen: datetime
+    key_instances: list[ProofInstance] = Field(default_factory=list)
+
+    @property
+    def span_years(self) -> float:
+        """The span in years, to one decimal place."""
+        return round(self.span_days / 365.25, 1)
+
+    @property
+    def summary(self) -> str:
+        """
+        The chain in one sentence, built from the counts rather than written.
+
+        Deliberately not a model's work. It is the same sentence every time
+        with two numbers changed, and a model given the job would word it
+        differently in every report while adding nothing — and could reach
+        for detail the arithmetic never established.
+        """
+        occasions = f"{self.total_instances} separate occasions"
+        if self.span_years >= 1.0:
+            return f"This has come back on {occasions} over {self.span_years} years."
+        return f"This has come back on {occasions} over {self.span_days} days."
+
+
 class TrendingPattern(BaseModel):
     """One pattern's direction of travel between two stretches of time."""
 
@@ -541,6 +602,7 @@ class ComputedFacts(BaseModel):
     relationship_arcs: list[RelationshipArcFacts] = Field(default_factory=list)
     biographical_gaps: list[BiographicalGapFacts] = Field(default_factory=list)
     pattern_aging: list[AgingPattern] = Field(default_factory=list)
+    proof_chains: list[ProofChain] = Field(default_factory=list)
     archetype_shift: ArchetypeShiftFacts = Field(default_factory=ArchetypeShiftFacts)
     active_contradictions: list[ContradictionFacts] = Field(default_factory=list)
 

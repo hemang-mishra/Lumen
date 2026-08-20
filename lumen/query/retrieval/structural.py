@@ -36,7 +36,7 @@ from lumen.query.retrieval.contracts import (
     SearchUnavailable,
     Tally,
 )
-from lumen.query.retrieval.hydrate import has_id, to_node
+from lumen.query.retrieval.hydrate import Weighting, has_id, to_node
 from lumen.schemas.enums import (
     RetrievalPass,
     StructuralAnchorType,
@@ -81,6 +81,9 @@ class AnchorContext:
         limit: How many records one anchor may contribute.
         base_score: What an exact anchor match counts as when ordering a
             list that also holds measured matches.
+        weighting: The clock and settings every record found here is ranked
+            against, fixed once so the whole turn ages its records against
+            the same instant.
         tally: How many reads this pass made and how many refused. Mutable
             and shared by every lookup, because "all of them failed" is not
             a fact any single lookup can see — each one only knows about its
@@ -90,6 +93,7 @@ class AnchorContext:
     graph: ReadOnlyGraph
     limit: int
     base_score: float
+    weighting: Weighting
     tally: Tally = field(default_factory=Tally)
 
 
@@ -113,6 +117,7 @@ def find_by_anchors(
     *,
     graph: ReadOnlyGraph,
     config: QueryConfig,
+    weighting: Weighting | None = None,
 ) -> list[RetrievedNode]:
     """
     Follow every anchor the turn's reasons point at.
@@ -126,6 +131,7 @@ def find_by_anchors(
         graph=graph,
         limit=max(config.conversational_pass_b_keep, 0),
         base_score=config.anchor_base_score,
+        weighting=weighting or Weighting.at(),
     )
 
     found: list[RetrievedNode] = []
@@ -349,6 +355,7 @@ def _as_nodes(
     return [
         to_node(
             row,
+            weighting=context.weighting,
             found_by=RetrievalPass.STRUCTURAL,
             trigger_type=trigger.trigger_type,
             anchor_type=anchor,

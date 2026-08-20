@@ -58,7 +58,7 @@ class NoGraph:
 
 
 class NothingFound:
-    def retrieve(self, signal, session):
+    def retrieve(self, signal, session, *, now=None):
         from lumen.query.retrieval.contracts import RetrievalBundle
 
         return RetrievalBundle(

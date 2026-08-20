@@ -2,15 +2,18 @@
 Tests for noticing which patterns have gone quiet.
 
 The thresholds are the whole of this module, so most of these tests sit
-exactly on one. The important case is the last: ageing is measured against the
-end of the period being reported on, never against today, because a report is
-a statement about a stretch of time and re-running last year's report should
-not age everything in it by a year.
+exactly on one. Two cases matter more than the rest. Ageing is measured
+against the end of the period being reported on, never against today, because
+a report is a statement about a stretch of time and re-running last year's
+report should not age everything in it by a year. And what a quiet pattern is
+reported to be worth is the same number search ranking actually applies to it,
+so a report can never describe a system that does not exist.
 """
 
 from __future__ import annotations
 
-from lumen.config import MacroConfig
+from lumen.config import MacroConfig, ScoringConfig
+from lumen.graph import scoring
 from lumen.pipeline.macroextraction import aging
 from lumen.schemas.enums import PatternAgeBand
 
@@ -25,7 +28,9 @@ class TestWhenAPatternCounts:
 
         assert aging.age_patterns(corpus, config=MacroConfig()) == []
 
-    def test_a_pattern_quiet_for_half_a_year_is_cooling(self, make_corpus, pattern_row):
+    def test_a_pattern_quiet_for_half_a_year_has_gone_stale(
+        self, make_corpus, pattern_row
+    ):
         corpus = make_corpus(
             all_patterns=[
                 pattern_row("pat_a", last_reinforced="2025-10-01T00:00:00+00:00")
@@ -34,8 +39,8 @@ class TestWhenAPatternCounts:
 
         aged = aging.age_patterns(corpus, config=MacroConfig())
 
-        assert aged[0].band is PatternAgeBand.COOLING
-        assert aged[0].weight_multiplier == 0.85
+        assert aged[0].band is PatternAgeBand.STALE
+        assert aged[0].weight_multiplier == 0.70
 
     def test_a_pattern_quiet_for_over_a_year_is_dormant(self, make_corpus, pattern_row):
         corpus = make_corpus(
@@ -65,7 +70,9 @@ class TestWhenAPatternCounts:
 
         assert aged[0].re_interrogation_prompt == aging.RE_INTERROGATION_PROMPT
 
-    def test_a_cooling_pattern_carries_no_question(self, make_corpus, pattern_row):
+    def test_a_pattern_short_of_a_year_carries_no_question(
+        self, make_corpus, pattern_row
+    ):
         corpus = make_corpus(
             all_patterns=[
                 pattern_row("pat_a", last_reinforced="2025-10-01T00:00:00+00:00")
@@ -109,10 +116,14 @@ class TestExactlyOnTheThresholds:
         )
 
         aged = aging.age_patterns(
-            corpus, config=MacroConfig(cooling_days=400, dormant_days=10)
+            corpus,
+            config=MacroConfig(),
+            scoring_config=ScoringConfig(cooling_days=400, dormant_days=10),
         )
 
-        assert aged == []
+        # Out of order, the thresholds are sorted rather than left to
+        # describe a band nothing could ever fall into.
+        assert aged[0].band is PatternAgeBand.COOLING
 
 
 class TestWhatAgeingIsMeasuredAgainst:
@@ -137,7 +148,7 @@ class TestWhatAgeingIsMeasuredAgainst:
             make_corpus(window=later, all_patterns=[pattern]), config=MacroConfig()
         )
 
-        assert near[0].band is PatternAgeBand.COOLING
+        assert near[0].band is PatternAgeBand.STALE
         assert far[0].band is PatternAgeBand.DORMANT
 
 
@@ -175,16 +186,29 @@ class TestWhatIsLeftOut:
 
 
 class TestReadingStoredDatesBack:
-    def test_a_moment_already_read_as_one_is_kept(self):
+    # Reading a stored date is shared with everything else that reads rows,
+    # so the reading itself is tested where it lives. What matters here is
+    # that an unreadable one costs a pattern its line and nothing more.
+    def test_a_moment_already_read_as_one_is_kept(self, make_corpus):
         from datetime import datetime, timezone
 
-        moment = datetime(2026, 5, 4, tzinfo=timezone.utc)
+        moment = datetime(2024, 5, 4, tzinfo=timezone.utc)
+        corpus = make_corpus(
+            all_patterns=[
+                {"node_id": "pat_a", "pattern_name": "x", "last_reinforced_at": moment}
+            ]
+        )
 
-        assert aging._moment(moment) == moment
+        assert aging.age_patterns(corpus, config=MacroConfig())[0].last_reinforced == moment
 
-    def test_a_missing_date_is_nothing_rather_than_a_guess(self):
-        assert aging._moment(None) is None
-        assert aging._moment("") is None
+    def test_a_missing_date_is_nothing_rather_than_a_guess(self, make_corpus):
+        corpus = make_corpus(
+            all_patterns=[
+                {"node_id": "pat_a", "pattern_name": "x", "last_reinforced_at": ""}
+            ]
+        )
+
+        assert aging.age_patterns(corpus, config=MacroConfig()) == []
 
     def test_an_unreadable_date_does_not_break_the_report(self, make_corpus):
         # One unreadable field should cost that pattern its line, not the
@@ -213,3 +237,44 @@ class TestReadingStoredDatesBack:
         )
 
         assert aging.age_patterns(corpus, config=MacroConfig())[0].band is PatternAgeBand.DORMANT
+
+
+class TestTheReportAndTheRankingAgree:
+    def test_the_reported_multiplier_is_the_one_search_applies(
+        self, make_corpus, pattern_row
+    ):
+        # The defect this prevents: a report telling somebody a quiet pattern
+        # counts for 0.85 while retrieval quietly counts it as 0.70.
+        corpus = make_corpus(
+            all_patterns=[
+                pattern_row("pat_a", last_reinforced="2025-10-01T00:00:00+00:00")
+            ]
+        )
+
+        aged = aging.age_patterns(corpus, config=MacroConfig())
+        ranked = scoring.recency_weight(
+            aged[0].last_reinforced,
+            corpus.window.period_end,
+            config=ScoringConfig(),
+        )
+
+        assert aged[0].weight_multiplier == ranked
+
+    def test_turning_decay_off_makes_the_report_say_so(
+        self, make_corpus, pattern_row
+    ):
+        # A report should describe the system as configured, not as designed.
+        corpus = make_corpus(
+            all_patterns=[
+                pattern_row("pat_a", last_reinforced="2024-01-01T00:00:00+00:00")
+            ]
+        )
+
+        aged = aging.age_patterns(
+            corpus,
+            config=MacroConfig(),
+            scoring_config=ScoringConfig(decay_enabled=False),
+        )
+
+        assert aged[0].band is PatternAgeBand.DORMANT
+        assert aged[0].weight_multiplier == 1.0

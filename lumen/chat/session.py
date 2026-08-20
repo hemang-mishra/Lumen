@@ -34,6 +34,7 @@ from lumen.query.chat import (
 )
 from lumen.query.conversation import ConversationStore
 from lumen.query.formulation import QueryFormulator
+from lumen.query.frequency import QueryHitRecorder
 from lumen.query.memory import ConversationMemory
 from lumen.query.prompting import PersonaStore, PromptComposer
 from lumen.query.session import SessionRegistry
@@ -119,6 +120,7 @@ def build_runner(config: AppConfig | None = None) -> Iterator[ChatRunner]:
         speech=_quiet(lambda: get_speech_provider(settings))
         if settings.chat.voice_enabled
         else None,
+        hits=QueryHitRecorder(graph, config=settings.scoring),
         config=settings.chat,
     )
 

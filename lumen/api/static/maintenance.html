@@ -1,0 +1,255 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Lumen — Maintenance</title>
+  <link rel="stylesheet" href="app.css">
+</head>
+<body>
+<header>
+  <h1>Lumen</h1>
+  <nav>
+    <a href="index.html">Import</a>
+    <a href="episodes.html">Episodes</a>
+    <a href="review.html">Review</a>
+    <a href="reports.html">Reports</a>
+    <a href="maintenance.html">Maintenance</a>
+    <a href="activity.html">Activity</a>
+    <a href="trace.html">Runs</a>
+    <a href="chat.html">Turn reader</a>
+  </nav>
+  <span class="note">test harness — not the product UI</span>
+</header>
+
+<main>
+  <section>
+    <h2>Why a record ranks where it does</h2>
+    <p class="lede">
+      Search multiplies four numbers together to decide what goes in front of
+      the assistant. Once multiplied, the reason a record placed where it did
+      is gone. Paste an identifier to get the four back.
+    </p>
+    <div class="row">
+      <input id="node" placeholder="pat_2026_06_11_001" size="34">
+      <button id="explain">Explain</button>
+    </div>
+    <div id="score"></div>
+  </section>
+
+  <section>
+    <h2>Things that keep coming back</h2>
+    <p class="lede">
+      A scan over every year there is, looking for patterns with enough
+      separate occasions behind them to be worth laying out. Slow on a long
+      history, and it writes nothing.
+    </p>
+    <div class="row"><button id="scan">Scan the whole history</button></div>
+    <div id="chains"></div>
+  </section>
+
+  <section>
+    <h2>Erasure</h2>
+    <p class="lede">
+      Words are replaced; identifiers, links, dates and version chains stay.
+      <strong>This cannot be undone.</strong> Preview first — it counts what
+      would go, names what it will not reach, and changes nothing.
+    </p>
+    <div class="row">
+      <select id="scope">
+        <option value="ENTRY">One entry</option>
+        <option value="ALL">Everything</option>
+      </select>
+      <input id="entry" placeholder="session id, for one entry" size="28">
+      <button id="preview">Preview</button>
+    </div>
+    <div class="row">
+      <input id="confirm" placeholder="type the confirmation phrase" size="28">
+      <button id="erase" class="danger">Erase</button>
+      <span class="faint">nothing happens without the phrase</span>
+    </div>
+    <div id="erasure"></div>
+  </section>
+
+  <section>
+    <h2>What has been erased before</h2>
+    <div class="panel" id="audits"><div class="empty">Loading…</div></div>
+  </section>
+</main>
+
+<script src="app.js"></script>
+<script>
+/*
+ * The maintenance page.
+ *
+ * Three unrelated jobs share it because none of them belongs to a
+ * conversation: explaining a ranking, scanning the whole history, and
+ * forgetting.
+ *
+ * The erasure half is deliberately awkward to use. Two separate fields and
+ * two separate buttons, with the preview the obvious one to press first,
+ * because the other cannot be taken back.
+ */
+
+document.getElementById("explain").addEventListener("click", explain);
+document.getElementById("scan").addEventListener("click", scan);
+document.getElementById("preview").addEventListener("click", preview);
+document.getElementById("erase").addEventListener("click", erase);
+document.addEventListener("DOMContentLoaded", audits);
+
+/** Take one record's ranking apart. */
+async function explain() {
+  const id = document.getElementById("node").value.trim();
+  if (!id) return fill("score", say("bad", "Name a record first."));
+
+  let weights;
+  try {
+    weights = await api(`/maintenance/score/${encodeURIComponent(id)}`);
+  } catch (error) {
+    return fill("score", say("bad", String(error.message)));
+  }
+
+  fill("score", el("div", { class: "panel" },
+    el("div", { class: "row" },
+      el("strong", {}, weights.node_id),
+      el("span", { class: "faint" }, weights.node_type),
+      tag(weights.age_band),
+    ),
+    el("table", {},
+      el("tbody", {},
+        weigh("How strong a signal it was", weights.signal_weight),
+        weigh(`How long since it was last true (${weights.quiet_days} days)`, weights.recency_weight),
+        weigh("Whether the person confirmed it", weights.trust_weight),
+        weigh(`How often it has helped (${weights.query_frequency} times)`, weights.frequency_weight),
+        el("tr", {},
+          el("td", {}, el("strong", {}, "Everything together")),
+          el("td", {}, el("strong", {}, weights.multiplier.toFixed(3))),
+        ),
+      ),
+    ),
+    el("p", { class: "faint" }, `Last seen: ${when(weights.last_seen)}`),
+  ));
+}
+
+/** One line of the breakdown. */
+function weigh(label, value) {
+  return el("tr", {}, el("td", {}, label), el("td", {}, value.toFixed(2)));
+}
+
+/** Look over the whole history for long-running patterns. */
+async function scan() {
+  fill("chains", say("ok", "Reading every year of it…"));
+  let found;
+  try {
+    found = await api("/maintenance/proof-chains", { method: "POST" });
+  } catch (error) {
+    return fill("chains", say("bad", String(error.message)));
+  }
+  if (!found.count) {
+    return fill("chains", el("div", { class: "empty" },
+      "Nothing has come back often enough yet."));
+  }
+  fill("chains", found.chains.map(chain => el("div", { class: "panel" },
+    el("div", { class: "row" },
+      el("strong", {}, chain.label),
+      el("span", { class: "faint" }, chain.record_type),
+    ),
+    el("p", {}, chain.summary),
+    el("ol", {}, chain.key_instances.map(instance =>
+      el("li", {},
+        el("span", { class: "faint" }, `${instance.date} — `),
+        instance.excerpt,
+      ))),
+  )));
+}
+
+/** Count what an erasure would cover, without doing any of it. */
+async function preview() {
+  const params = new URLSearchParams({ scope: scope() });
+  const entry = document.getElementById("entry").value.trim();
+  if (entry) params.set("entry_id", entry);
+
+  let plan;
+  try {
+    plan = await api(`/maintenance/erasure/preview?${params}`);
+  } catch (error) {
+    return fill("erasure", say("bad", String(error.message)));
+  }
+
+  fill("erasure", el("div", { class: "panel" },
+    el("p", {}, `${plan.total_records} records, ${plan.vectors} index entries, `
+      + `${plan.conversations} conversations.`),
+    el("table", {}, el("tbody", {},
+      Object.entries(plan.records_by_kind).map(([kind, count]) =>
+        el("tr", {}, el("td", {}, kind), el("td", {}, String(count)))))),
+    plan.not_reached.length
+      ? el("div", {},
+          el("p", { class: "faint" }, "This will not reach:"),
+          el("ul", {}, plan.not_reached.map(limit => el("li", {}, limit))))
+      : null,
+  ));
+}
+
+/** Erase. There is no way back from this one. */
+async function erase() {
+  const body = {
+    scope: scope(),
+    confirmation: document.getElementById("confirm").value,
+  };
+  const entry = document.getElementById("entry").value.trim();
+  if (entry) body.entry_id = entry;
+
+  fill("erasure", say("ok", "Erasing…"));
+  let report;
+  try {
+    report = await api("/maintenance/erasure", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+  } catch (error) {
+    return fill("erasure", say("bad", String(error.message)));
+  }
+
+  fill("erasure", el("div", { class: "panel" },
+    el("div", { class: "row" }, tag(report.status), el("strong", {}, report.audit_id)),
+    el("p", {}, `${report.records_anonymized} records rewritten, `
+      + `${report.vectors_deleted} index entries removed, `
+      + `${report.operational_rows_cleared} rows cleared.`),
+    report.failures.length
+      ? el("ul", {}, report.failures.map(failure => el("li", {}, failure)))
+      : null,
+  ));
+  audits();
+}
+
+/** Which scope the form is asking about. */
+function scope() {
+  return document.getElementById("scope").value;
+}
+
+/** The receipts, which carry no names. */
+async function audits() {
+  let listing;
+  try {
+    listing = await api("/maintenance/erasure/audits");
+  } catch (error) {
+    return fill("audits", say("bad", String(error.message)));
+  }
+  if (!listing.count) {
+    return fill("audits", el("div", { class: "empty" }, "Nothing has been erased."));
+  }
+  fill("audits", el("table", {},
+    el("thead", {}, el("tr", {},
+      ["When", "Records", "Vectors", "Asked by", "Status"].map(h => el("th", {}, h)))),
+    el("tbody", {}, listing.audits.map(audit => el("tr", {},
+      el("td", {}, when(audit.erased_at)),
+      el("td", {}, String(audit.nodes_anonymized)),
+      el("td", {}, String(audit.embeddings_deleted)),
+      el("td", {}, audit.initiated_by),
+      el("td", {}, tag(audit.status)),
+    )))));
+}
+</script>
+</body>
+</html>
