@@ -109,7 +109,7 @@ def history(graph_store, vector_store, ops_store):
 @pytest.fixture
 def service(graph_store, vector_store, ops_store, ops_config):
     """The erasure service over the real stores."""
-    config = AppConfig(operational=ops_config, user_id=USER)
+    config = AppConfig(operational=ops_config, default_user_id=USER)
     return ErasureService(
         config=config, graph=graph_store, vectors=vector_store, ops=ops_store
     )

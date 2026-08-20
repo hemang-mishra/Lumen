@@ -19,6 +19,11 @@ import logging
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
+from lumen.auth.contracts import (
+    NotAuthenticated,
+    SignUpRefused,
+    TooManyAttempts,
+)
 from lumen.observability.trace import get_trace_id
 
 logger = logging.getLogger(__name__)
@@ -104,6 +109,40 @@ def register_error_handlers(app: FastAPI) -> None:
                 "detail": str(exc),
                 "what": exc.what,
             },
+        )
+
+    @app.exception_handler(NotAuthenticated)
+    async def _not_authenticated(
+        _request: Request, exc: NotAuthenticated
+    ) -> JSONResponse:
+        """
+        No usable proof of who this is.
+
+        The reason is repeated back because it is something a person can act
+        on — expired, ended, meant for something else. None of the reasons
+        says whether the account it names exists: that would turn a refusal
+        into a way of finding out which addresses are worth trying.
+        """
+        return JSONResponse(
+            status_code=401,
+            content={"error": "not_authenticated", "detail": exc.reason},
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
+    @app.exception_handler(SignUpRefused)
+    async def _signup_refused(_request: Request, exc: SignUpRefused) -> JSONResponse:
+        """Proved who they are, and the answer is still no."""
+        return JSONResponse(
+            status_code=403,
+            content={"error": "forbidden", "detail": str(exc)},
+        )
+
+    @app.exception_handler(TooManyAttempts)
+    async def _too_many(_request: Request, exc: TooManyAttempts) -> JSONResponse:
+        """Trying faster than a person tries."""
+        return JSONResponse(
+            status_code=429,
+            content={"error": "too_many_attempts", "detail": str(exc)},
         )
 
     @app.exception_handler(Conflict)

@@ -28,7 +28,13 @@ from fastapi import APIRouter, Depends, File, UploadFile, WebSocket
 from fastapi.responses import JSONResponse
 from starlette.websockets import WebSocketDisconnect
 
-from lumen.api.deps import get_chat_stack, get_config, get_memory
+from lumen.api.deps import (
+    get_chat_stack,
+    get_config,
+    get_identity,
+    get_memory,
+    require_identity,
+)
 from lumen.api.errors import Unavailable
 from lumen.api.schemas import (
     ChatDayView,
@@ -37,6 +43,8 @@ from lumen.api.schemas import (
     ReviseRequest,
     TranscriptView,
 )
+from lumen.auth import Identity
+from lumen.auth.contracts import NotAuthenticated
 from lumen.config import AppConfig
 from lumen.providers.errors import ProviderError
 from lumen.query.chat import VOICE, TurnEvent
@@ -47,10 +55,19 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/chat", tags=["chat"])
 
-# Who is talking, until there is more than one person. Every surface in this
-# service assumes a single user; making that explicit in one constant is
-# better than the same string appearing in six handlers.
-CHAT_USER = "debug"
+# What a socket is closed with when whoever is on it may no longer be there.
+# The code browsers show as a policy refusal rather than a network fault, so
+# a client can tell "sign in again" from "try reconnecting".
+WS_UNAUTHORISED = 1008
+
+# How often a conversation re-checks who is talking.
+#
+# A socket stays open for an hour and a token lasts fifteen minutes, so the
+# question is where to put the check. Every frame would mean interrupting a
+# sentence mid-word to argue about credentials; never would mean a session
+# somebody ended carrying on until they close the tab. The turn boundary is
+# where the person has stopped and is waiting anyway.
+CHECK_EVERY_TURN = True
 
 
 @router.websocket("/ws")
@@ -73,15 +90,45 @@ async def hold_a_conversation(
     settings: AppConfig = websocket.app.state.config
 
     try:
+        identity = _who_is_talking(websocket)
+    except NotAuthenticated as refused:
+        # Refused before anything is said rather than after. Somebody whose
+        # session has ended should find that out now, not one sentence in.
+        await websocket.send_json(
+            {"kind": "error", "reason": "not_authenticated", "detail": refused.reason}
+        )
+        await websocket.close(code=WS_UNAUTHORISED)
+        return
+
+    try:
         while True:
             said = await websocket.receive_json()
-            await _one_turn(websocket, stack, settings, said)
+            try:
+                # Checked again at the top of every turn, which is the one
+                # moment nobody is mid-sentence. A session ended somewhere
+                # else stops here rather than at the end of the hour.
+                identity = _who_is_talking(websocket)
+            except NotAuthenticated as refused:
+                await websocket.send_json(
+                    {
+                        "kind": "error",
+                        "reason": "not_authenticated",
+                        "detail": refused.reason,
+                    }
+                )
+                await websocket.close(code=WS_UNAUTHORISED)
+                return
+            await _one_turn(websocket, stack, settings, said, identity)
     except WebSocketDisconnect:
         logger.info("the conversation was closed by the other end")
 
 
 async def _one_turn(
-    websocket: WebSocket, stack, settings: AppConfig, said: dict
+    websocket: WebSocket,
+    stack,
+    settings: AppConfig,
+    said: dict,
+    identity: Identity,
 ) -> None:
     """
     Run one turn and send every step of it out as it happens.
@@ -114,7 +161,7 @@ async def _one_turn(
 
     events = await anyio.to_thread.run_sync(
         lambda: list(
-            engine.say(CHAT_USER, text, modality=modality, speak=speak)
+            engine.say(identity.user_id, text, modality=modality, speak=speak)
         )
     )
     for event in events:
@@ -158,6 +205,7 @@ async def write_down_what_was_said(
 
 @router.get("/days", response_model=list[ChatDayView])
 def which_days_have_conversations(
+    identity: Identity = Depends(require_identity),
     memory: ConversationMemory = Depends(get_memory),
     config: AppConfig = Depends(get_config),
 ) -> list[ChatDayView]:
@@ -169,7 +217,7 @@ def which_days_have_conversations(
     """
     today = datetime.now(UTC).date()
     earlier = memory.store.days_before(
-        CHAT_USER,
+        identity.user_id,
         on=today + _one_day(),
         limit=config.chat.previous_days * 10,
         lookback_days=365,
@@ -190,6 +238,7 @@ def which_days_have_conversations(
 @router.get("/days/{on}", response_model=ChatThreadView)
 def read_one_day_back(
     on: date,
+    identity: Identity = Depends(require_identity),
     memory: ConversationMemory = Depends(get_memory),
 ) -> ChatThreadView:
     """
@@ -198,7 +247,7 @@ def read_one_day_back(
     Branches they moved away from are left out — this is the conversation
     they settled on, which is also the one the pipeline extracted.
     """
-    buffer = memory.store.open(CHAT_USER, on=on)
+    buffer = memory.store.open(identity.user_id, on=on)
     thread = memory.store.thread(buffer.session_id)
     return ChatThreadView(
         session_id=buffer.session_id,
@@ -276,4 +325,20 @@ def _one_day() -> timedelta:
     return timedelta(days=1)
 
 
-__all__ = ["router", "CHAT_USER"]
+def _who_is_talking(websocket: WebSocket) -> Identity:
+    """
+    Who is on the other end of this socket.
+
+    The router already refuses an unauthenticated connection before this
+    handler runs. This is called anyway, and again at every turn, because a
+    router dependency cannot hand its answer to a socket and because a
+    session ended halfway through an hour-long conversation should stop it.
+    """
+    # The same resolution every other route uses. A socket cannot take a
+    # dependency's return value, so it is called rather than declared — but
+    # it is the same rule, in the same place, which is the whole point of
+    # having one.
+    return get_identity(websocket)
+
+
+__all__ = ["router", "CHECK_EVERY_TURN", "WS_UNAUTHORISED"]

@@ -59,6 +59,18 @@ def _env_optional_int(name: str) -> Any:
     return field(default_factory=read)
 
 
+def _split(raw: str) -> tuple[str, ...]:
+    """
+    A comma-separated setting as the list it means.
+
+    Empty entries are dropped and whitespace trimmed, so a trailing comma or
+    a line wrapped for readability does not become an empty allowed origin —
+    which would be an origin nothing matches, or worse, one that something
+    does.
+    """
+    return tuple(part.strip() for part in (raw or "").split(",") if part.strip())
+
+
 def _env_bool(name: str, default: bool) -> Any:
     """
     As _env, for a true/false switch.
@@ -617,6 +629,121 @@ class MaintenanceConfig:
 
 
 @dataclass(frozen=True)
+class AuthConfig:
+    """
+    Who is allowed in, and how they prove it.
+
+    Two values are missing from the fields below and that is deliberate. The
+    signing key and the Google secret are properties rather than settings,
+    for the reason spelled out on `gemini_api_key`: config objects get
+    snapshotted onto every pipeline run, and anything that walks the fields
+    of one would carry a credential into the database with it. A property is
+    invisible to asdict(), replace(), repr() and ==, so neither has a path
+    into a stored record, a log line or an error body unless somebody asks
+    for it by name.
+
+    Off by default, so a single-user deployment and the test suite behave
+    exactly as they did before any of this existed.
+    """
+
+    enabled: bool = _env_bool("LUMEN_AUTH_ENABLED", False)
+
+    # Who the tokens say they are from and who they are for. Both are
+    # verified rather than merely read, so a token minted for something else
+    # is refused even when the signature is good.
+    issuer: str = _env("LUMEN_JWT_ISSUER", "lumen")
+    audience: str = _env("LUMEN_JWT_AUDIENCE", "lumen-api")
+
+    # Short enough that ending a session takes effect quickly, long enough
+    # that a conversation is not interrupted to renew one.
+    access_ttl_seconds: int = _env_int("LUMEN_ACCESS_TOKEN_TTL_SECONDS", 900)
+    refresh_ttl_seconds: int = _env_int("LUMEN_REFRESH_TOKEN_TTL_SECONDS", 2_592_000)
+
+    # The Google credential. The id is public by construction — the browser
+    # needs it — and the secret is not, which is why only one of them is here.
+    google_client_id: str = _env("GOOGLE_OAUTH_CLIENT_ID", "")
+    google_redirect_uri: str = _env("GOOGLE_OAUTH_REDIRECT_URI", "")
+
+    # Who may sign up at all. "allowlist" rather than "open" on purpose: an
+    # open sign-in on a reachable host hands a database, a search index and a
+    # model budget to whoever finds the port.
+    signup_mode: str = _env("LUMEN_SIGNUP_MODE", "allowlist")
+    allowed_emails: str = _env("LUMEN_ALLOWED_EMAILS", "")
+
+    # Exact origins, because a wildcard with credentials is not merely lax —
+    # browsers refuse the combination outright.
+    allowed_origins: str = _env("LUMEN_ALLOWED_ORIGINS", "")
+
+    # How many sign-in attempts one caller or one address may make before
+    # being asked to wait. Sign-in is the only door open to somebody who has
+    # not proved anything yet.
+    signin_attempts: int = _env_int("LUMEN_SIGNIN_ATTEMPTS", 10)
+    signin_window_seconds: int = _env_int("LUMEN_SIGNIN_WINDOW_SECONDS", 300)
+
+    # Whether the session cookie may only travel over HTTPS. True everywhere
+    # it should ever be false is a mistake — but a deployment running on
+    # plain http for local development cannot sign in at all otherwise,
+    # because a cookie marked Secure is simply not sent. The two settings
+    # move together for the same reason: browsers refuse SameSite=None
+    # without Secure, so an insecure deployment gets the only combination
+    # that works rather than one that silently drops the cookie.
+    cookie_secure: bool = _env_bool("LUMEN_COOKIE_SECURE", True)
+
+    @property
+    def cookie_samesite(self) -> str:
+        """
+        How freely the session cookie travels.
+
+        "none" when it is Secure, because the browser and the API are
+        different origins and anything stricter would not send it at all.
+        "lax" otherwise, since that is the strongest setting an insecure
+        deployment can actually use.
+        """
+        return "none" if self.cookie_secure else "lax"
+
+    @property
+    def jwt_private_key(self) -> str | None:
+        """
+        The Ed25519 signing key, read from the environment on every access.
+
+        A property, not a field, for the reason described on
+        `gemini_api_key`: this is the one value in the system that can mint a
+        session for anybody, and it must have no path into a snapshot, a log
+        or a repr.
+
+        Absent in a deployment that only verifies tokens, which is the whole
+        point of signing them asymmetrically.
+        """
+        return os.environ.get("LUMEN_JWT_PRIVATE_KEY") or None
+
+    @property
+    def jwt_public_keys(self) -> str | None:
+        """
+        The public half, or halves — several so a rotation can verify tokens
+        minted by the old key and the new one at the same time.
+
+        Not a secret, and kept beside its private half rather than as a field
+        so the two are read the same way and cannot drift.
+        """
+        return os.environ.get("LUMEN_JWT_PUBLIC_KEYS") or None
+
+    @property
+    def google_client_secret(self) -> str | None:
+        """The Google secret. Server-side only, and never a field."""
+        return os.environ.get("GOOGLE_OAUTH_CLIENT_SECRET") or None
+
+    @property
+    def origins(self) -> tuple[str, ...]:
+        """The exact origins allowed to send credentials."""
+        return _split(self.allowed_origins)
+
+    @property
+    def allowlist(self) -> frozenset[str]:
+        """Who may sign up, lowercased so a capital letter is not a refusal."""
+        return frozenset(address.lower() for address in _split(self.allowed_emails))
+
+
+@dataclass(frozen=True)
 class SchedulerConfig:
     """
     How often the product does the things nobody presses a button for.
@@ -901,7 +1028,14 @@ class AppConfig:
     macro: MacroConfig = field(default_factory=MacroConfig)
     scoring: ScoringConfig = field(default_factory=ScoringConfig)
     scheduler: SchedulerConfig = field(default_factory=SchedulerConfig)
+    auth: AuthConfig = field(default_factory=AuthConfig)
     maintenance: MaintenanceConfig = field(default_factory=MaintenanceConfig)
 
-    # The personal build has one user. Multi-user deployments set this per request.
-    user_id: str = _env("LUMEN_USER_ID", "local")
+    # Who a request belongs to when there is no request to ask.
+    #
+    # Renamed from `user_id` when identity became a real thing. The rename is
+    # the point: identity now arrives per request, and this is only the
+    # fallback for the callers that have no request to carry one — the
+    # command line, the simulation runner, the background jobs. Nothing under
+    # `lumen/api/` may read it, and a test says so.
+    default_user_id: str = _env("LUMEN_USER_ID", "local")

@@ -104,6 +104,29 @@ class ErasureInitiator(StrEnum):
     AUTOMATED_RETENTION_POLICY = "AUTOMATED_RETENTION_POLICY"
 
 
+class UserStatus(StrEnum):
+    """
+    Whether somebody may use the system.
+
+    ACTIVE          — ordinary.
+    SUSPENDED       — kept, and refused. A state somebody can come back from.
+    ERASURE_PENDING — they have asked to be forgotten. Sessions end first and
+                      the data goes second, in that order, because erasing
+                      while a session is live means requests arriving for
+                      history that is disappearing underneath them.
+    """
+
+    ACTIVE = "ACTIVE"
+    SUSPENDED = "SUSPENDED"
+    ERASURE_PENDING = "ERASURE_PENDING"
+
+
+class AuthProvider(StrEnum):
+    """Where a sign-in came from. One today, and the table shape expects more."""
+
+    GOOGLE = "GOOGLE"
+
+
 class ErasureScope(StrEnum):
     """
     How much of somebody's history an erasure covers.

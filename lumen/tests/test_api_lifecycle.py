@@ -44,7 +44,7 @@ def a_whole_evening(graph_store, vector_store, ops_store, ops_config, tmp_path):
     script.begin(day)
 
     worker = IngestWorker(
-        config=AppConfig(operational=ops_config, user_id=USER),
+        config=AppConfig(operational=ops_config, default_user_id=USER),
         ops=ops_store,
         graph=graph_store,
         resources=IngestResources(
@@ -63,7 +63,7 @@ def a_whole_evening(graph_store, vector_store, ops_store, ops_config, tmp_path):
                 db_url=ops_config.db_url, session_decay_minutes=120
             ),
             scheduler=SchedulerConfig(enabled=False),
-            user_id=USER,
+            default_user_id=USER,
         ),
     )
     return {

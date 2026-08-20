@@ -9,11 +9,14 @@ in tests without anything noticing.
 
 from __future__ import annotations
 
+import hashlib
+import secrets
 from datetime import date, datetime
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from lumen.operational.enums import (
+    UserStatus,
     TERMINAL_IMPORT_STATUSES,
     BufferSource,
     BufferStatus,
@@ -401,3 +404,98 @@ __all__ = [
     "ImportRecord",
     "ImportBatch",
 ]
+
+
+# ---------------------------------------------------------------------------
+# Identity — a person, and the sessions they hold
+# ---------------------------------------------------------------------------
+
+# What a generated user identifier looks like. Opaque, and long enough that
+# guessing one is not a strategy.
+USER_ID_PREFIX = "usr_"
+USER_ID_BYTES = 12
+
+
+class UserRecord(OperationalRecord):
+    """
+    A person, as stored.
+
+    Their identifier is generated and never derived from anything about them.
+    It is already a foreign key in seven tables and will become a directory
+    name, which between them make it permanent — and both obvious
+    alternatives change: people move email address, and a sign-in provider's
+    identifier lasts only as long as the account does.
+    """
+
+    user_id: str = Field(min_length=1)
+    email: str = Field(min_length=1)
+    display_name: str = ""
+    avatar_url: str | None = None
+    created_at: datetime | None = None
+    last_seen_at: datetime | None = None
+    status: UserStatus = UserStatus.ACTIVE
+    token_version: int = Field(default=1, ge=0)
+
+    @property
+    def active(self) -> bool:
+        """Whether this person may use the system right now."""
+        return self.status is UserStatus.ACTIVE
+
+
+class StoredSession(OperationalRecord):
+    """
+    One refresh token, as stored — which is to say, without the token.
+
+    `rotated_to` being set means this one has already been exchanged, so a
+    token arriving in that state has been used twice.
+    """
+
+    token_id: str = Field(min_length=1)
+    user_id: str = Field(min_length=1)
+    issued_at: datetime
+    expires_at: datetime
+    rotated_to: str | None = None
+    revoked_at: datetime | None = None
+    user_agent: str | None = None
+
+    def usable_at(self, now: datetime) -> bool:
+        """Whether this session could still be exchanged for a new one."""
+        return (
+            self.revoked_at is None
+            and self.rotated_to is None
+            and now <= self.expires_at
+        )
+
+
+def new_user_id() -> str:
+    """
+    An identifier for somebody, generated and meaning nothing.
+
+    Not derived from their address or their provider's identifier, both of
+    which change. This becomes a foreign key in seven tables and later a
+    directory name, so it has to be something nothing can invalidate.
+    """
+    return f"{USER_ID_PREFIX}{secrets.token_hex(USER_ID_BYTES)}"
+
+
+def hash_token(token: str) -> str:
+    """
+    What gets stored in place of a session token.
+
+    A plain SHA-256 rather than a password hash, deliberately: this is 256
+    bits of randomness generated moments ago, not something a person chose.
+    There is no dictionary to attack and nothing slow to defend against.
+    """
+    return hashlib.sha256(token.encode()).hexdigest()
+
+
+def hash_ip(address: str | None) -> str | None:
+    """
+    An address as something that can be compared but not read.
+
+    Enough to say "this session was started somewhere else"; not a record of
+    where somebody has been.
+    """
+    if not address:
+        return None
+    return hashlib.sha256(address.encode()).hexdigest()

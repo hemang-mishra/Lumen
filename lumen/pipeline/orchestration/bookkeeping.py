@@ -63,7 +63,7 @@ def open_job(
     """
     job = ops.jobs.create_job(
         session_id=event.session_id,
-        user_id=config.user_id,
+        user_id=config.default_user_id,
         config_snapshot=_config_snapshot(config),
     )
     return ops.jobs.transition(job.job_id, JobStatus.RUNNING)

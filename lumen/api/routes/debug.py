@@ -21,7 +21,8 @@ from __future__ import annotations
 
 from fastapi import APIRouter, Depends, Query
 
-from lumen.api.deps import get_config, get_ops
+from lumen.api.deps import get_config, get_ops, require_identity
+from lumen.auth import Identity
 from lumen.api.errors import NotFound
 from lumen.api.schemas import (
     EpisodeSourceView,
@@ -46,6 +47,7 @@ def list_traces(
     limit: int = Query(50, ge=1, le=MAX_RUNS, description="How many to return"),
     ops: OperationalStore = Depends(get_ops),
     config: AppConfig = Depends(get_config),
+    identity: Identity = Depends(require_identity),
 ) -> RunListView:
     """
     Recent runs, newest first.
@@ -57,7 +59,7 @@ def list_traces(
     return RunListView(
         runs=[
             RunSummaryView.of(record)
-            for record in ops.jobs.list_recent(config.user_id, limit=limit)
+            for record in ops.jobs.list_recent(identity.user_id, limit=limit)
         ]
     )
 

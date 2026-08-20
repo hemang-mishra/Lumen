@@ -401,6 +401,20 @@ class TestTheApiCannotWrite:
         #     walks every year of somebody's history and costs real time, and
         #     behind a GET a browser or a crawler could start one by
         #     accident. It writes nothing.
+        #
+        #   /auth/google/callback — the one unauthenticated write in the
+        #     system, and the only one there can be: it is how somebody who
+        #     has proved nothing yet becomes somebody. It writes a user row
+        #     and a session, and nothing else in the system, and it is rate
+        #     limited for exactly that reason.
+        #
+        #   /auth/refresh — exchanges a session for a newer one. A POST
+        #     because it changes which token is live, and the only endpoint
+        #     that reads the renewable cookie.
+        #
+        #   /auth/logout — ends this session. A state change, so not a GET:
+        #     a link that signed somebody out by being fetched would be a
+        #     nuisance a third party could trigger.
         spec = api_client.get("/openapi.json").json()
 
         posts = {
@@ -423,6 +437,9 @@ class TestTheApiCannotWrite:
             "/hitl/sweep",
             "/maintenance/erasure",
             "/maintenance/proof-chains",
+            "/auth/google/callback",
+            "/auth/refresh",
+            "/auth/logout",
         }
 
     def test_the_upload_routes_cannot_reach_the_graph_themselves(self):

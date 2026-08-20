@@ -32,13 +32,15 @@ from dataclasses import replace
 from pathlib import Path
 
 from fastapi import Depends, FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 
-from lumen.api.deps import get_graph, get_ops
+from lumen.api.deps import get_graph, get_ops, require_identity
 from lumen.api.errors import register_error_handlers
 from lumen.api.events import EventBus
 from lumen.api.resources import LazyChatStack, LazyEraser, LazySearchStack
 from lumen.api.routes import (
+    auth as auth_routes,
     chat,
     debug,
     graph,
@@ -104,21 +106,32 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
     app.state.config = settings
 
     register_error_handlers(app)
-    app.include_router(graph.router)
-    app.include_router(debug.router)
-    app.include_router(query.router)
-    app.include_router(chat.router)
-    app.include_router(reports.router)
-    app.include_router(hitl.router)
-    app.include_router(settings_routes.router)
-    app.include_router(maintenance.router)
-    app.include_router(event_routes.router)
+    _allow_the_frontend(app, settings)
+
+    # Sign-in is the one surface reachable by somebody who has proved
+    # nothing, so it is mounted without the guard the others get.
+    app.include_router(auth_routes.router)
+
+    # Everything else is mounted behind identity as a router default rather
+    # than a per-route decision. An endpoint added without a thought about
+    # who may call it is protected: the failure mode of forgetting is a
+    # refusal, not a leak.
+    guarded = [Depends(require_identity)]
+    app.include_router(graph.router, dependencies=guarded)
+    app.include_router(debug.router, dependencies=guarded)
+    app.include_router(query.router, dependencies=guarded)
+    app.include_router(chat.router, dependencies=guarded)
+    app.include_router(reports.router, dependencies=guarded)
+    app.include_router(hitl.router, dependencies=guarded)
+    app.include_router(settings_routes.router, dependencies=guarded)
+    app.include_router(maintenance.router, dependencies=guarded)
+    app.include_router(event_routes.router, dependencies=guarded)
 
     # Not mounted at all when uploads are switched off, rather than mounted
     # and refusing. A deployment that says it only reads should not have a
     # write endpoint in its documentation answering 503.
     if settings.ingest.enabled:
-        app.include_router(ingest.router)
+        app.include_router(ingest.router, dependencies=guarded)
 
     _mount_ui(app)
 
@@ -234,6 +247,7 @@ def _lifespan_for(settings: AppConfig):
             graph=provider,
         )
         app.state.events = events
+        app.state.auth = _build_auth(settings, store)
 
         scheduler = _build_scheduler(
             settings,
@@ -276,6 +290,52 @@ def _lifespan_for(settings: AppConfig):
     return lifespan
 
 
+def _allow_the_frontend(app: FastAPI, settings: AppConfig) -> None:
+    """
+    Let the browser talk to this service from where it actually runs.
+
+    Only exact origins. A wildcard is not merely lax in combination with
+    credentials — browsers refuse the pair outright — so a deployment that
+    configures none gets no cross-origin access at all rather than a setting
+    that looks permissive and silently fails.
+    """
+    origins = settings.auth.origins
+    if not origins:
+        logger.info("no cross-origin callers are allowed, so none are configured")
+        return
+
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=list(origins),
+        allow_credentials=True,
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
+    logger.info("cross-origin callers allowed", extra={"origins": list(origins)})
+
+
+def _build_auth(settings: AppConfig, store):
+    """
+    The thing that decides who is asking.
+
+    Built whether or not sign-in is switched on, because the routes exist
+    either way and answering "this deployment has no sign-in" is more useful
+    than a route that is not there. With no keys configured it can verify
+    nothing and issue nothing, which is exactly what a deployment that has
+    not been given any should be able to do.
+    """
+    from lumen.auth import AuthService
+    from lumen.auth.google import GoogleIdentityProvider
+    from lumen.auth.keys import load
+
+    return AuthService(
+        repository=store.identities,
+        provider=GoogleIdentityProvider(settings.auth),
+        keys=load(settings.auth),
+        config=settings.auth,
+    )
+
+
 def _build_scheduler(
     settings: AppConfig,
     *,
@@ -304,7 +364,9 @@ def _build_scheduler(
     jobs.append(ReportsDue(reporter, config=settings.scheduler))
     jobs.append(ShadowScan(reporter, config=settings.scheduler))
     jobs.append(
-        ReviewSweep(reviewer, user_id=settings.user_id, config=settings.scheduler)
+        ReviewSweep(
+            reviewer, user_id=settings.default_user_id, config=settings.scheduler
+        )
     )
 
     return Scheduler(

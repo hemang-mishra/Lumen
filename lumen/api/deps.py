@@ -22,10 +22,12 @@ the whole API at temporary databases by replacing a couple of functions.
 
 from __future__ import annotations
 
-from fastapi import Request
+from fastapi import Request, WebSocket
+from starlette.requests import HTTPConnection
 
 from lumen.api.errors import Unavailable
 from lumen.api.events import EventBus
+from lumen.auth import AuthService, Identity
 from lumen.erasure import ErasureService
 from lumen.config import AppConfig
 from lumen.graph.provider import ReadOnlyGraph
@@ -102,6 +104,90 @@ def get_reporter(request: Request) -> MacroextractionService:
     if reporter is None:
         raise Unavailable("building reports", "this deployment cannot write reports")
     return reporter
+
+
+def get_auth(connection: HTTPConnection) -> AuthService:
+    """
+    The thing that decides who is asking.
+
+    Present whether or not sign-in is switched on, because the routes that
+    use it are mounted either way and answering "this deployment has no
+    sign-in" is better than a route that does not exist.
+    """
+    service = getattr(connection.app.state, "auth", None)
+    if service is None:
+        raise Unavailable("sign-in", "this deployment has no sign-in configured")
+    return service
+
+
+def get_identity(connection: HTTPConnection) -> Identity:
+    """
+    Who is asking.
+
+    Every route that touches a person's data depends on this rather than on
+    configuration. A route that read configuration would serve whoever the
+    process was started as, which in a deployment with two people is a data
+    leak that looks exactly like working software.
+
+    With sign-in switched off this answers the configured default, and that
+    single seam is what lets the existing single-user deployment and the
+    whole test suite carry on unchanged.
+
+    Raises:
+        NotAuthenticated: There is no usable proof of who this is. Carries a
+            short reason a person can act on, and never says whether the
+            account it names exists.
+    """
+    settings: AppConfig = connection.app.state.config
+    if not settings.auth.enabled:
+        return Identity(
+            user_id=settings.default_user_id,
+            email="",
+            authenticated=False,
+        )
+
+    cached = getattr(connection.state, "identity", None)
+    if cached is not None:
+        return cached
+
+    identity = get_auth(connection).identify(_bearer(connection))
+    connection.state.identity = identity
+    return identity
+
+
+def require_identity(connection: HTTPConnection) -> Identity:
+    """
+    The same, mounted as a router-level default.
+
+    The difference is where it is used rather than what it does. Routers take
+    this as a default dependency, so an endpoint added without a thought
+    about who may call it is protected — the failure mode of forgetting is a
+    refusal rather than a leak.
+    """
+    return get_identity(connection)
+
+
+def _bearer(connection: HTTPConnection) -> str:
+    """
+    The token a caller is carrying, if it is carrying one.
+
+    From the header for an ordinary request, and only from the header: a
+    token in a query string ends up in access logs, browser history and
+    referrer headers, which is three permanent copies of a credential.
+
+    A socket is the exception, and it is a real cost rather than a
+    convenience. A browser's WebSocket API cannot set a header, so a
+    conversation could not be authenticated at all otherwise. What travels
+    that way is the short-lived half of a session, never the renewable one.
+    """
+    header = connection.headers.get("authorization") or ""
+    scheme, _, token = header.partition(" ")
+    if scheme.lower() == "bearer" and token.strip():
+        return token.strip()
+
+    if isinstance(connection, WebSocket):
+        return (connection.query_params.get("access_token") or "").strip()
+    return ""
 
 
 def get_events(request: Request) -> EventBus:

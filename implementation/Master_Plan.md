@@ -1048,7 +1048,7 @@ Goal 3 — `session_buffers`, `pipeline_jobs`, `imports`, `hitl_queue`, `user_se
 vector index carry no notion of a user at all, which is why Goal 22 exists and is the larger
 of the two.
 
-- [ ] **Goal 21: Identity & Access — JWT with Google Sign-In**
+- [x] **Goal 21: Identity & Access — Who Is Asking** ✅
   - Implement `lumen/auth/` behind Protocols like every other vendor boundary: `tokens.py`
     (mint/verify, EdDSA, JWKS), `google.py` (the only module that knows an OAuth vendor),
     `identity.py` (the `Identity` model and resolution), `repository.py` (users, identities,
@@ -1069,10 +1069,39 @@ of the two.
     single-user deployment and the full suite keep running unchanged.
   - `LUMEN_SIGNUP_MODE` defaults to `allowlist` — an open Google sign-in on a reachable host
     provisions a database and a model budget for anyone who finds the URL.
-  - *Test:* Token lifecycle against a faked Google (a local JWKS and a stub token endpoint,
-    no network). Expired, wrongly-signed, wrong-audience and stale-`token_version` tokens
-    each refused with the right reason. Refresh reuse revokes the chain. A `state` mismatch
-    is rejected. Assert no credential, code or token reaches a log line or a config snapshot.
+  - **A defect this goal was planned around, and closed.** The system did not agree with
+    itself about who the user was: the conversation surface wrote under a hardcoded
+    `"debug"` while everything else used `config.user_id` (`"local"`). Erasure asked for
+    "every conversation this person has had" and got nothing — **"forget everything"
+    reported success and left every word of every conversation on disk.** Goal 19 built that
+    path correctly; it had been reaching the wrong user's conversations since it shipped,
+    because there was no one place that said who the user was.
+  - *Answers two of the spec's open questions.* **OQ-A3:** a conversation re-checks who is
+    talking at each turn boundary — every frame would interrupt a sentence mid-word, never
+    would let an ended session carry on until the tab closes. **OQ-A4:** only sign-in is rate
+    limited, and in this process; limiting authenticated routes wants a proxy in front of the
+    service rather than a counter inside it.
+  - *Amends Goal 20:* a socket resolves identity through the same dependency every route
+    uses, which required both dependencies to take `HTTPConnection` rather than `Request` —
+    router-level defaults apply to WebSocket routes too, and an HTTP-only dependency broke
+    the entire chat surface.
+  - *Docs amended:* `Auth_Architecture.md` — status, both answered open questions, and the
+    per-user-store section marked as not built.
+  - *Not built, and named rather than omitted:* **per-user graphs and search indexes** are
+    Goal 22 and are the larger half of this phase. Until then **every signed-in person shares
+    one graph**, which is correct for the single-user deployment this is and is the reason a
+    second person must not be invited before Goal 22 lands — asserted in a test rather than
+    glossed over. Passwords, MFA, roles, teams, sharing and a session-management screen are
+    out of scope by the spec's own reasoning.
+  - *Test:* Token lifecycle against a faked Google (a local key and a stub token endpoint, no
+    network). Expired, wrongly-signed, wrong-audience, wrong-issuer, algorithm-confused and
+    stale-`token_version` tokens each refused with their own reason. Refresh reuse revokes the
+    chain *and* the outstanding access tokens. A `state` mismatch is rejected and creates
+    nobody. **Every endpoint in the OpenAPI document asked without a token**, with exactly
+    three answering. A whole sign-in with every log line captured: no credential, code, cookie
+    or token in any of them, or in a config snapshot.
+  - *Result:* 4904 tests passing (213 new), **96%** coverage on `lumen/auth/`.
+  - *Plan:* [`implementation/Goal_21_Plan.md`](file:///Users/hemangmishra/Projects/Lumen/implementation/Goal_21_Plan.md)
 
 - [ ] **Goal 22: Per-User Isolation (Tenancy)**
   - Implement a **store registry**: one Kuzu database directory and one Qdrant collection per

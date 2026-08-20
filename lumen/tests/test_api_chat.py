@@ -16,7 +16,6 @@ import pytest
 from fastapi.testclient import TestClient
 
 from lumen.api.main import create_app
-from lumen.api.routes.chat import CHAT_USER
 from lumen.config import AppConfig, ChatConfig, ProviderConfig, QueryConfig
 from lumen.providers.fake import (
     FakeLLMProvider,

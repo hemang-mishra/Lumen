@@ -203,7 +203,7 @@ class TestEnvironmentIsReadOnConstruction:
         assert VectorConfig().vector_size == 1024
         assert OperationalConfig().db_url == "sqlite:///./other.db"
         assert ObservabilityConfig().log_level == "DEBUG"
-        assert AppConfig().user_id == "someone"
+        assert AppConfig().default_user_id == "someone"
 
     def test_nested_config_inside_app_config_sees_the_environment(self, monkeypatch):
         monkeypatch.setenv("LUMEN_LIGHTWEIGHT_PROVIDER", "ollama")
