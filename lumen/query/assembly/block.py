@@ -44,6 +44,14 @@ UNAVAILABLE_NOTE = (
 )
 
 
+# What an alert is introduced as. Worded so the assistant treats it as
+# something to hold in mind rather than something to announce — being told
+# "you are shifting" by software is not a conversation anybody asked for.
+ALERT_HEADING = (
+    "Recent change worth being aware of, to hold in mind rather than to raise:"
+)
+
+
 def render(context: AssembledContext) -> str:
     """
     The briefing as a block of text, or nothing at all.
@@ -59,15 +67,29 @@ def render(context: AssembledContext) -> str:
     assistant's honest reading of silence is that this person is a stranger.
     """
     if context.is_empty:
-        return _unavailable() if context.search_failed else ""
+        if context.search_failed:
+            return _unavailable()
+        # An alert on its own is still worth saying. It is a fact about the
+        # last two days rather than about what this turn asked for, so a turn
+        # that found nothing does not make it untrue.
+        return _alert(context.alert) if context.alert else ""
 
     lines = [OPENING, GUIDANCE]
     if context.deferred:
         lines.append(DEFERRED_NOTE)
     lines.append("")
     lines.extend(f"- {item.text}" for item in context.items)
+    if context.alert:
+        lines.append("")
+        lines.append(ALERT_HEADING)
+        lines.append(context.alert)
     lines.append(CLOSING)
     return "\n".join(lines)
+
+
+def _alert(alert: str) -> str:
+    """The alert on its own, for a turn with no history to go with it."""
+    return f"{ALERT_HEADING}\n{alert}"
 
 
 def _unavailable() -> str:
@@ -84,6 +106,7 @@ def _unavailable() -> str:
 
 __all__ = [
     "render",
+    "ALERT_HEADING",
     "OPENING",
     "CLOSING",
     "GUIDANCE",

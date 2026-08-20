@@ -9,6 +9,7 @@ in-memory stand-in with no database anywhere in sight.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from contextlib import AbstractContextManager
 from datetime import date, datetime
 from typing import Any, Protocol, runtime_checkable
@@ -194,6 +195,60 @@ class SessionBufferRepository(Protocol):
         """
         ...
 
+    def list_session_ids(self, user_id: str, *, limit: int = 100_000) -> list[str]:
+        """
+        Every conversation this person has had, oldest first.
+
+        Identifiers only. This exists for the jobs that work over a whole
+        history rather than a window — the other listing here is built around
+        "the last few days" and cannot answer "all of it" at all.
+        """
+        ...
+
+    def purge_content(
+        self,
+        user_id: str,
+        *,
+        at: datetime,
+        session_ids: Sequence[str] | None = None,
+    ) -> int:
+        """
+        Replace the words in these conversations, keeping the conversations.
+
+        The graph is not the only place somebody's sentences are held. Every
+        message they typed or spoke is here too, alongside the summaries
+        written from them, and an erasure that cleaned only the graph would
+        leave the originals sitting on disk.
+
+        Message ordering, timestamps and the shape of the thread survive, for
+        the same reason the graph's structure does: what happened stays
+        provable, and what was said does not.
+
+        Named sessions only, or the whole of somebody's history when none are
+        named. The moment is passed in so that everything one erasure touches
+        carries the same date. Returns how many messages were changed.
+        """
+        ...
+
+    def claim_for_processing(self, session_id: str, *, at: datetime) -> bool:
+        """
+        Take ownership of a conversation, if nobody else has it.
+
+        The difference from `mark_status` is the whole point: this refuses
+        when the conversation is no longer open, in one statement, so two
+        things looking for work at the same moment cannot both walk away
+        believing they own it.
+
+        That matters because an imported conversation sits in this table in
+        the same state while the importer is running it. A watcher that
+        looked and then acted would hand the pipeline a conversation somebody
+        else was already processing, and one evening would become two sets of
+        history.
+
+        True when this call is the one that claimed it.
+        """
+        ...
+
     def mark_status(self, session_id: str, status: BufferStatus) -> SessionBufferRecord:
         """Move a buffer to a new state, recording the time if it decayed."""
         ...
@@ -324,6 +379,17 @@ class CoreferenceMapRepository(Protocol):
         """
         ...
 
+    def purge(self, *, session_ids: Sequence[str] | None = None) -> int:
+        """
+        Remove the notes on who was being talked about.
+
+        These are working notes rather than beliefs, and they are made
+        entirely of other people's names. There is nothing here worth keeping
+        once the entries they describe have been erased, so they go rather
+        than being blanked. Returns how many were removed.
+        """
+        ...
+
     def get(self, map_id: str) -> CoreferenceRecord | None:
         """Fetch one map, or None if there is no such map."""
         ...
@@ -441,6 +507,24 @@ class HitlQueueRepository(Protocol):
         """
         ...
 
+    def purge_content(
+        self,
+        user_id: str,
+        *,
+        at: datetime,
+        audit_node_ids: Sequence[str] | None = None,
+    ) -> int:
+        """
+        Take the words out of the waiting questions, and drop what they held.
+
+        A queued question carries a summary of what it is about, and the
+        answer it was holding ready carries whole records waiting to be
+        written. Both are made of what the person said. The queue rows stay
+        so the history of what was asked survives; what they were about does
+        not. Returns how many rows were changed.
+        """
+        ...
+
     def save_proposal(self, audit_node_id: str, payload: str) -> None:
         """
         Keep what the system was going to write, against the decision note.
@@ -475,6 +559,15 @@ class UserSettingsRepository(Protocol):
         """
         ...
 
+    def purge(self, user_id: str) -> int:
+        """
+        Remove everything this person has configured.
+
+        Settings are things they wrote — how they want to be spoken to, above
+        all — so they go with the rest. Returns how many were removed.
+        """
+        ...
+
     def delete(self, user_id: str, key: str) -> bool:
         """Remove an override so the setting falls back to its default."""
         ...
@@ -490,6 +583,26 @@ class DataErasureAuditRepository(Protocol):
 
     def get(self, record_id: str) -> StoredErasureAudit | None:
         """Fetch one erasure record, or None if there is no such record."""
+        ...
+
+    def finish(
+        self,
+        record_id: str,
+        *,
+        status: ErasureStatus,
+        nodes_anonymized: int,
+        embeddings_deleted: int,
+        entry_ids_affected: Sequence[str] = (),
+    ) -> StoredErasureAudit:
+        """
+        Close an erasure record with what it turned out to do.
+
+        Separate from opening one because the record is written before any
+        of the work starts. An erasure that dies halfway through still has to
+        have left proof it was attempted, and a row written only on success
+        would leave exactly the worst case — a half-forgotten history and
+        nothing saying so — invisible.
+        """
         ...
 
     def list_for_user(self, user_id: str) -> list[StoredErasureAudit]:
@@ -544,6 +657,23 @@ class ImportRepository(Protocol):
         The job and trace arrive later than the row does — the row is written
         when the messages are stored, and the run that processes them starts
         afterwards — so they are set here rather than at creation.
+        """
+        ...
+
+    def purge_content(
+        self,
+        user_id: str,
+        *,
+        at: datetime,
+        session_ids: Sequence[str] | None = None,
+    ) -> int:
+        """
+        Take the readable part out of the record of what was uploaded.
+
+        A conversation's title and the name of the file it came from both say
+        something about somebody's life. What the upload did — when, how many
+        conversations, what ran — is machinery and stays. Returns how many
+        rows were changed.
         """
         ...
 

@@ -426,3 +426,98 @@ def _wait_until(condition, timeout: float = 30.0) -> None:
             return
         time.sleep(0.02)
     raise AssertionError("the worker never got there")
+
+
+class TestAConversationLumenHeldItself:
+    """
+    The other kind of work the queue carries.
+
+    Identical to an import in everything that matters — the same thread, the
+    same pipeline, the same serialisation — and different in the only place
+    it can be: an import has a record somebody is watching, and a
+    conversation has only itself.
+    """
+
+    def test_it_goes_through_the_same_queue(self, scripted_worker):
+        worker = scripted_worker()
+
+        worker.submit_session("sess_1")
+
+        assert worker.pending == 1
+
+    def test_an_empty_conversation_is_settled_rather_than_failing(
+        self, ops_store, scripted_worker
+    ):
+        # A conversation with nothing in it is a real state — somebody opened
+        # a chat and closed it — and the pipeline is what decides there was
+        # nothing worth extracting.
+        from lumen.operational.enums import BufferStatus
+        from lumen.operational.schemas import SessionBufferRecord
+
+        ops_store.buffers.create_buffer(
+            SessionBufferRecord(
+                session_id="sess_empty",
+                user_id="local",
+                event_date=AUG_2,
+                session_label="empty",
+            )
+        )
+
+        scripted_worker().run_session("sess_empty")
+
+        assert ops_store.buffers.get_buffer("sess_empty").status in {
+            BufferStatus.PROCESSED,
+            BufferStatus.DISCARDED,
+        }
+
+    def test_a_failed_run_hands_the_conversation_back_rather_than_keeping_it(
+        self, ops_store, scripted_worker, monkeypatch
+    ):
+        # Dispatched means somebody owns it. After a failure nobody does, and
+        # leaving it there is how a conversation is never looked at again.
+        from lumen.operational.enums import BufferStatus
+        from lumen.operational.schemas import SessionBufferRecord
+
+        ops_store.buffers.create_buffer(
+            SessionBufferRecord(
+                session_id="sess_broken",
+                user_id="local",
+                event_date=AUG_2,
+                session_label="broken",
+            )
+        )
+        ops_store.buffers.claim_for_processing("sess_broken", at=datetime.now(UTC))
+        monkeypatch.setattr(
+            "lumen.ingest.worker.run_pipeline",
+            lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("the graph is gone")),
+        )
+
+        scripted_worker().run_session("sess_broken")
+
+        assert ops_store.buffers.get_buffer("sess_broken").status is BufferStatus.DECAYED
+
+    def test_a_failure_does_not_take_the_worker_down(self, scripted_worker):
+        worker = scripted_worker()
+
+        worker.run_session("sess_that_does_not_exist")
+
+    def test_what_happens_is_announced_when_anybody_asked_to_be_told(
+        self, scripted_worker
+    ):
+        said: list[tuple[str, dict]] = []
+        worker = scripted_worker()
+        worker._announce = lambda kind, payload: said.append((kind, payload))
+
+        worker.run_session("sess_that_does_not_exist")
+
+        assert [kind for kind, _ in said] == ["run_started", "run_finished"]
+
+    def test_a_listener_that_breaks_does_not_cost_the_run(self, scripted_worker):
+        # Whoever is watching is a convenience; the entry being written is not.
+        def explode(kind, payload):
+            raise RuntimeError("the socket is gone")
+
+        worker = scripted_worker()
+        worker._announce = explode
+
+        worker.run_session("sess_that_does_not_exist")

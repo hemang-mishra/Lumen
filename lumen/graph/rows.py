@@ -21,9 +21,13 @@ was asking.
 
 from __future__ import annotations
 
+import logging
+from datetime import datetime, timezone
 from typing import Any
 
 from lumen.schemas.enums import SignalStrength
+
+logger = logging.getLogger(__name__)
 
 # Where each kind of record keeps the text worth showing, in the order to
 # try. A pattern says what it is in its name, a belief in its statement, an
@@ -108,6 +112,78 @@ def signal_of(row: dict[str, Any]) -> SignalStrength:
         return SignalStrength.STANDARD
 
 
+# Where a record says when it happened, in the order to try. Not every kind
+# has all of them: a standing belief has no single moment it occurred, so the
+# date it became true is the closest honest answer.
+DATE_COLUMNS: tuple[str, ...] = ("occurred_at", "valid_from", "created_at")
+
+# The same, for the question "when was this last true of the person". A
+# belief or a pattern records that directly; everything else falls back to
+# when it happened.
+LAST_SEEN_COLUMNS: tuple[str, ...] = ("last_reinforced_at", *DATE_COLUMNS)
+
+
+def read_moment(value: Any) -> datetime | None:
+    """
+    Read a stored date back into a real one.
+
+    Dates live in text columns, so what comes back is whatever was written.
+    Anything that will not parse is treated as no date at all rather than as
+    an error — an unreadable timestamp should cost a record a little ordering,
+    not fail whatever was being done.
+    """
+    if isinstance(value, datetime):
+        return value
+    if value is None:
+        return None
+    text = str(value).strip()
+    if not text:
+        return None
+    try:
+        return datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        logger.debug("a stored date could not be read: %r", value)
+        return None
+
+
+def as_utc(moment: datetime) -> datetime:
+    """
+    The same moment with a timezone on it, reading a bare one as UTC.
+
+    Stored dates are mostly written with a zone and occasionally without.
+    Comparing one of each raises, so everything is put on the same footing
+    before any arithmetic happens.
+    """
+    if moment.tzinfo is None:
+        return moment.replace(tzinfo=timezone.utc)
+    return moment.astimezone(timezone.utc)
+
+
+def first_moment(row: dict[str, Any], columns: tuple[str, ...]) -> datetime | None:
+    """The first of these date columns that holds something readable."""
+    for column in columns:
+        moment = read_moment(row.get(column))
+        if moment is not None:
+            return moment
+    return None
+
+
+def happened_at(row: dict[str, Any]) -> datetime | None:
+    """When a record says it happened, or nothing if it says nothing readable."""
+    return first_moment(row, DATE_COLUMNS)
+
+
+def last_seen_at(row: dict[str, Any]) -> datetime | None:
+    """
+    When a record was last true of the person, as best the row can say.
+
+    A belief or a pattern is stamped every time it is evidenced again, and
+    that stamp is the honest answer. Everything else has only the date it
+    happened, which is the same answer for a record that never recurs.
+    """
+    return first_moment(row, LAST_SEEN_COLUMNS)
+
+
 def is_live_content(row: dict[str, Any]) -> bool:
     """
     Whether a record is history that is still in play.
@@ -127,7 +203,14 @@ __all__ = [
     "SIGNAL_WEIGHT",
     "CONTENT_TABLES",
     "RETIRED_STATUSES",
+    "DATE_COLUMNS",
+    "LAST_SEEN_COLUMNS",
     "preview_of",
     "signal_of",
     "is_live_content",
+    "read_moment",
+    "as_utc",
+    "first_moment",
+    "happened_at",
+    "last_seen_at",
 ]

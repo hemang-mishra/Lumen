@@ -261,19 +261,40 @@ Candidates from Passes A, B, C are merged and ranked.
 ### Ranking Formula (Conversational Mode)
 
 ```
-conv_score = cosine_similarity × signal_weight × recency_weight × session_relevance_boost
+conv_score = cosine_similarity
+           × signal_weight
+           × recency_weight
+           × trust_weight
+           × frequency_weight
+           × session_relevance_boost
 ```
 
 Where `session_relevance_boost` = 1.3× if the node is already in the `SessionContextBuffer`.
 
-> **Split by layer, as the extraction-side formula was.** Retrieval (Goal 14) produces a
+> **Split by layer, as the extraction-side formula was.** Retrieval (Goal 14) produced a
 > *provisional* ordering — `cosine × signal_weight × session_relevance_boost` — used only to
-> rank and cut its own candidate list. `recency_weight` is **not** in it: temporal decay is
-> Goal 19's, and inventing a decay curve early would mean building it twice. Final ranking and
-> the ≤400-token compression are Goal 15's. A node found by an anchor carries no cosine at all
-> — an exact name match is not a measurement — so it is ordered by a configured base value
+> rank and cut its own candidate list. **Goal 19 completed it**: `recency_weight`,
+> `trust_weight` and `frequency_weight` are now applied at the same point, from one shared
+> table of weights that the extraction pipeline and the reports read as well, so no two parts
+> of Lumen can disagree about what a record is worth. Final ranking and the ≤400-token
+> compression remain Goal 15's. A node found by an anchor carries no cosine at all — an exact
+> name match is not a measurement — so it is ordered by a configured base value
 > (`LUMEN_ANCHOR_BASE_SCORE`) while its `similarity` field stays unset, so nothing downstream
 > can mistake a policy number for a measured one.
+>
+> **The whole turn is aged against one instant.** The moment is fixed once when the turn
+> starts and handed to all three searches, so a conversation running over midnight cannot
+> rank two identical records differently for no reason anybody could see.
+>
+> **A record carried from earlier today is aged like any other.** Being remembered from an
+> hour ago is a reason to offer a record again, not a way for an old one to skip the
+> ordering. *Amends Goal 14:* the continuity pass previously applied no `signal_weight`
+> either, so the same record ranked differently depending on which search found it.
+>
+> **The four factors are kept beside the total** on every candidate (`recency_weight`,
+> `trust_weight`, `frequency_weight`, `age_band`). A ranking nobody can explain is a ranking
+> nobody can fix, and once the numbers are multiplied the reason a record placed where it did
+> is gone. `GET /maintenance/score/{node_id}` hands them back for any record.
 
 ### Node Compression Templates
 

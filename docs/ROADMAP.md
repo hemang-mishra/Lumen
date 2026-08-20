@@ -26,27 +26,27 @@ Lumen is currently an architecture-stage project. This roadmap defines the build
 3. Implement output-layer scrubbing pass.
 4. Implement AES-256 encryption for local database files.
 5. Implement input sanitization / prompt injection protection.
-6. Implement soft-delete anonymization for DPDP/GDPR compliance.
+6. ~~Implement soft-delete anonymization for DPDP/GDPR compliance.~~ **Done — Goal 19.** Whole-account and single-entry erasure, covering the graph, the search index and the working database, with a preview, a confirmation phrase and an audit record.
 
 ## Phase 3 — Query Layer
 1. Implement basic vector RAG query interface.
 2. Add multi-hop GraphRAG traversal.
 3. Implement counterfactual retrieval.
 4. Build Reflection Prompt Engine.
-5. Add query feedback loop logging.
+5. ~~Add query feedback loop logging.~~ **Partly done — Goal 19** ships the `query_frequency` counter and its ranking boost. The satisfaction signal (thumbs up/down) is still a front-end goal's.
 
 ## Phase 4 — Macroextraction & Periodic Intelligence
 1. Implement weekly Macroextraction pass.
 2. Implement monthly Macroextraction pass.
 3. Add Archetype Shift detection.
 4. Add Contradiction tracking in reports.
-5. Add Emotional Valence time-series.
-6. Add Proof Chain generation.
-7. Implement Prospective Memory signal generation.
+5. Add Emotional Valence time-series. **Blocked, not deferred.** Needs a per-observation valence produced at extraction time (a Stage 1 change); no such number exists anywhere in Lumen today, and inventing every point with a model would mean drawing invented numbers as measurements. Declined in Goals 17 and 19.
+6. ~~Add Proof Chain generation.~~ **Done — Goal 19.** Whole-history scan, monthly and quarterly reports, plus `POST /maintenance/proof-chains`.
+7. Implement Prospective Memory signal generation. **Declined for now.** A forecasting feature with no ground truth to check it against, predicting a person's coming week. Wants its own goal and its own honesty argument.
 
 ## Phase 5 — Advanced Features
 1. Quarterly re-embedding with atomic migration.
-2. Temporal decay model in retrieval.
+2. ~~Temporal decay model in retrieval.~~ **Done — Goal 19.** One curve shared by retrieval and the reports, plus trust and frequency weighting.
 3. Adaptive Enum Extension (quarantine + graduate process).
 4. `PROSODY_SIGNAL` extraction from voice audio (paralinguistic model).
 5. Cross-user anonymized pattern library (differential privacy, opt-in).

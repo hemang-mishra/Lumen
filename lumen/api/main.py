@@ -36,13 +36,16 @@ from fastapi.staticfiles import StaticFiles
 
 from lumen.api.deps import get_graph, get_ops
 from lumen.api.errors import register_error_handlers
-from lumen.api.resources import LazyChatStack, LazySearchStack
+from lumen.api.events import EventBus
+from lumen.api.resources import LazyChatStack, LazyEraser, LazySearchStack
 from lumen.api.routes import (
     chat,
     debug,
     graph,
+    events as event_routes,
     hitl,
     ingest,
+    maintenance,
     query,
     reports,
     settings as settings_routes,
@@ -50,6 +53,9 @@ from lumen.api.routes import (
 from lumen.api.schemas import HealthView
 from lumen.config import AppConfig
 from lumen.env import load_env
+from lumen.scheduling import Scheduler
+from lumen.scheduling.jobs import ReportsDue, ReviewSweep, ShadowScan
+from lumen.scheduling.watcher import DecayedConversationWatcher
 from lumen.graph.kuzu_impl import KuzuGraphProvider
 from lumen.graph.provider import ReadOnlyGraph
 from lumen.ingest import IngestWorker
@@ -105,6 +111,8 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
     app.include_router(reports.router)
     app.include_router(hitl.router)
     app.include_router(settings_routes.router)
+    app.include_router(maintenance.router)
+    app.include_router(event_routes.router)
 
     # Not mounted at all when uploads are switched off, rather than mounted
     # and refusing. A deployment that says it only reads should not have a
@@ -174,12 +182,17 @@ def _lifespan_for(settings: AppConfig):
 
         _warn_about_vectors_that_will_not_survive(settings)
 
+        # Made first, because the importer announces what it does and is
+        # built two lines below. It needs nothing to start: publishing with
+        # nobody listening is the ordinary state and costs nothing.
+        events = EventBus(history=settings.scheduler.event_history)
+
         provider = KuzuGraphProvider(settings.graph.db_path)
         provider.init_schema()
         store = build_operational_store(settings)
         _bring_the_schema_up_to_date(store)
         formulator = _build_formulator(settings, provider)
-        worker = _build_worker(settings, store, provider)
+        worker = _build_worker(settings, store, provider, events)
         search = LazySearchStack(
             config=settings, graph=provider, reader=provider, worker=worker
         )
@@ -188,6 +201,9 @@ def _lifespan_for(settings: AppConfig):
         app.state.ops = store
         app.state.reporter = MacroextractionService(
             config=settings, graph=provider, ops=store
+        )
+        app.state.eraser = LazyEraser(
+            config=settings, graph=provider, ops=store, search=search
         )
         app.state.reviewer = ReviewService(
             config=settings,
@@ -215,7 +231,21 @@ def _lifespan_for(settings: AppConfig):
             memory=app.state.memory,
             sessions=app.state.sessions,
             personas=app.state.personas,
+            graph=provider,
         )
+        app.state.events = events
+
+        scheduler = _build_scheduler(
+            settings,
+            ops=store,
+            worker=worker,
+            reporter=app.state.reporter,
+            reviewer=app.state.reviewer,
+            events=events,
+        )
+        app.state.scheduler = scheduler
+        scheduler.start()
+
         logger.info("api ready", extra={"graph_path": settings.graph.db_path})
 
         try:
@@ -229,6 +259,10 @@ def _lifespan_for(settings: AppConfig):
             # The search stack goes before the importer, since it may be
             # borrowing the importer's index and closing that first would
             # pull it out from under a request still being served.
+            # The clock goes first. Everything it starts is finished by
+            # something below, and stopping those while it is still handing
+            # out work would leave the last piece half done.
+            scheduler.stop()
             app.state.chat.close()
             search.close()
             if worker is not None:
@@ -240,6 +274,58 @@ def _lifespan_for(settings: AppConfig):
             logger.info("api stopped")
 
     return lifespan
+
+
+def _build_scheduler(
+    settings: AppConfig,
+    *,
+    ops,
+    worker,
+    reporter,
+    reviewer,
+    events: EventBus,
+) -> Scheduler:
+    """
+    Assemble the one clock, with whichever jobs this deployment can run.
+
+    The watcher is left out when there is no importer, because there is
+    nothing to hand a finished conversation to. That is the deployment which
+    said it does not accept uploads, and it is a reading-only service: it can
+    still talk, still search, still report.
+
+    Everything the scheduler does is announced, which is how a page hears
+    about a run without the scheduler knowing that pages exist.
+    """
+    jobs: list = []
+    if worker is not None:
+        jobs.append(
+            DecayedConversationWatcher(ops=ops, worker=worker, config=settings)
+        )
+    jobs.append(ReportsDue(reporter, config=settings.scheduler))
+    jobs.append(ShadowScan(reporter, config=settings.scheduler))
+    jobs.append(
+        ReviewSweep(reviewer, user_id=settings.user_id, config=settings.scheduler)
+    )
+
+    return Scheduler(
+        jobs,
+        config=settings.scheduler,
+        on_report=lambda report: _announce(events, report),
+    )
+
+
+def _announce(events: EventBus, report) -> None:
+    """
+    Say what a scheduled pass did, and only when it did something.
+
+    A pass that found nothing is the common case and publishing it would fill
+    every listener with the news that nothing happened.
+    """
+    for outcome in report.outcomes:
+        if outcome.worked:
+            events.publish("job_ran", job=outcome.name, did=outcome.did)
+        elif outcome.failure is not None:
+            events.publish("job_failed", job=outcome.name, reason=outcome.failure)
 
 
 def _bring_the_schema_up_to_date(store) -> None:
@@ -282,7 +368,9 @@ def _bring_the_schema_up_to_date(store) -> None:
     logger.info("operational schema is up to date")
 
 
-def _build_worker(settings: AppConfig, ops, graph) -> IngestWorker | None:
+def _build_worker(
+    settings: AppConfig, ops, graph, events: EventBus
+) -> IngestWorker | None:
     """
     The importer, sharing the graph the rest of the application reads.
 
@@ -301,7 +389,12 @@ def _build_worker(settings: AppConfig, ops, graph) -> IngestWorker | None:
         logger.info("uploads are switched off for this deployment")
         return None
 
-    worker = IngestWorker(config=settings, ops=ops, graph=graph)
+    worker = IngestWorker(
+        config=settings,
+        ops=ops,
+        graph=graph,
+        announce=lambda kind, payload: events.publish(kind, **payload),
+    )
     worker.start()
     return worker
 

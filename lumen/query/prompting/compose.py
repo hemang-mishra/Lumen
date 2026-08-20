@@ -53,6 +53,7 @@ class PromptComposer:
         now: datetime | None = None,
         deferred: bool = False,
         persona: Persona | None = None,
+        alert: str | None = None,
     ) -> ChatPrompt:
         """
         Put the instructions, the briefing and the conversation together.
@@ -67,9 +68,13 @@ class PromptComposer:
         because there is one composer for the whole process and the wording
         belongs to whoever is talking. Left out, everybody gets the defaults —
         which is what a caller with no notion of who is speaking should get.
+
+        The alert is passed in for a different reason: finding one means
+        reading the graph, and nothing on this side of the system touches a
+        store.
         """
         context = self._assembler.assemble(
-            bundle, signal, now=now, deferred=deferred
+            bundle, signal, now=now, deferred=deferred, alert=alert
         )
         in_crisis = signal.emotional_register is EmotionalRegister.CRISIS
         moment = now or datetime.now(UTC)

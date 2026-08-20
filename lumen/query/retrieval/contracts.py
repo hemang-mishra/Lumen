@@ -22,6 +22,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from lumen.schemas.enums import (
     Domain,
+    PatternAgeBand,
     RetrievalOutcome,
     RetrievalPass,
     SignalStrength,
@@ -52,9 +53,18 @@ class RetrievedNode(BaseModel):
         anchor_type: Which kind of anchor led here, for structural finds.
         anchor_value: The anchor itself — the name, the era.
         boosted: True when this was already part of today's conversation.
-        rank_score: The provisional ordering. Closeness times the record's
-            own weight times the continuity boost. Time decay is not in it,
-            and the final ordering is not decided here.
+        rank_score: The provisional ordering. How good the match was, times
+            everything the record is worth, times the continuity boost. The
+            final ordering is not decided here.
+        recency_weight: What this record's age cost it, from 1.0 for
+            something recent down to the floor for something years quiet.
+        trust_weight: What it cost that the person never confirmed this, for
+            the records an assistant suggested.
+        frequency_weight: What it earned by having been the useful record
+            before.
+        age_band: Which side of the decay curve it fell on, in a word. Kept
+            because "0.7" says nothing on its own and "stale" says the whole
+            thing.
         properties: The rest of the record. Carried because compressing it
             into a briefing needs columns that differ by kind, and reading
             the graph a second time inside a three-second budget to fetch
@@ -77,6 +87,10 @@ class RetrievedNode(BaseModel):
     anchor_value: str | None = None
     boosted: bool = False
     rank_score: float = Field(default=0.0, ge=0.0)
+    recency_weight: float = Field(default=1.0, ge=0.0)
+    trust_weight: float = Field(default=1.0, ge=0.0)
+    frequency_weight: float = Field(default=1.0, ge=0.0)
+    age_band: PatternAgeBand = PatternAgeBand.FRESH
     properties: dict[str, Any] = Field(default_factory=dict, repr=False)
 
 

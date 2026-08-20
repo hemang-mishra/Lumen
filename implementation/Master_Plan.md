@@ -859,16 +859,130 @@ This document outlines the systematic, stage-by-stage implementation plan for th
   - *Test:* Force an `AMBIGUOUS` reconciliation, verify the queue entry and its saved
     proposal, answer it, verify the suspended edge now exists and both notes are linked.
 
-- [ ] **Goal 19: Temporal Decay & Maintenance Jobs**
-  - Implement temporal decay weights in retrieval score calculations.
-  - Implement `query_frequency` counter increment on retrieval hit.
-  - Implement soft-delete/erasure procedure (DPDP/GDPR compliance).
-  - *Test:* Simulate 400-day gap, verify retrieval score drops by expected multiplier.
+- [x] **Goal 19: Temporal Decay, the Frequency Counter, and Erasure** ✅
+  - Implemented `lumen/graph/scoring.py` (every weight, pure, shared by every layer that
+    ranks), `lumen/graph/redaction.py` (which columns hold words and what replaces them),
+    `lumen/query/frequency.py` (counting what a turn actually used),
+    `lumen/erasure/` (`contracts`, `targets` — the only reader, `runner` — the only writer,
+    `service` — the narrow surface the web layer holds), and
+    `lumen/pipeline/macroextraction/proof.py` (the whole-history scan Goal 17 deferred).
+  - **One decay curve, not two that nearly agree.** Goal 17 shipped ageing bands and printed
+    a multiplier that nothing applied; the retrieval spec had its own finer curve. Ship both
+    and a report tells somebody a quiet pattern counts for 0.85 while retrieval counts it as
+    0.70 — the report would be wrong about the system it describes. There is now one curve
+    and one vocabulary (`FRESH`/`COOLING`/`STALE`/`DORMANT`), and `aging.py` reads its
+    multiplier from the same function retrieval applies.
+  - **Age costs rank, never removal.** Floor 0.5, and an anchor match survives full decay —
+    the anchor lookups exist to reach material resemblance never would, and half of that
+    material is old on purpose. **Decay applies to every live content record**, not only to
+    beliefs and patterns: `Schema.md` and `Architecture.md` said different things and could
+    not both be followed. Recorded as a divergence in both.
+  - **A record counts as used when it reaches the assistant, once per day.** Counting every
+    candidate would measure what the search engine likes rather than what helped, and the
+    number feeds back into what the search finds; counting every turn would let one
+    afternoon outrank years permanently. The write happens after the reply has gone out and
+    a failure is logged and dropped. The 1.5× cap is what makes a feedback loop safe to ship.
+  - **Erasure clears the working database too**, which the spec does not mention: the graph
+    holds what was *read out of* somebody's writing and the operational database holds the
+    writing itself, so anonymising only the graph would leave their sentences on disk in
+    four other tables. Frozen HITL proposals are deleted rather than blanked — one surviving
+    could be answered afterwards and write the erased text straight back. Structure,
+    identifiers, links, dates and version chains all survive; lists stay lists; a person's
+    name becomes a stable hash so two people stay two people.
+  - **Irreversible, so it asks first.** A preview that counts and changes nothing and names
+    what it will *not* reach (standing records drawn from many entries); a confirmation
+    phrase in the body rather than a header; an unknown entry refused rather than succeeding
+    quietly; one erasure at a time; bounded batches so the write lock is held for a moment
+    rather than for the sweep. The receipt is opened before the work and closed after, a
+    failed step is recorded and the sweep continues, and nothing is rolled back.
+  - Also added: `iter_node_ids`, `record_query_hits` and `anonymize_nodes` on
+    `GraphProvider`; `VectorProvider.delete`; `open_index` so the index can be opened with
+    no model configured — somebody must be able to erase their data after their credentials
+    expire; five `purge_*` methods, each on the repository that owns its tables;
+    `ErasureRepository.finish`; `SessionBufferRepository.list_session_ids`;
+    `ChatSession.claim_query_hits`; `ScoringConfig` and `MaintenanceConfig`; and
+    `/maintenance` (erasure preview, erasure, audits, proof-chains, and a score explainer)
+    with an inspection page. No migration — every operational table already carried `user_id`.
+  - *Amends Goal 14:* the continuity pass applied no `signal_weight`, so the same record
+    ranked differently depending on which search found it. It now goes through the same
+    weighting as everything else. *Amends Goal 17:* `MacroConfig`'s four ageing fields are
+    replaced by `ScoringConfig`; how quiet a pattern must be before a report *mentions* it
+    stays the report's own opinion (`LUMEN_MACRO_AGING_REPORT_DAYS`).
+  - *Docs amended ahead of coding:* `Graph/Schema.md` (decay scope, the fifth factor,
+    erasure's operational step and its stated limits), `Extraction/Architecture.md` (the
+    layer-split table, and the two docs reconciled), `Query/Conversational_RAG_Mode.md`
+    (`conv_score` completed), `Query/RAGArchitecture.md` (when the counter moves),
+    `Extraction/Macroextraction.md` (proof chains as built; valence and prospective memory
+    recorded as not built, with reasons), `ROADMAP.md`.
+  - *Not built, recorded rather than deferred again:* emotional valence needs a
+    per-observation mood score that exists nowhere in Lumen — every point would be invented
+    by a model and drawn as a measurement; it is a Stage 1 change, not a maintenance job.
+    Prospective memory is forecasting with no ground truth. Both moved to `ROADMAP.md`.
+  - *Deferred:* running erasure and the proof scan on a clock → Goal 20; the
+    identity-bearing `DELETE /users/{user_id}/data` → Goal 21; erasure scoped to one user's
+    subgraph → Goal 22, since the graph has no user column until then.
+  - *Test:* The named case — a 400-day gap halving the score of an otherwise identical
+    record, which is still returned.
+  - *Result:* 4566 tests passing (141 new), **99–100%** coverage on the new modules.
+  - *Plan:* [`implementation/Goal_19_Plan.md`](file:///Users/hemangmishra/Projects/Lumen/implementation/Goal_19_Plan.md)
 
-- [ ] **Goal 20: API Gateway (BFF) Integration**
-  - Finalize `lumen/api/main.py` (FastAPI) tying all routes: `/chat`, `/ingest`, `/query`, `/graph`, `/hitl`, `/reports`, `/settings`.
-  - WebSocket streaming for chat responses and pipeline progress updates.
-  - *Test:* Full HTTP lifecycle: Ingest → Pipeline triggers → Query → Chat with RAG context.
+- [x] **Goal 20: The Gateway — Nothing Waits on Somebody Remembering to Press a Button** ✅
+  - Implemented `lumen/scheduling/` (`contracts`, `scheduler` — one thread and its clock,
+    `watcher` — finding and claiming finished conversations, `jobs` — the other three),
+    `lumen/api/events.py` (the broadcaster), `lumen/api/routes/events.py`, and
+    `lumen/query/alerts.py` (the shadow alert the conversation was never told about).
+  - **The missing half of the product.** A conversation held in Lumen never became history:
+    Goal 16 built the conversation, Goal 10 built the pipeline, Goal 3 shipped the query that
+    finds conversations which have gone quiet — and nothing had ever called it. The only way
+    to get from one to the other was to export the conversation and upload it back to
+    yourself. Talking to Lumen is now enough.
+  - **A conversation is claimed, not chosen.** An imported one sits in the same table in the
+    same state while the importer runs it, so a check-then-act watcher would hand the same
+    evening to the pipeline twice. `claim_for_processing` is a single conditional write the
+    database resolves; whoever loses sees it is no longer open and moves on. Ownership is
+    also read off the conversation's own `source`, so an import is left to its owner.
+  - **One clock, not four timers.** Four would be four things to start, four to stop, and
+    four ways for two jobs to reach the same store at once. A pass arriving while one is
+    running is skipped and says so — these jobs are minutes long and a queue that grows while
+    the machine is busy is how a laptop waking from sleep starts nine reports. A job that
+    throws costs that job one turn; the alternative is a system that silently stopped doing
+    everything because one thing broke once.
+  - **Two sockets, not one.** The reply stream and the event stream have different lifetimes
+    and their failures mean different things. Events are broadcast rather than delivered:
+    nothing stored, nothing replayed, and a short backlog only so a page that has just opened
+    is not blank. A slow listener drops its own messages and never anybody else's — a browser
+    on a sleeping laptop must not be able to hold up the pipeline.
+  - **The shadow alert finally reaches the conversation**, as one line inside the same token
+    budget, taken off the top rather than added afterwards, and never shown to somebody who
+    sounds like they are in the middle of a bad ten minutes.
+  - Also added: `SessionBufferRepository.claim_for_processing` and `list_session_ids`;
+    `IngestWorker.submit_session`/`run_session`, with the queue carrying two typed kinds of
+    work; an `announce` callback so the worker and the scheduler can be watched without
+    anything in `lumen/pipeline/` or `lumen/review/` learning that sockets exist;
+    `Policy.with_less_room`; `SchedulerConfig`; `/events` and `/events/ws`; and an activity
+    page. No migration.
+  - *Amends Goal 16:* a failed run puts the conversation back to `DECAYED` rather than
+    leaving it `DISPATCHED` — dispatched means somebody owns it, and after a failure nobody
+    does.
+  - *Docs amended ahead of coding:* `Technical_HLD.md` §3.1 and §7.3 (the orchestrator and
+    scheduler as built, the two-socket split), `Interface_Architecture.md` (who notices a
+    decayed session, and how ownership is taken).
+  - *Not built, with reasons recorded:* **Redis/RQ and a second process** — the personal
+    build is one process by design, the registry's own left column says so, and adding a
+    broker for a single user builds the production topology to serve one person; every job
+    here is minutes long and nobody waits on one. **Kuzu/Qdrant in server mode** — same, and
+    both hold a file lock, which is what makes the single process correct rather than a
+    compromise. **APScheduler** — cron parsing for four fixed intervals, against a dependency
+    with its own executors and its own idea of "running"; the loop is ninety lines and every
+    rule in it is one we chose. **Semantic day grouping and multi-day import splitting** —
+    routed here from Goal 5 as "the ingestion layer", which this goal is not.
+  - *Deferred:* retention-policy erasure on a timer — the scheduler is ready for it the day
+    somebody decides data expires.
+  - *Test:* The full lifecycle — a conversation held in Lumen, left to go quiet, becoming
+    history with nobody pressing anything, and picked up exactly once.
+  - *Result:* 4691 tests passing (125 new), **100%** coverage on `lumen/scheduling/` and
+    `lumen/query/alerts.py`.
+  - *Plan:* [`implementation/Goal_20_Plan.md`](file:///Users/hemangmishra/Projects/Lumen/implementation/Goal_20_Plan.md)
 
 > **Landed early: a configurable system prompt, and more generous deadlines.** Two changes
 > were made between Goals 18 and 19 rather than waiting for the goal that owns them, because

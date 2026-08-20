@@ -21,13 +21,14 @@ from typing import Any
 
 import kuzu
 
-from lumen.graph import queries
+from lumen.graph import queries, redaction
 from lumen.graph.provider import EdgeRow, GraphProvider, GraphSlice
 from lumen.schemas.base import GraphNode
 from lumen.schemas.enums import (
     DecisionStatus,
     HitlResolutionChoice,
     ReconciliationAction,
+    RelationshipToUser,
 )
 
 logger = logging.getLogger(__name__)
@@ -334,6 +335,11 @@ _BOOKKEEPING_TABLES: dict[str, tuple[str, ...]] = {
     "record_reinforcement": ("PatternNode", "BeliefNode"),
     "touch_person": ("PersonEntityNode",),
 }
+
+# The only kinds of record that keep a count of how often they were worth
+# showing. Everything else is a single note or a piece of machinery, and
+# neither has a use for one.
+_COUNTED_TABLES: tuple[str, ...] = ("PatternNode", "BeliefNode")
 
 
 # ---------------------------------------------------------------------------
@@ -1502,6 +1508,154 @@ class KuzuGraphProvider(GraphProvider):
             {"node_id": node_id, "at": at.isoformat()},
         )
         logger.debug("Touched person %s", node_id)
+
+    def record_query_hits(self, node_ids: list[str], *, at: datetime) -> int:
+        """
+        Raise the counter on the records that were worth showing somebody.
+
+        Everything happens in one statement per table rather than one per
+        record. Nobody is waiting on this — it runs after a reply has already
+        gone out — but it runs on every turn, and a round trip per record
+        would make an ordinary conversation the busiest writer in the system.
+
+        Identifiers belonging to any other kind of record are skipped rather
+        than refused. The caller passes whatever the conversation used, and
+        most of that is notes and episodes, which keep no counter.
+        """
+        wanted = [str(node_id) for node_id in node_ids if node_id]
+        if not wanted:
+            return 0
+
+        counted = 0
+        for table in _COUNTED_TABLES:
+            present = self._ids_present(table, wanted)
+            if not present:
+                continue
+            self._execute(
+                f"MATCH (n:{table}) WHERE n.node_id IN $ids "
+                "SET n.query_frequency = n.query_frequency + 1",
+                {"ids": present},
+            )
+            counted += len(present)
+
+        logger.debug("Counted %d of %d records as shown", counted, len(wanted))
+        return counted
+
+    def anonymize_nodes(self, node_ids: list[str], *, at: datetime) -> int:
+        """
+        Replace the words in these records and leave everything else alone.
+
+        Grouped by kind before anything is written, because which columns
+        hold words depends on the kind and a record's own row is the only
+        thing that says which kind it is.
+
+        Most kinds are rewritten a batch at a time, since every one of them
+        ends up saying the same thing. The two that cannot be — a person,
+        whose new name comes from their old one, and anything holding a list
+        of records whose shape has to survive — are done one at a time.
+        """
+        wanted = [str(node_id) for node_id in node_ids if node_id]
+        if not wanted:
+            return 0
+
+        changed = 0
+        for table, ids in self._group_by_table(wanted).items():
+            if not redaction.holds_words(table):
+                continue
+            if redaction.needs_the_row(table):
+                changed += self._anonymize_one_by_one(table, ids, at=at)
+            else:
+                changed += self._anonymize_batch(table, ids, at=at)
+
+        logger.info(
+            "Anonymized %d of %d records",
+            changed,
+            len(wanted),
+            extra={"asked": len(wanted), "changed": changed},
+        )
+        return changed
+
+    def _anonymize_batch(self, table: str, node_ids: list[str], *, at: datetime) -> int:
+        """Rewrite every record of one kind in a single statement."""
+        values = redaction.replacements_for(table, None, at=at)
+        assignments = ", ".join(f"n.{column} = ${column}" for column in values)
+        self._execute(
+            f"MATCH (n:{table}) WHERE n.node_id IN $ids SET {assignments}",
+            {"ids": node_ids, **values},
+        )
+        return len(node_ids)
+
+    def _anonymize_one_by_one(
+        self, table: str, node_ids: list[str], *, at: datetime
+    ) -> int:
+        """
+        Rewrite records whose replacement depends on what they currently say.
+
+        A record that has already gone is skipped rather than failing the
+        sweep. Erasure is the one thing that must always finish: stopping
+        halfway leaves a history half forgotten and nothing to say which
+        half.
+        """
+        changed = 0
+        for node_id in node_ids:
+            row = self.get_node(node_id)
+            if row is None:
+                continue
+            values = redaction.replacements_for(table, row, at=at)
+            assignments = ", ".join(f"n.{column} = ${column}" for column in values)
+            self._execute(
+                f"MATCH (n:{table}) WHERE n.node_id = $node_id SET {assignments}",
+                {"node_id": node_id, **values},
+            )
+            changed += 1
+        return changed
+
+    def _group_by_table(self, node_ids: list[str]) -> dict[str, list[str]]:
+        """Sort a mixed set of identifiers into the tables they live in."""
+        grouped: dict[str, list[str]] = {}
+        for row in self.get_nodes_by_ids(node_ids):
+            table = str(row.get("_label") or "")
+            node_id = str(row.get("node_id") or "")
+            if table and node_id:
+                grouped.setdefault(table, []).append(node_id)
+        return grouped
+
+    def _ids_present(self, table: str, node_ids: list[str]) -> list[str]:
+        """Which of these identifiers actually live in this table."""
+        res = self._execute(
+            f"MATCH (n:{table}) WHERE n.node_id IN $ids RETURN n.node_id",
+            {"ids": node_ids},
+        )
+        found: list[str] = []
+        while res.has_next():
+            found.append(str(res.get_next()[0]))
+        return found
+
+    def iter_node_ids(
+        self, table: str, *, after: str | None = None, limit: int = 200
+    ) -> list[str]:
+        """
+        Walk one kind of record's identifiers in stable order, a page at a time.
+
+        "Everything after this identifier" rather than "skip the first n":
+        skipping means reading and re-ordering everything already seen on
+        every page, which turns a walk over a whole history into something
+        that gets slower the further it goes.
+        """
+        if table not in NODE_TABLES:
+            return []
+
+        size = max(int(limit), 1)
+        where = "WHERE n.node_id > $after " if after else ""
+        res = self._execute(
+            f"MATCH (n:{table}) {where}RETURN n.node_id "
+            f"ORDER BY n.node_id LIMIT {size}",
+            {"after": after} if after else {},
+        )
+        found: list[str] = []
+        while res.has_next():
+            found.append(str(res.get_next()[0]))
+        return found
 
     def _table_for(self, node_id: str, *, operation: str) -> str:
         """

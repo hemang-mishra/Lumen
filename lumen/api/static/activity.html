@@ -1,0 +1,123 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Lumen — Activity</title>
+  <link rel="stylesheet" href="app.css">
+</head>
+<body>
+<header>
+  <h1>Lumen</h1>
+  <nav>
+    <a href="index.html">Import</a>
+    <a href="episodes.html">Episodes</a>
+    <a href="review.html">Review</a>
+    <a href="reports.html">Reports</a>
+    <a href="maintenance.html">Maintenance</a>
+    <a href="activity.html">Activity</a>
+    <a href="trace.html">Runs</a>
+    <a href="chat.html">Turn reader</a>
+  </nav>
+  <span class="note">test harness — not the product UI</span>
+</header>
+
+<main>
+  <section>
+    <h2>What is happening</h2>
+    <p class="lede">
+      Most of what Lumen does now happens without anybody asking — a finished
+      conversation becomes history, a report gets written, the review queue
+      tidies itself. This is the window onto that.
+    </p>
+    <div class="row">
+      <span id="connection" class="tag queued">connecting…</span>
+      <span class="faint">nothing here is stored; it is what is happening now</span>
+    </div>
+  </section>
+
+  <section>
+    <div class="panel" id="feed"><div class="empty">Waiting…</div></div>
+  </section>
+</main>
+
+<script src="app.js"></script>
+<script>
+/*
+ * The activity page.
+ *
+ * Draws the short backlog on connect so the page is not blank, then follows
+ * the socket. Nothing is replayed for somebody who was not watching, and
+ * nothing here is a record — everything worth keeping is readable from the
+ * page that owns it.
+ */
+
+const seen = [];
+
+document.addEventListener("DOMContentLoaded", () => {
+  backlog().then(watch);
+});
+
+/** What was missed in the last few minutes. */
+async function backlog() {
+  try {
+    const body = await api("/events");
+    for (const event of body.events) seen.push(event);
+  } catch (error) {
+    fill("feed", say("bad", String(error.message)));
+  }
+  draw();
+}
+
+/** Follow everything from now on. */
+function watch() {
+  const url = `${location.protocol === "https:" ? "wss" : "ws"}://${location.host}/events/ws`;
+  const socket = new WebSocket(url);
+
+  socket.addEventListener("open", () => mark("ok", "watching"));
+  socket.addEventListener("close", () => mark("bad", "not connected"));
+  socket.addEventListener("error", () => mark("bad", "not connected"));
+  socket.addEventListener("message", (message) => {
+    seen.push(JSON.parse(message.data));
+    draw();
+  });
+}
+
+/** Say whether the socket is up. Colour is never the only signal. */
+function mark(shade, words) {
+  const node = document.getElementById("connection");
+  node.className = `tag ${shade}`;
+  node.textContent = words;
+}
+
+/** Newest first, since that is the one somebody is waiting for. */
+function draw() {
+  if (!seen.length) {
+    fill("feed", el("div", { class: "empty" }, "Nothing has happened yet."));
+    return;
+  }
+  fill("feed", el("table", {},
+    el("thead", {}, el("tr", {},
+      ["When", "What", "Details"].map(h => el("th", {}, h)))),
+    el("tbody", {}, [...seen].reverse().map(event => el("tr", {},
+      el("td", {}, when(event.at)),
+      el("td", {}, el("span", { class: `tag ${shade(event.kind)}` }, event.kind)),
+      el("td", {}, describe(event.payload)),
+    )))));
+}
+
+/** Which colour a kind of event gets. */
+function shade(kind) {
+  if (kind.endsWith("_failed")) return "bad";
+  if (kind.endsWith("_started")) return "running";
+  return "ok";
+}
+
+/** An event's details as one readable line. */
+function describe(payload) {
+  const parts = Object.entries(payload || {}).map(([key, value]) => `${key}: ${value}`);
+  return parts.length ? parts.join(", ") : "—";
+}
+</script>
+</body>
+</html>

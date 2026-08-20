@@ -201,7 +201,7 @@ The personal version runs all services as Python modules in a single process. Th
 | **BFF / API Gateway** | Single entry point for all client requests, auth, rate limiting | FastAPI process on port 8000 | FastAPI + Nginx + TLS |
 | **Identity Service** | Google sign-in, token issue/refresh/revoke, JWKS, user records | `lumen/auth/`, a module in the BFF [Goal 21] | Separate FastAPI service; every other service verifies against its JWKS and none can mint |
 | **Ingestion Service** | Receive messages, voice uploads, external log imports → write to Session Buffer | Module in BFF | Separate FastAPI service |
-| **Pipeline Orchestrator** | Watch Session Buffer for decayed sessions → dispatch pipeline jobs | Background thread in BFF | Dedicated Celery beat scheduler |
+| **Pipeline Orchestrator** | Watch Session Buffer for decayed sessions → dispatch pipeline jobs | `lumen/scheduling/`, a background thread in the BFF [Goal 20] | Dedicated Celery beat scheduler |
 | **Extraction Worker** | Steps 0 + 1 (Preprocessing + Microextraction) | Python-RQ worker | Celery worker, N replicas |
 | **Retrieval Service** | Step 2 (HyDE + Hybrid Search) | Function call in Extraction Worker | Separate FastAPI service (CPU-bound, scale independently) |
 | **Reconciliation Worker** | Step 3 (Reconciliation decisions + HITL escalation) | Python-RQ worker | Celery worker, separate queue from Extraction |
@@ -209,7 +209,7 @@ The personal version runs all services as Python modules in a single process. Th
 
 | **Query Service** | Step 5 (GraphRAG + Conversational RAG Mode) | Module in BFF | Separate FastAPI service |
 | **HITL Service** | Review queue management, one-tap decisions | Module in BFF | Separate FastAPI service |
-| **Scheduler** | Trigger Macroextraction jobs on schedule | APScheduler in BFF | Kubernetes CronJob |
+| **Scheduler** | Trigger every recurring job on a schedule — the decay watcher, reports due, the shadow scan, the review sweep | `lumen/scheduling/scheduler.py`, one background thread in the BFF [Goal 20] | Kubernetes CronJob |
 | **Formulation Service** | Query Formulation Layer (Conversational RAG) — classifies turn, emits RetrievalSignal | `lumen/query/formulation/`, a synchronous call in the Query Service | Sidecar in Query Service |
 | **Conversational Retrieval** | Passes A/B/C for a live turn under one shared budget, plus the sensitivity gate | `lumen/query/retrieval/`, a synchronous call in the Query Service | Sidecar in Query Service |
 | **Context Assembly & Prompting** | Compresses retrieved nodes into a briefing, builds the system prompt, keeps the conversation's own memory | `lumen/query/{assembly,prompting,memory}/`, `lumen/query/conversation.py` | Module in Query Service |
@@ -463,9 +463,16 @@ def run_pipeline(
 ) -> RunReport: ...
 ```
 
-It is a plain synchronous function today, not a queued task. The RQ/Redis topology below
-is Goal 20's, along with the watcher that starts a run when a session goes idle — the
-personal build has no long-running process to host either yet.
+It is a plain synchronous function today, not a queued task, and it stays one. **Goal 20
+shipped the watcher** that starts a run when a session goes idle, and the run itself goes
+on the importer's existing queue and thread — the one that already holds the models and
+already serialises runs so that two entries are never written at once.
+
+The RQ/Redis topology below is **not** the personal build and was not built. The personal
+version is one process by design, this table's own left column says so, and adding a broker
+and a second process for a single user builds the production topology to serve one person.
+Every job here is minutes long and nobody waits on one. It is a deployment change and it
+belongs with a deployment.
 
 Each worker accepts an input model and emits an output model. The orchestrator is the only component that chains them. This means any stage can be tested in complete isolation by constructing its input model and asserting its output model — no real DB, no real LLM required.
 
@@ -631,11 +638,27 @@ dependency, not a per-route decorator.
 
 ### 7.3 Real-time Updates
 
-WebSocket connection maintained for the session. The FastAPI backend pushes:
-- AI response tokens (streaming)
-- Pipeline stage completion events (`extraction_complete`, `reconciliation_complete`)
-- HITL queue count changes
-- End-of-day nudge
+**Two sockets, not one** (Goal 20). `GET /chat/ws` streams a reply as it is written;
+`GET /events/ws` carries everything else. They have different lifetimes and their failures
+mean different things — a dropped reply stream loses a sentence somebody is waiting for, a
+dropped event stream loses a notification. On one socket the reply stream would have to
+stay open between conversations and a notification could arrive mid-sentence.
+
+The reply stream pushes:
+- AI response tokens, and what was gathered for the turn
+
+The event stream pushes:
+- `run_started` / `run_finished` — a conversation or an import going through the pipeline
+- `job_ran` / `job_failed` — what the scheduler did on a pass
+
+**Broadcast, not delivered.** Nothing is stored and nothing is replayed for somebody who
+was not connected; a short backlog (`GET /events`) exists only so a page that has just
+opened is not blank. The queue count, the runs and the reports are each readable from the
+endpoint that owns them, and a system that kept every event would be keeping a second,
+worse copy of what the graph and the job records already hold.
+
+**A slow listener drops its own messages and nobody else's.** A browser left open on a
+sleeping laptop must not be able to hold up the pipeline.
 
 ---
 

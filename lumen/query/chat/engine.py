@@ -46,7 +46,10 @@ from lumen.query.chat.contracts import (
     TurnEvent,
     TurnFailed,
 )
+from lumen.query.assembly.contracts import AssembledContext
 from lumen.query.formulation import QueryFormulator
+from lumen.query.alerts import ShadowAlertReader
+from lumen.query.frequency import QueryHitRecorder
 from lumen.query.memory import ConversationMemory
 from lumen.query.memory.contracts import Recollection
 from lumen.query.prompting import ChatPrompt, PromptComposer
@@ -80,6 +83,11 @@ class ChatEngine:
     with; with one, whoever is talking gets whatever they have rewritten. It
     is resolved here rather than inside the composer because this is the one
     object in the chain that knows who is speaking.
+
+    So is the counting of which records got used. Without it a conversation
+    still works exactly as well; what it loses is a ranking that learns from
+    what has actually helped before. And so is the alert reader: without one,
+    the assistant is simply never told that several things have moved at once.
     """
 
     def __init__(
@@ -93,6 +101,8 @@ class ChatEngine:
         llm: StreamingLLMProvider,
         speech: TTSProvider | None = None,
         personas: PersonaStore | None = None,
+        hits: QueryHitRecorder | None = None,
+        alerts: ShadowAlertReader | None = None,
         config: ChatConfig | None = None,
     ) -> None:
         self._formulator = formulator
@@ -103,6 +113,8 @@ class ChatEngine:
         self._llm = llm
         self._speech = speech
         self._personas = personas
+        self._hits = hits
+        self._alerts = alerts
         self._config = config or ChatConfig()
 
     # ------------------------------------------------------------------
@@ -165,7 +177,7 @@ class ChatEngine:
         )
 
         signal = self._formulator.formulate(turn, session)
-        bundle = self._retriever.retrieve(signal, session)
+        bundle = self._retriever.retrieve(signal, session, now=at)
         recollection = self._memory.recall(conversation.session_id)
         prompt = self._composer.compose(
             bundle=bundle,
@@ -173,12 +185,14 @@ class ChatEngine:
             recollection=recollection,
             now=at,
             persona=self._persona_for(user_id),
+            alert=self._alert_for(at),
         )
 
         yield _what_was_gathered(signal, bundle, prompt, recollection)
 
         yield from self._answer(conversation.session_id, prompt, speak=speak)
 
+        self._note_what_was_used(session, prompt.context, at=at)
         self._tidy_up(conversation.session_id)
 
     def _persona_for(self, user_id: str) -> Persona | None:
@@ -195,6 +209,19 @@ class ChatEngine:
         if self._personas is None:
             return None
         return self._personas.resolve(user_id)
+
+    def _alert_for(self, at: datetime) -> str | None:
+        """
+        Whether anything appears to be shifting right now, if anybody is looking.
+
+        Nothing when no reader was given, which is the ordinary state for a
+        test. A failure inside the reader already comes back as no alert, so
+        there is nothing to catch here — a turn is not worth refusing over a
+        notification.
+        """
+        if self._alerts is None:
+            return None
+        return self._alerts.current(at)
 
     # ------------------------------------------------------------------
     # Writing the reply
@@ -327,6 +354,21 @@ class ChatEngine:
                 exc_info=True,
                 extra={"user_id": user_id, "event_date": on.isoformat()},
             )
+
+    def _note_what_was_used(
+        self, session: ChatSession, context: AssembledContext, *, at: datetime
+    ) -> None:
+        """
+        Count the records that made it into this turn's briefing.
+
+        Deliberately after the reply, for the same reason the summary is:
+        nobody should wait on bookkeeping. A deployment that was not given a
+        recorder simply does not count, which changes nothing about the
+        conversation.
+        """
+        if self._hits is None:
+            return
+        self._hits.note(session, context, at=at)
 
     def _tidy_up(self, session_id: str) -> None:
         """

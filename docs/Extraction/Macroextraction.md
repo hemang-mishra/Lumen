@@ -230,7 +230,13 @@ biographical_gaps_raised:
 ```yaml
 pattern_aging:
   # Patterns are NOT deleted when they age. They are downweighted in retrieval.
-  # This section reports patterns that have crossed a decay threshold.
+  # This section reports patterns that have crossed a decay threshold. Since Goal 19 the
+  # multiplier stated here is read from the same curve retrieval applies, and the band is
+  # one of FRESH / COOLING / STALE / DORMANT. Before that the report carried its own coarser
+  # bands and nothing applied them, so it could state a number the system did not use. How
+  # quiet a pattern must be before it is *mentioned* remains this report's own opinion
+  # (LUMEN_MACRO_AGING_REPORT_DAYS, default 180) — a pattern unmentioned for five weeks is
+  # not news.
   
   cooling_patterns:
     # Patterns with last_reinforced_at > 180 days (retrieval weight: 0.85x baseline)
@@ -296,6 +302,14 @@ active_contradictions:
 ---
 
 ### Emotional Valence Time-Series
+
+> **Not built, and not scheduled.** Deferred from Goal 17 to Goal 19 and declined there for
+> the same reason, now recorded rather than deferred again: no observation in Lumen carries a
+> mood score, so every point on this chart would be invented by a model and then drawn as a
+> measurement. It needs a per-observation valence produced at extraction time — a change to
+> Stage 1, not a maintenance job. Tracked in `ROADMAP.md`. The report continues to carry
+> `negative_observation_count`, which is counted rather than described.
+
 ```yaml
 emotional_valence:
   # Derived from EMOTION, SOMATIC_STATE, and SUPPRESSED_EMOTION_SURFACING observations.
@@ -326,6 +340,28 @@ emotional_valence:
 ---
 
 ### Proof Chains
+
+**Built in Goal 19.** Produced for `MONTHLY` and `QUARTERLY` reports only — it reads the
+whole history rather than a window, and a weekly report is a look at seven days that five
+years of evidence would drown. Available on its own through `POST /maintenance/proof-chains`.
+
+Two decisions worth carrying forward. Occasions are counted in **episodes, not findings** —
+one evening that circles the same realisation four times is one occasion of it. And the
+`key_instances` are **spread evenly across the span** (the first, the last, and at even
+intervals between) rather than being "the most distinct": distinctness cannot be computed
+the same way twice, and a model asked to choose would pick a different five every run.
+Spread also serves the point better — what makes a chain convincing is the same thing
+happening in circumstances that had nothing else in common.
+
+`chain_summary` is **composed from the counts rather than written by a model**. It is the
+same sentence every time with two numbers changed, so a model would reword it in every
+report while adding nothing, and could reach for detail the arithmetic never established
+(the spec's example names the settings — gyms, internships — which nothing in the graph
+records). Patterns are traced through their evidence links; lessons through the
+`evidence_episodes` they name, since a lesson is the one standing record with no links back
+to what taught it. A superseded record gets no chain: proving at length that somebody used
+to think something they have since revised is the opposite of useful.
+
 ```yaml
 proof_chains:
   # Generated when a lesson or pattern has accumulated 10+ episode instances across all time.
@@ -347,6 +383,12 @@ proof_chains:
 ---
 
 ### Prospective Memory Signals
+
+> **Not built, and not scheduled.** Deferred from Goal 17 to Goal 19 and declined there: it
+> is a forecasting feature with no ground truth to check it against, predicting things about
+> a person's coming week, and it does not belong in the goal that makes the ranking honest.
+> Tracked in `ROADMAP.md`.
+
 ```yaml
 prospective_memory:
   # Predicted trigger events for the next 7 days, based on historical pattern frequency.

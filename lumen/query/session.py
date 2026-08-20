@@ -18,6 +18,7 @@ from __future__ import annotations
 import logging
 import threading
 from collections import deque
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from datetime import date, datetime
 
@@ -140,6 +141,10 @@ class ChatSession:
 
     _turns: deque[ChatTurn] = field(default_factory=deque, repr=False)
     _unlocked: set[Domain] = field(default_factory=set, repr=False)
+    # Records already counted as having been shown today. Kept for the same
+    # lifetime as everything else here, which is exactly right: a record that
+    # stays relevant for a whole conversation is one concern, not twenty.
+    _counted_hits: set[str] = field(default_factory=set, repr=False)
     _era_vocabulary: tuple[str, ...] | None = field(default=None, repr=False)
 
     # How many turns have happened is something the session works out, so it
@@ -207,6 +212,26 @@ class ChatSession:
     def is_unlocked(self, domain: Domain) -> bool:
         """Whether this area has been opened today."""
         return domain in self._unlocked
+
+    def claim_query_hits(self, node_ids: Iterable[str]) -> list[str]:
+        """
+        Which of these records have not yet been counted as shown today.
+
+        Claiming and reporting are one step on purpose. Two calls would leave
+        a gap where the same record could be claimed twice, and the whole
+        point is that one long conversation about one subject counts once.
+
+        A record that keeps being the relevant one all afternoon is a single
+        concern. Counting it every turn would let one day's preoccupation
+        outrank years of history for good.
+        """
+        fresh = [
+            node_id
+            for node_id in dict.fromkeys(node_ids)
+            if node_id and node_id not in self._counted_hits
+        ]
+        self._counted_hits.update(fresh)
+        return fresh
 
 
 class SessionRegistry:

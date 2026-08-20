@@ -21,7 +21,7 @@ from collections import Counter, defaultdict
 from datetime import date, datetime, timezone
 from typing import Any
 
-from lumen.config import MacroConfig
+from lumen.config import MacroConfig, ScoringConfig
 from lumen.pipeline.macroextraction.contracts import (
     BeliefChange,
     BiographicalGapFacts,
@@ -157,7 +157,12 @@ class WindowIndex:
         return max((_utc(later) - _utc(earlier)).days, 0)
 
 
-def compute(corpus: WindowCorpus, *, config: MacroConfig) -> ComputedFacts:
+def compute(
+    corpus: WindowCorpus,
+    *,
+    config: MacroConfig,
+    scoring_config: ScoringConfig | None = None,
+) -> ComputedFacts:
     """
     Every number in one report, from one reading of the graph.
 
@@ -191,7 +196,9 @@ def compute(corpus: WindowCorpus, *, config: MacroConfig) -> ComputedFacts:
         unprocessed_motifs=unprocessed_motifs(index),
         relationship_arcs=relationship_arcs(index, config=config),
         biographical_gaps=biographical_gaps(index),
-        pattern_aging=age_patterns(corpus, config=config),
+        pattern_aging=age_patterns(
+            corpus, config=config, scoring_config=scoring_config
+        ),
         archetype_shift=detect_shift(corpus, index.pattern_episodes, config=config),
         active_contradictions=active_contradictions(index),
     )

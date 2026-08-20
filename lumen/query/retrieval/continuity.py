@@ -26,6 +26,7 @@ from collections.abc import Sequence
 from lumen.config import QueryConfig
 from lumen.query.buffer import BufferEntry, SessionContextBuffer
 from lumen.query.retrieval.contracts import RetrievedNode
+from lumen.query.retrieval.hydrate import Weighting
 from lumen.schemas.enums import RetrievalPass
 
 logger = logging.getLogger(__name__)
@@ -38,6 +39,7 @@ def revisit(
     query_vector: Sequence[float] | None,
     keywords: Sequence[str],
     config: QueryConfig,
+    weighting: Weighting | None = None,
 ) -> tuple[list[RetrievedNode], dict[str, float]]:
     """
     Work out what today's conversation should carry into this turn.
@@ -62,6 +64,8 @@ def revisit(
     if not relevant:
         return [], {}
 
+    weighing = weighting or Weighting.at()
+
     boosts: dict[str, float] = {}
     revisited: list[RetrievedNode] = []
 
@@ -69,7 +73,7 @@ def revisit(
         boosts[entry.node_id] = closeness
         if entry.node_id in already_found:
             continue
-        revisited.append(_as_candidate(entry, closeness, config))
+        revisited.append(_as_candidate(entry, closeness, config, weighing))
 
     logger.debug(
         "today's thread still applies",
@@ -83,7 +87,10 @@ def revisit(
 
 
 def _as_candidate(
-    entry: BufferEntry, closeness: float, config: QueryConfig
+    entry: BufferEntry,
+    closeness: float,
+    config: QueryConfig,
+    weighting: Weighting,
 ) -> RetrievedNode:
     """
     Offer a remembered record as a candidate for this turn.
@@ -99,7 +106,12 @@ def _as_candidate(
     is judged by the rule for records that have none rather than by its own.
     A record offered on one turn would then be withheld on the next, for no
     reason the person could see.
+
+    Its age counts against it exactly as it would have if this turn's search
+    had found it. Being remembered from an hour ago is a reason to offer a
+    record again, not a way for an old one to skip the queue.
     """
+    weights = weighting.weigh(entry.properties)
     return RetrievedNode(
         node_id=entry.node_id,
         node_type=entry.node_type,
@@ -111,7 +123,13 @@ def _as_candidate(
         era_tag=entry.era_tag,
         occurred_at=entry.occurred_at,
         boosted=True,
-        rank_score=_clamped(closeness) * config.session_boost_multiplier,
+        rank_score=(
+            weights.applied_to(_clamped(closeness)) * config.session_boost_multiplier
+        ),
+        recency_weight=weights.recency,
+        trust_weight=weights.trust,
+        frequency_weight=weights.frequency,
+        age_band=weights.band,
         properties=dict(entry.properties),
     )
 

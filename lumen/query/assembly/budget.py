@@ -20,7 +20,7 @@ consulting a file.
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 from lumen.config import ChatConfig
 from lumen.schemas.enums import EmotionalRegister
@@ -52,6 +52,23 @@ class Policy:
     def injects_anything(self) -> bool:
         """Whether this register allows a briefing at all."""
         return self.max_tokens > 0 and self.max_records > 0
+
+    def with_less_room(self, spent: int) -> "Policy":
+        """
+        The same allowance, with something already taken out of it.
+
+        For the parts of a briefing that are not records — a line about
+        something shifting right now. Charging them to the same ceiling is
+        what stops the prompt growing every time a new kind of line is added
+        to it.
+
+        Never drops below zero records: something that ate the whole
+        allowance should leave a briefing with no history in it, not one that
+        behaves as though the register had changed.
+        """
+        if spent <= 0:
+            return self
+        return replace(self, max_tokens=max(self.max_tokens - spent, 0))
 
 
 # Records that are settled conclusions rather than single moments. What the

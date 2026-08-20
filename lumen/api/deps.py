@@ -25,6 +25,8 @@ from __future__ import annotations
 from fastapi import Request
 
 from lumen.api.errors import Unavailable
+from lumen.api.events import EventBus
+from lumen.erasure import ErasureService
 from lumen.config import AppConfig
 from lumen.graph.provider import ReadOnlyGraph
 from lumen.ingest import IngestWorker
@@ -100,6 +102,32 @@ def get_reporter(request: Request) -> MacroextractionService:
     if reporter is None:
         raise Unavailable("building reports", "this deployment cannot write reports")
     return reporter
+
+
+def get_events(request: Request) -> EventBus:
+    """
+    Where things that happen are announced.
+
+    Always present, because publishing to nobody is the ordinary state and
+    costs nothing. A deployment with the clock switched off still has one; it
+    simply has less to say.
+    """
+    return request.app.state.events
+
+
+def get_eraser(request: Request) -> ErasureService:
+    """
+    The thing that forgets.
+
+    Narrow in the same way as the other objects here that can change the
+    graph, and more so, because what it does cannot be undone. What a route
+    can do with one of these is ask what an erasure would cover and ask for
+    one to happen — with the confirmation phrase, which is checked inside.
+    """
+    eraser = getattr(request.app.state, "eraser", None)
+    if eraser is None:
+        raise Unavailable("erasure", "this deployment cannot erase data")
+    return eraser.get()
 
 
 def get_reviewer(request: Request) -> ReviewService:

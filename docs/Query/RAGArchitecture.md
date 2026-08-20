@@ -53,9 +53,9 @@ This is the most novel query type in the system.
 
 ## Query Feedback Loop
 - Every query is logged: timestamp, embedding of query, nodes retrieved, user satisfaction signal (optional: thumbs up/down).
-- Nodes retrieved frequently in queries are tagged with a `query_frequency` counter.
+- Nodes retrieved frequently in queries are tagged with a `query_frequency` counter. **Counted when a record reaches the assistant, not when a search returns it, and at most once per record per day** (Goal 19). Counting every candidate would measure what the search engine likes rather than what helped, and the number feeds straight back into what the search finds; counting every turn would let one afternoon's preoccupation outrank years of history permanently. The write happens *after* the reply has gone out and a failure is logged and dropped — nobody waits on bookkeeping. Only `PatternNode` and `BeliefNode` keep the counter; everything else is skipped without complaint.
 - Macroextraction reports surface the top 3 "most queried patterns" as a proxy for what the user is most concerned about.
-- High `query_frequency` patterns receive a weight boost in future retrieval (0.1x additive, max 1.5x total from frequency).
+- High `query_frequency` patterns receive a weight boost in future retrieval (0.1x additive, max 1.5x total from frequency). The cap is the point: being shown makes a record more likely to be shown, and without a ceiling that loop runs away.
 
 ## Reflection Prompt Engine (Pre-Capture Intelligence)
 - Before each journal session, the system generates 2-3 context-aware questions.

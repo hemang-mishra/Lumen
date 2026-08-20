@@ -28,7 +28,12 @@ from dataclasses import replace
 
 from lumen.config import AppConfig
 from lumen.graph.provider import GraphProvider, ReadOnlyGraph
-from lumen.ingest.worker import IngestResources, IngestWorker, build_resources
+from lumen.ingest.worker import (
+    IngestResources,
+    IngestWorker,
+    build_resources,
+    open_index,
+)
 from lumen.providers.factory import get_llm_provider
 from lumen.providers.protocols import EmbeddingProvider
 from lumen.query import ConversationalRetriever
@@ -72,6 +77,8 @@ class LazySearchStack:
         self._lock = threading.Lock()
         self._retriever: ConversationalRetriever | None = None
         self._owned: IngestResources | None = None
+        # An index opened on its own, for callers that need no model.
+        self._index: VectorProvider | None = None
 
     def get(self) -> ConversationalRetriever:
         """
@@ -101,6 +108,28 @@ class LazySearchStack:
         with self._lock:
             return self._shared_resources().vectors
 
+    def index(self) -> VectorProvider:
+        """
+        The search index alone, without needing a model configured.
+
+        The difference from `vectors` matters for exactly one caller.
+        Erasing somebody's data has to delete their positions in the index,
+        and deleting needs nothing that writing needs — so a deployment whose
+        model credentials have expired must still be able to do it.
+
+        Where an importer exists it is still asked first. It owns the index
+        on a deployment that has one, and a second handle on a file-backed
+        index inside one process is refused.
+        """
+        with self._lock:
+            if self._worker is not None:
+                return self._worker.ensure_ready().vectors
+            if self._owned is not None:
+                return self._owned.vectors
+            if self._index is None:
+                self._index = open_index(self._config)
+            return self._index
+
     def embedder(self) -> EmbeddingProvider:
         """The embedding model, borrowed from the same shared resources."""
         with self._lock:
@@ -115,6 +144,9 @@ class LazySearchStack:
             if self._owned is not None:
                 self._owned.close()
                 self._owned = None
+            if self._index is not None:
+                self._index.close()
+                self._index = None
 
     def _build(self) -> ConversationalRetriever:
         """Open what is missing, borrow what is not, and wire it together."""
@@ -125,6 +157,7 @@ class LazySearchStack:
             embedder=shared.embedder,
             llm=self._model_without_retries(),
             config=self._config.query,
+            scoring=self._config.scoring,
         )
 
     def _shared_resources(self) -> IngestResources:
@@ -139,7 +172,9 @@ class LazySearchStack:
         if self._worker is not None:
             return self._worker.ensure_ready()
         if self._owned is None:
-            self._owned = build_resources(self._config, self._graph)
+            # Handing over any index already opened on its own, since a
+            # second handle on a file-backed one would be refused.
+            self._owned = build_resources(self._config, self._graph, self._index)
         return self._owned
 
     def _model_without_retries(self):
@@ -151,6 +186,42 @@ class LazySearchStack:
 
 
 __all__ = ["LazySearchStack"]
+
+
+class LazyEraser:
+    """
+    Builds the thing that forgets, the first time somebody asks it to.
+
+    Built late for one reason: erasing touches the search index, and opening
+    the index needs an embedding model configured. Building this at startup
+    would mean a deployment with no model refusing to start, when everything
+    it can actually do — reading the graph, listing what was erased before —
+    needs no model at all.
+    """
+
+    def __init__(
+        self, *, config: AppConfig, graph, ops, search: LazySearchStack
+    ) -> None:
+        self._config = config
+        self._graph = graph
+        self._ops = ops
+        self._search = search
+        self._lock = threading.Lock()
+        self._service = None
+
+    def get(self):
+        """The erasure service, opening the index if this is the first ask."""
+        from lumen.erasure import ErasureService
+
+        with self._lock:
+            if self._service is None:
+                self._service = ErasureService(
+                    config=self._config,
+                    graph=self._graph,
+                    vectors=self._search.index(),
+                    ops=self._ops,
+                )
+            return self._service
 
 
 class LazyChatStack:
@@ -177,6 +248,7 @@ class LazyChatStack:
         memory,
         sessions,
         personas=None,
+        graph=None,
     ) -> None:
         self._config = config
         self._search = search
@@ -185,6 +257,7 @@ class LazyChatStack:
         self._memory = memory
         self._sessions = sessions
         self._personas = personas
+        self._graph = graph
         self._lock = threading.Lock()
         self._engine = None
         self._llm = None
@@ -213,9 +286,24 @@ class LazyChatStack:
                     llm=self._reply_model(),
                     speech=self._voice(),
                     personas=self._personas,
+                    hits=self._hit_recorder(),
                     config=self._config.chat,
                 )
             return self._engine
+
+    def _hit_recorder(self):
+        """
+        The thing that counts which records a turn used, where there is one.
+
+        Nothing when no writable graph was handed in. Counting is a
+        convenience and a deployment reading a graph it cannot write to
+        should still be able to hold a conversation.
+        """
+        from lumen.query.frequency import QueryHitRecorder
+
+        if self._graph is None:
+            return None
+        return QueryHitRecorder(self._graph, config=self._config.scoring)
 
     def listener(self):
         """

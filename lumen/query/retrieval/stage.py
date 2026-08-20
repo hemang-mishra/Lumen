@@ -27,12 +27,14 @@ from __future__ import annotations
 import logging
 import time
 from collections.abc import Callable
+from datetime import datetime
 
-from lumen.config import QueryConfig
+from lumen.config import QueryConfig, ScoringConfig
 from lumen.graph.provider import ReadOnlyGraph
 from lumen.providers.protocols import EmbeddingProvider, LLMProvider
 from lumen.query.deadline import Attempt, DeadlineRunner
 from lumen.query.retrieval import continuity, gate, merge, semantic, structural
+from lumen.query.retrieval.hydrate import Weighting
 from lumen.query.retrieval.contracts import (
     PassAResult,
     PassReport,
@@ -70,6 +72,7 @@ class ConversationalRetriever:
         embedder: EmbeddingProvider,
         llm: LLMProvider,
         config: QueryConfig | None = None,
+        scoring: ScoringConfig | None = None,
         runner: DeadlineRunner | None = None,
     ) -> None:
         self._graph = graph
@@ -77,13 +80,18 @@ class ConversationalRetriever:
         self._embedder = embedder
         self._llm = llm
         self._config = config or QueryConfig()
+        self._scoring = scoring or ScoringConfig()
         self._owns_runner = runner is None
         self._runner = runner or DeadlineRunner(
             max_workers=self._config.retrieval_max_workers, name="retrieve"
         )
 
     def retrieve(
-        self, signal: RetrievalSignal, session: ChatSession
+        self,
+        signal: RetrievalSignal,
+        session: ChatSession,
+        *,
+        now: datetime | None = None,
     ) -> RetrievalBundle:
         """
         Find what this turn's reasons point at.
@@ -91,16 +99,20 @@ class ConversationalRetriever:
         A turn with no reasons costs nothing at all — no thread, no model,
         no query. That is the common case and the whole point of deciding
         first and searching second.
+
+        The moment the turn happened is fixed once here and used by every
+        search, so all three age their records against the same instant.
         """
         started = time.perf_counter()
 
         if not signal.should_retrieve:
             return self._nothing(signal, started, _why_nothing(signal))
 
+        weighting = Weighting.at(now, config=self._scoring)
         turn_text = _turn_text(session, signal.turn_index)
         carried = self._collect_carried(session, signal.turn_index)
         semantic_attempt, structural_attempt = self._run_searches(
-            signal, turn_text, session
+            signal, turn_text, session, weighting
         )
 
         found_a: PassAResult = (
@@ -122,6 +134,7 @@ class ConversationalRetriever:
             query_vector=found_a.query_vector,
             keywords=_keywords(signal),
             config=self._config,
+            weighting=weighting,
         )
 
         # Anything carried from last turn goes through the sensitivity rules
@@ -251,7 +264,11 @@ class ConversationalRetriever:
         return keep
 
     def _run_searches(
-        self, signal: RetrievalSignal, turn_text: str, session: ChatSession
+        self,
+        signal: RetrievalSignal,
+        turn_text: str,
+        session: ChatSession,
+        weighting: Weighting,
     ) -> tuple[Attempt, Attempt]:
         """
         Run the meaning-based search and the anchor lookups side by side.
@@ -271,11 +288,13 @@ class ConversationalRetriever:
                     embedder=self._embedder,
                     llm=self._llm,
                     config=self._config,
+                    weighting=weighting,
                 ),
                 STRUCTURAL: lambda: structural.find_by_anchors(
                     signal.retrieval_triggers,
                     graph=self._graph,
                     config=self._config,
+                    weighting=weighting,
                 ),
             },
             timeout_seconds=self._config.retrieval_budget_seconds,

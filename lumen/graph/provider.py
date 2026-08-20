@@ -113,6 +113,22 @@ class ReadOnlyGraph(Protocol):
         """How many records of each kind exist. Counts everything, live or not."""
         ...
 
+    def iter_node_ids(
+        self, table: str, *, after: str | None = None, limit: int = 200
+    ) -> list[str]:
+        """
+        Walk one kind of record's identifiers, a page at a time.
+
+        Paging by "everything after this id" rather than by "skip the first
+        n", because the second re-reads and re-orders everything already
+        seen on every page. A sweep over a whole history through that would
+        cost more the further it got.
+
+        Comes back in identifier order, which is arbitrary but stable — the
+        only property paging actually needs.
+        """
+        ...
+
     def get_neighborhood(
         self,
         node_id: str,
@@ -353,6 +369,35 @@ class GraphProvider(ReadOnlyGraph, Protocol):
 
     def touch_person(self, node_id: str, *, at: datetime) -> None:
         """Note that a person was mentioned again, and when."""
+        ...
+
+    def record_query_hits(self, node_ids: list[str], *, at: datetime) -> int:
+        """
+        Note that these records were the ones worth showing somebody.
+
+        Raises the counter on beliefs and patterns and quietly skips
+        everything else, because they are the only kinds that keep one.
+        Returns how many were counted, which is the only way a caller can
+        tell "nothing qualified" from "nothing happened".
+        """
+        ...
+
+    def anonymize_nodes(self, node_ids: list[str], *, at: datetime) -> int:
+        """
+        Replace everything these records say, and keep everything they are.
+
+        The words a person wrote are overwritten; identifiers, links, dates,
+        kinds and version chains are left exactly as they were. That is what
+        makes forgetting possible at all in a store that never deletes: the
+        shape of somebody's history survives as proof of what happened, and
+        the history itself does not.
+
+        Which columns hold words is fixed in the implementation. No caller
+        names a column, so no caller can reach content through this that it
+        was not meant to reach.
+
+        Cannot be undone. Returns how many records were changed.
+        """
         ...
 
     def dismiss_decision(self, node_id: str, *, at: datetime) -> None:

@@ -110,7 +110,7 @@ class TestSharingTheIndex:
     ):
         opened = []
 
-        def _open(config, graph):
+        def _open(config, graph, vectors=None):
             opened.append(graph)
             return borrowed
 
@@ -125,7 +125,7 @@ class TestSharingTheIndex:
         calls = []
         monkeypatch.setattr(
             "lumen.api.resources.build_resources",
-            lambda config, graph: (calls.append(1), borrowed)[1],
+            lambda config, graph, vectors=None: (calls.append(1), borrowed)[1],
         )
         held = stack(worker=None)
 
@@ -140,7 +140,8 @@ class TestClosing:
         closed = []
         monkeypatch.setattr(borrowed, "close", lambda: closed.append(True))
         monkeypatch.setattr(
-            "lumen.api.resources.build_resources", lambda config, graph: borrowed
+            "lumen.api.resources.build_resources",
+            lambda config, graph, vectors=None: borrowed,
         )
         held = stack(worker=None)
         held.get()

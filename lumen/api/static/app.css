@@ -103,7 +103,11 @@ button, .button {
 button:hover { border-color: var(--accent); }
 button:disabled { opacity: .5; cursor: default; border-color: var(--line); }
 
-input[type="text"], textarea {
+/* For the one button in the harness that cannot be taken back. */
+button.danger { border-color: var(--bad); color: var(--bad); }
+button.danger:hover { border-color: var(--bad); background: var(--panel); }
+
+input, select, textarea {
   background: var(--bg);
   color: var(--ink);
   border: 1px solid var(--line);

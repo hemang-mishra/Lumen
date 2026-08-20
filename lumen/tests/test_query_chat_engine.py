@@ -74,7 +74,7 @@ class NothingFound:
     def __init__(self):
         self.asked = []
 
-    def retrieve(self, signal, session):
+    def retrieve(self, signal, session, *, now=None):
         from lumen.query.retrieval.contracts import RetrievalBundle
 
         self.asked.append(signal.turn_index)
@@ -225,7 +225,7 @@ class TestWhatTheTurnReportsGathering:
         from lumen.schemas.enums import RetrievalPass
 
         class Broken:
-            def retrieve(self, signal, session):
+            def retrieve(self, signal, session, *, now=None):
                 return RetrievalBundle(
                     session_id=signal.session_id,
                     turn_index=signal.turn_index,

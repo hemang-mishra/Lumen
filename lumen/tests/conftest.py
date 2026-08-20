@@ -1565,6 +1565,7 @@ def api_client(graph_store, ops_store):
     from fastapi.testclient import TestClient
 
     from lumen.api.deps import get_graph, get_ops, get_reporter
+    from lumen.api.events import EventBus
     from lumen.api.main import create_app
     from lumen.config import AppConfig
     from lumen.pipeline.macroextraction.service import MacroextractionService
@@ -1586,9 +1587,11 @@ def api_client(graph_store, ops_store):
 
     # The stores are supplied directly, so the application's own startup —
     # which would open a second pair against the configured paths — is
-    # skipped rather than run and thrown away.
+    # skipped rather than run and thrown away. The event bus comes with them:
+    # it is made at startup too, and publishing to nobody costs nothing.
     app.state.graph = graph_store
     app.state.ops = ops_store
+    app.state.events = EventBus()
 
     # Server-side failures are answered rather than re-raised, because
     # what the caller receives when something breaks is the thing being
