@@ -435,9 +435,12 @@ surviving a sign-out on a shared laptop is the failure this exists to prevent.
 
 ### 5.1 Theme
 
-**FR-XT1** Two complete themes: dark and light. Dark is the default and the reference —
-the look to aim for is a real product's dark mode (ChatGPT's is the stated reference), not
-a dimmed light theme.
+**FR-XT1** Two complete themes: dark and light. Dark is the **reference** — the theme we
+design against first — but not the forced starting state: the app follows the system setting
+until somebody chooses (FR-XT3), which is the behaviour that keeps light a theme people
+actually see rather than one that quietly rots. *Amended in Goal 23, which found this line
+and FR-XT3 giving opposite instructions.* The look to aim for is a real product's dark mode
+(ChatGPT's is the stated reference), not a dimmed light theme.
 **FR-XT2** Light is an equal, not an afterthought. Every surface, every state, every chart
 and the graph explorer must be designed and reviewed in both. A screen that only works in
 one is not done.

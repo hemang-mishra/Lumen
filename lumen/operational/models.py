@@ -41,6 +41,7 @@ from lumen.operational.enums import (
     ImportStatus,
     JobStatus,
     StageStatus,
+    UserStatus,
 )
 
 
@@ -510,6 +511,111 @@ class DataErasureAudit(Base):
     initiated_by: Mapped[str] = mapped_column(String(48), nullable=False)
     status: Mapped[str] = mapped_column(
         String(32), nullable=False, default=ErasureStatus.IN_PROGRESS.value
+    )
+
+
+class User(Base):
+    """
+    A person, as opposed to a setting.
+
+    Their identifier is generated and never derived from anything about
+    them. It is already a foreign key in seven tables and will become a
+    directory name, which between them make it permanent — and the two
+    obvious alternatives are both things that change: people move email
+    address, and a sign-in provider's identifier lasts only as long as the
+    account does.
+
+    token_version is how every session belonging to somebody is ended at
+    once. Access tokens are deliberately not checkable against a database,
+    so revocation has to be a number they carry that stops matching.
+    """
+
+    __tablename__ = "users"
+
+    user_id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    email: Mapped[str] = mapped_column(String(320), nullable=False, unique=True)
+    display_name: Mapped[str] = mapped_column(String(256), nullable=False, default="")
+    avatar_url: Mapped[str | None] = mapped_column(String(1024))
+
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, nullable=False
+    )
+    last_seen_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+    status: Mapped[str] = mapped_column(
+        String(32), nullable=False, default=UserStatus.ACTIVE.value
+    )
+    token_version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+
+
+class UserIdentity(Base):
+    """
+    One account somebody signs in with.
+
+    A separate table from the person on purpose. Somebody is not their Google
+    account: adding a second way to sign in, or letting them move from a
+    personal account to a work one without losing years of history, is a row
+    here rather than a change to what a user is.
+    """
+
+    __tablename__ = "user_identities"
+
+    provider: Mapped[str] = mapped_column(String(32), primary_key=True)
+    subject: Mapped[str] = mapped_column(String(256), primary_key=True)
+    user_id: Mapped[str] = mapped_column(
+        String(128), ForeignKey("users.user_id", ondelete="CASCADE"),
+        nullable=False, index=True,
+    )
+    email_at_link: Mapped[str] = mapped_column(String(320), nullable=False, default="")
+    linked_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, nullable=False
+    )
+
+
+class RefreshToken(Base):
+    """
+    One session somebody is holding.
+
+    The token is not here. What is stored is a hash of it, so reading this
+    table cannot produce a working session — the same reason a password
+    database stores hashes.
+
+    rotated_to is the interesting column. A refresh token is exchanged for a
+    new one every time it is used, and the old one records what replaced it.
+    A token arriving with that column already set has been used twice, which
+    is either theft or a race; both are answered by ending the entire chain,
+    which is what turns a stolen token from a permanent compromise into
+    something somebody finds out about.
+    """
+
+    __tablename__ = "refresh_tokens"
+
+    token_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    user_id: Mapped[str] = mapped_column(
+        String(128), ForeignKey("users.user_id", ondelete="CASCADE"),
+        nullable=False, index=True,
+    )
+    token_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+
+    issued_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, nullable=False
+    )
+    expires_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False
+    )
+    rotated_to: Mapped[str | None] = mapped_column(String(64))
+    revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+    user_agent: Mapped[str | None] = mapped_column(String(512))
+    # Hashed, so somebody's sessions can be listed without this database
+    # keeping a record of where they have been.
+    ip_hash: Mapped[str | None] = mapped_column(String(64))
+
+    __table_args__ = (
+        # Unique because the hash *is* the token as far as this table is
+        # concerned: two rows sharing one would mean two sessions that cannot
+        # be told apart, and the lookup on every renewal is this index.
+        Index("ix_refresh_tokens_hash", "token_hash", unique=True),
     )
 
 

@@ -28,7 +28,8 @@ from __future__ import annotations
 
 from fastapi import APIRouter, Depends
 
-from lumen.api.deps import get_config, get_personas
+from lumen.api.deps import get_config, get_personas, require_identity
+from lumen.auth import Identity
 from lumen.api.errors import BadRequest
 from lumen.api.schemas import (
     PersonaSectionView,
@@ -47,6 +48,7 @@ router = APIRouter(prefix="/settings", tags=["settings"])
 def read_the_instruction(
     personas: PersonaStore = Depends(get_personas),
     config: AppConfig = Depends(get_config),
+    identity: Identity = Depends(require_identity),
 ) -> PersonaView:
     """
     What the assistant is currently told, and what it would be told by default.
@@ -57,7 +59,7 @@ def read_the_instruction(
     one of these needs to know.
     """
     return _view(
-        personas.resolve(config.user_id), personas.overrides(config.user_id)
+        personas.resolve(identity.user_id), personas.overrides(identity.user_id)
     )
 
 
@@ -66,6 +68,7 @@ def change_the_instruction(
     request: PersonaUpdateRequest,
     personas: PersonaStore = Depends(get_personas),
     config: AppConfig = Depends(get_config),
+    identity: Identity = Depends(require_identity),
 ) -> PersonaView:
     """
     Rewrite one or more sections, leaving the others alone.
@@ -80,17 +83,20 @@ def change_the_instruction(
         raise BadRequest("this request does not change anything")
 
     try:
-        personas.save(config.user_id, changes)
+        personas.save(identity.user_id, changes)
     except SectionTooLong as exc:
         raise BadRequest(str(exc)) from exc
 
-    return read_the_instruction(personas=personas, config=config)
+    return read_the_instruction(
+        personas=personas, config=config, identity=identity
+    )
 
 
 @router.delete("/persona", response_model=PersonaView)
 def put_the_instruction_back(
     personas: PersonaStore = Depends(get_personas),
     config: AppConfig = Depends(get_config),
+    identity: Identity = Depends(require_identity),
 ) -> PersonaView:
     """
     Drop every override and go back to the wording Lumen ships with.
@@ -99,8 +105,10 @@ def put_the_instruction_back(
     this way keeps following later improvements to the wording instead of
     being frozen at whatever the default happened to say today.
     """
-    personas.reset(config.user_id)
-    return read_the_instruction(personas=personas, config=config)
+    personas.reset(identity.user_id)
+    return read_the_instruction(
+        personas=personas, config=config, identity=identity
+    )
 
 
 def _view(effective: Persona, overrides: dict[str, str]) -> PersonaView:

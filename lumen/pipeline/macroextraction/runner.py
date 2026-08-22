@@ -108,7 +108,7 @@ def run_report(
         graph=graph,
         ops=ops,
         config=settings.macro,
-        user_id=settings.user_id,
+        user_id=settings.default_user_id,
     )
     if gathered.is_empty:
         logger.info(

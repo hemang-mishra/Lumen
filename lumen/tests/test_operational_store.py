@@ -144,7 +144,7 @@ class TestConfiguration:
         config = AppConfig()
         assert isinstance(config.operational, OperationalConfig)
         assert isinstance(config.observability, ObservabilityConfig)
-        assert config.user_id
+        assert config.default_user_id
 
 
 class TestLogFormattingEdges:

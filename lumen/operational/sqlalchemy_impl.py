@@ -34,6 +34,7 @@ from lumen.operational.enums import (
     HITL_ENTRY_TYPE_RANK,
     OPEN_HITL_STATUSES,
     TERMINAL_IMPORT_STATUSES,
+    AuthProvider,
     BufferSource,
     BufferStatus,
     ErasureStatus,
@@ -43,6 +44,7 @@ from lumen.operational.enums import (
     JobStatus,
     PipelineStage,
     StageStatus,
+    UserStatus,
     WriteTarget,
 )
 from lumen.operational.repositories import (
@@ -63,8 +65,13 @@ from lumen.operational.schemas import (
     StageMetrics,
     StageRunRecord,
     StoredErasureAudit,
+    StoredSession,
+    UserRecord,
     UserSettingRecord,
     WriteLogEntry,
+    hash_ip,
+    hash_token,
+    new_user_id,
 )
 from lumen.schemas.enums import (
     HitlResolutionChoice,
@@ -1472,6 +1479,215 @@ class SqlAlchemyImportRepository:
             return [_to_import_record(row) for row in rows]
 
 
+class SqlAlchemyIdentityRepository:
+    """
+    Stores people, the accounts they sign in with, and the sessions they hold.
+
+    The one place in this file where something is written down as a hash
+    rather than as itself. Reading this table says who exists; it does not
+    let anybody become them.
+    """
+
+    def __init__(self, sessions: _SessionManager) -> None:
+        self._sessions = sessions
+
+    # ------------------------------------------------------------------
+    # People
+    # ------------------------------------------------------------------
+
+    def find_user(self, user_id: str) -> UserRecord | None:
+        with self._sessions.session() as db:
+            row = db.get(models.User, user_id)
+            return _to_user(row) if row else None
+
+    def find_by_email(self, email: str) -> UserRecord | None:
+        with self._sessions.session() as db:
+            row = db.scalars(
+                select(models.User).where(
+                    func.lower(models.User.email) == email.strip().lower()
+                )
+            ).first()
+            return _to_user(row) if row else None
+
+    def find_by_identity(
+        self, provider: AuthProvider, subject: str
+    ) -> UserRecord | None:
+        with self._sessions.session() as db:
+            link = db.get(models.UserIdentity, (provider.value, subject))
+            if link is None:
+                return None
+            row = db.get(models.User, link.user_id)
+            return _to_user(row) if row else None
+
+    def create_user(
+        self, *, email: str, display_name: str, avatar_url: str | None
+    ) -> UserRecord:
+        with self._sessions.session() as db:
+            user = models.User(
+                user_id=new_user_id(),
+                email=email.strip().lower(),
+                display_name=display_name,
+                avatar_url=avatar_url,
+                last_seen_at=_utcnow(),
+            )
+            db.add(user)
+            db.flush()
+            created = _to_user(user)
+
+        logger.info("a person was created", extra={"user_id": created.user_id})
+        return created
+
+    def link_identity(
+        self, user_id: str, *, provider: AuthProvider, subject: str, email: str
+    ) -> None:
+        with self._sessions.session() as db:
+            existing = db.get(models.UserIdentity, (provider.value, subject))
+            if existing is not None:
+                # Already linked. The address is refreshed because it is
+                # theirs to change, and the link itself does not move.
+                existing.email_at_link = email
+                db.flush()
+                return
+            db.add(
+                models.UserIdentity(
+                    provider=provider.value,
+                    subject=subject,
+                    user_id=user_id,
+                    email_at_link=email,
+                )
+            )
+            db.flush()
+
+    def touch(self, user_id: str, *, at: datetime, display_name: str = "") -> None:
+        with self._sessions.session() as db:
+            user = db.get(models.User, user_id)
+            if user is None:
+                return
+            user.last_seen_at = at
+            if display_name:
+                user.display_name = display_name
+            db.flush()
+
+    def bump_token_version(self, user_id: str) -> int:
+        with self._sessions.session() as db:
+            user = db.get(models.User, user_id)
+            if user is None:
+                raise RecordNotFoundError(f"no user with id {user_id!r}")
+            user.token_version += 1
+            db.flush()
+            version = user.token_version
+
+        logger.warning(
+            "every session for a user was ended",
+            extra={"user_id": user_id, "token_version": version},
+        )
+        return version
+
+    def set_status(self, user_id: str, status: UserStatus) -> None:
+        with self._sessions.session() as db:
+            user = db.get(models.User, user_id)
+            if user is None:
+                raise RecordNotFoundError(f"no user with id {user_id!r}")
+            user.status = status.value
+            db.flush()
+
+    # ------------------------------------------------------------------
+    # Sessions
+    # ------------------------------------------------------------------
+
+    def save_session(
+        self,
+        *,
+        token_id: str,
+        user_id: str,
+        token_hash: str,
+        issued_at: datetime,
+        expires_at: datetime,
+        user_agent: str | None = None,
+        ip_hash: str | None = None,
+    ) -> None:
+        with self._sessions.session() as db:
+            db.add(
+                models.RefreshToken(
+                    token_id=token_id,
+                    user_id=user_id,
+                    token_hash=token_hash,
+                    issued_at=issued_at,
+                    expires_at=expires_at,
+                    user_agent=user_agent,
+                    ip_hash=ip_hash,
+                )
+            )
+            db.flush()
+
+    def find_session(self, token_hash: str) -> StoredSession | None:
+        with self._sessions.session() as db:
+            row = db.scalars(
+                select(models.RefreshToken).where(
+                    models.RefreshToken.token_hash == token_hash
+                )
+            ).first()
+            return _to_session(row) if row else None
+
+    def mark_rotated(self, token_id: str, *, replacement: str) -> None:
+        with self._sessions.session() as db:
+            row = db.get(models.RefreshToken, token_id)
+            if row is None:
+                raise RecordNotFoundError(f"no session with id {token_id!r}")
+            row.rotated_to = replacement
+            db.flush()
+
+    def revoke_session(self, token_id: str, *, at: datetime) -> None:
+        with self._sessions.session() as db:
+            row = db.get(models.RefreshToken, token_id)
+            if row is None:
+                return
+            row.revoked_at = at
+            db.flush()
+
+    def revoke_chain(self, token_id: str, *, at: datetime) -> int:
+        """
+        End this session and everything it was exchanged for.
+
+        Walked forward rather than ending only the token presented, because
+        by the time a reused token shows up, whoever else has it may already
+        be holding something newer.
+        """
+        ended = 0
+        with self._sessions.session() as db:
+            seen: set[str] = set()
+            current: str | None = token_id
+            while current and current not in seen:
+                seen.add(current)
+                row = db.get(models.RefreshToken, current)
+                if row is None:
+                    break
+                if row.revoked_at is None:
+                    row.revoked_at = at
+                    ended += 1
+                current = row.rotated_to
+            db.flush()
+
+        logger.warning(
+            "a session chain was ended after a token was presented twice",
+            extra={"ended": ended},
+        )
+        return ended
+
+    def revoke_all_sessions(self, user_id: str, *, at: datetime) -> int:
+        with self._sessions.session() as db:
+            ended = db.execute(
+                update(models.RefreshToken)
+                .where(
+                    models.RefreshToken.user_id == user_id,
+                    models.RefreshToken.revoked_at.is_(None),
+                )
+                .values(revoked_at=at)
+            ).rowcount
+            db.flush()
+        return int(ended)
+
+
 class SQLAlchemyOperationalStore:
     """
     One way in to all operational data.
@@ -1498,6 +1714,7 @@ class SQLAlchemyOperationalStore:
         self.settings = SqlAlchemyUserSettingsRepository(self._sessions)
         self.erasure = SqlAlchemyDataErasureAuditRepository(self._sessions)
         self.imports = SqlAlchemyImportRepository(self._sessions)
+        self.identities = SqlAlchemyIdentityRepository(self._sessions)
 
     @property
     def engine(self) -> Engine:
@@ -1778,6 +1995,33 @@ def _to_import_record(row: models.ImportedConversation) -> ImportRecord:
         error=row.error,
         created_at=_aware(row.created_at),
         finished_at=_aware(row.finished_at),
+    )
+
+
+def _to_user(row: models.User) -> UserRecord:
+    """One person, as stored."""
+    return UserRecord(
+        user_id=row.user_id,
+        email=row.email,
+        display_name=row.display_name,
+        avatar_url=row.avatar_url,
+        created_at=_aware(row.created_at),
+        last_seen_at=_aware(row.last_seen_at),
+        status=UserStatus(row.status),
+        token_version=row.token_version,
+    )
+
+
+def _to_session(row: models.RefreshToken) -> StoredSession:
+    """One session, without the token that would make it usable."""
+    return StoredSession(
+        token_id=row.token_id,
+        user_id=row.user_id,
+        issued_at=_aware(row.issued_at),
+        expires_at=_aware(row.expires_at),
+        rotated_to=row.rotated_to,
+        revoked_at=_aware(row.revoked_at),
+        user_agent=row.user_agent,
     )
 
 

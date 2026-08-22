@@ -371,7 +371,7 @@ class TestTurningUploadsOff:
         app = create_app(
             AppConfig(
                 ingest=IngestConfig(enabled=False),
-                graph=GraphConfig(db_path=str(tmp_path / "graph")),
+                graph=GraphConfig(db_root=str(tmp_path / "graph")),
                 operational=OperationalConfig(db_url=f"sqlite:///{tmp_path / 'ops.db'}"),
             )
         )
@@ -410,12 +410,16 @@ class TestTurningUploadsOff:
         with pytest.raises(Unavailable, match="does not accept uploads"):
             get_worker(request)
 
-    def test_the_rest_of_the_api_is_unaffected(self, graph_store, ops_store):
+    def test_the_rest_of_the_api_is_unaffected(
+        self, graph_store, vector_store, ops_store
+    ):
         from fastapi.testclient import TestClient
+
+        from lumen.tests.conftest import registry_for
 
         app = create_app(AppConfig(ingest=IngestConfig(enabled=False)))
         app.dependency_overrides[get_ops] = lambda: ops_store
-        app.state.graph = graph_store
+        app.state.stores = registry_for(graph_store, vector_store)
         app.state.ops = ops_store
         client = TestClient(app, raise_server_exceptions=False)
 

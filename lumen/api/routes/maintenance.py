@@ -24,7 +24,8 @@ from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, Query
 
-from lumen.api.deps import get_config, get_eraser, get_graph
+from lumen.api.deps import get_config, get_eraser, get_graph, require_identity
+from lumen.auth import Identity
 from lumen.api.errors import BadRequest, Conflict, NotFound
 from lumen.api.schemas import (
     ErasureAuditListView,
@@ -52,6 +53,7 @@ router = APIRouter(prefix="/maintenance", tags=["maintenance"])
 
 @router.get("/erasure/preview", response_model=ErasurePreviewView)
 def preview_erasure(
+    identity: Identity = Depends(require_identity),
     eraser: ErasureService = Depends(get_eraser),
     config: AppConfig = Depends(get_config),
     scope: str = Query(default="ENTRY"),
@@ -65,7 +67,7 @@ def preview_erasure(
     order to find out what yes would mean.
     """
     request = _as_request(
-        config, scope=scope, entry_id=entry_id, confirmation=_phrase(config)
+        identity, scope=scope, entry_id=entry_id, confirmation=_phrase(config)
     )
     return _as_preview(eraser.preview(request))
 
@@ -73,6 +75,7 @@ def preview_erasure(
 @router.post("/erasure", response_model=ErasureReportView)
 def run_erasure(
     body: ErasureRequestBody,
+    identity: Identity = Depends(require_identity),
     eraser: ErasureService = Depends(get_eraser),
     config: AppConfig = Depends(get_config),
 ) -> ErasureReportView:
@@ -85,7 +88,7 @@ def run_erasure(
     simply not this request's turn.
     """
     request = _as_request(
-        config,
+        identity,
         scope=body.scope,
         entry_id=body.entry_id,
         confirmation=body.confirmation,
@@ -100,6 +103,7 @@ def run_erasure(
 def list_erasure_audits(
     eraser: ErasureService = Depends(get_eraser),
     config: AppConfig = Depends(get_config),
+    identity: Identity = Depends(require_identity),
 ) -> ErasureAuditListView:
     """Every erasure recorded, newest first, with nothing in it about what was erased."""
     audits = [
@@ -113,7 +117,7 @@ def list_erasure_audits(
             initiated_by=record.initiated_by.value,
             status=record.status.value,
         )
-        for record in eraser.audits(config.user_id)
+        for record in eraser.audits(identity.user_id)
     ]
     return ErasureAuditListView(audits=audits, count=len(audits))
 
@@ -176,7 +180,11 @@ def explain_score(
 
 
 def _as_request(
-    config: AppConfig, *, scope: str, entry_id: str | None, confirmation: str
+    identity: Identity,
+    *,
+    scope: str,
+    entry_id: str | None,
+    confirmation: str,
 ) -> ErasureRequest:
     """
     Read an erasure request, refusing anything the shape rules reject.
@@ -186,7 +194,7 @@ def _as_request(
     """
     try:
         return ErasureRequest(
-            user_id=config.user_id,
+            user_id=identity.user_id,
             scope=ErasureScope(scope.upper()),
             entry_id=entry_id,
             confirmation=confirmation,

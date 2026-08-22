@@ -107,8 +107,16 @@ one that survives its own end of the scale.
 - **DL-11** `--surface-sunken` is for content that is *inside* something — payload blocks,
   code, transcripts. It is the only place a container may be darker than its parent in dark
   mode.
-- **DL-12** `--text-tertiary` is for metadata and ids only. It does not meet AA for body text
-  and must never carry a sentence a person needs to read.
+- **DL-12** `--text-tertiary` is for metadata and ids only, and must never carry a sentence
+  a person needs to read.
+
+  *Amended in Goal 23.* This rule previously said the token "does not meet AA", which
+  contradicted `FR-XA2` outright — and an id nobody can read is not quiet, it is missing.
+  The values were darkened until they clear 4.5:1 on all three surfaces in both themes,
+  which they now do; the rule about what it may carry stands, as a matter of hierarchy
+  rather than of legibility. The same pass moved `--positive` and `--caution` in light,
+  which failed the floor when a chip put them on their own faint tint. Enforced by a test
+  over the palette, not by review.
 
 ### 4.2 Accent
 
@@ -174,20 +182,25 @@ reinforcement, so we need very little of it.
 
 - **DL-19 — The scale, and nothing between.**
 
+  *Amended in Goal 23.* These were originally named `--text-*`, which collided with the
+  colour names in §4.1 — `--text` is a colour and `--text-body` was a size, and one
+  stylesheet cannot hold both meanings. The colours kept the prefix, since they are used
+  far more often; the sizes became `--type-*`.
+
 | Token | Size / line-height | Used for |
 |---|---|---|
-| `--text-meta` | 12 / 1.4 | ids, timestamps, counts |
-| `--text-dense` | 13 / 1.45 | compact-density body, table cells |
-| `--text-body` | 15 / 1.5 | default UI text |
-| `--text-reading` | 17 / 1.7 | journal text, assistant replies |
-| `--text-title` | 20 / 1.35 | section titles |
-| `--text-page` | 24 / 1.25 | page titles |
+| `--type-meta` | 12 / 1.4 | ids, timestamps, counts |
+| `--type-dense` | 13 / 1.45 | compact-density body, table cells |
+| `--type-body` | 15 / 1.5 | default UI text |
+| `--type-reading` | 17 / 1.7 | journal text, assistant replies |
+| `--type-title` | 20 / 1.35 | section titles |
+| `--type-page` | 24 / 1.25 | page titles |
 
 - **DL-20** Weights: **400, 500, 600**. Nothing lighter, nothing heavier, no italics except
   inside quoted journal text.
 - **DL-21** Letter spacing: `-0.01em` at 20px and above, `0` below. No tracked-out uppercase
   anywhere.
-- **DL-22** Section labels are sentence case in `--text-secondary` at `--text-body`/500 —
+- **DL-22** Section labels are sentence case in `--text-secondary` at `--type-body`/500 —
   not uppercase eyebrows.
 - **DL-23** Reading measure is capped at **68ch**. UI text is not capped but its container
   is (§6).
@@ -285,7 +298,7 @@ ChatGPT nor Gemini has to render a thirty-stage pipeline trace.
   hairline), `ghost` (text only). Destructive actions are `secondary` or `ghost` with
   `--critical` text — never a large red fill, which shouts on a screen about someone's inner
   life.
-- **DL-45 — Chips are outlines.** 6px radius, `--text-meta`, hairline border, colour from
+- **DL-45 — Chips are outlines.** 6px radius, `--type-meta`, hairline border, colour from
   DL-16. Filled chips are reserved for the single "needs you" state.
 - **DL-46 — Four states, one component.** Every list and panel handles loading, empty,
   filtered-to-empty, and failed, with a distinct sentence for each (FR-XS1). One sentence,
@@ -314,9 +327,9 @@ The canonical way *any* graph record appears anywhere in the app. It is the dire
 principle P6 ("an id is not an answer").
 
 ```
-  What it says, in its own words.                    ← --text-body, --text
-  observation · 11 Jun 2026 · high · active          ← --text-meta, --text-secondary
-  obs_2026_06_11_01_003                        ⧉     ← --text-meta, mono, --text-tertiary, copy
+  What it says, in its own words.                    ← --type-body, --text
+  observation · 11 Jun 2026 · high · active          ← --type-meta, --text-secondary
+  obs_2026_06_11_01_003                        ⧉     ← --type-meta, mono, --text-tertiary, copy
 ```
 
 - The record's own words are the heading. Always.
@@ -362,7 +375,7 @@ How one reconciliation reads (FR-S5-8…FR-S5-15). Direction is **always new →
 
 ### DL-54 — Journal text
 
-`--text-reading` (17/1.7), capped at 68ch, `white-space: pre-wrap`, `overflow-wrap: anywhere`.
+`--type-reading` (17/1.7), capped at 68ch, `white-space: pre-wrap`, `overflow-wrap: anywhere`.
 **Rendered as text and never as markup** — an export can contain anything, and this is a
 safety rule as much as a typographic one (FR-XA5).
 

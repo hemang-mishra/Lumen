@@ -26,6 +26,7 @@ from typing import Any
 
 from fastapi import APIRouter, Body, Depends, File, Query, UploadFile, status
 
+from lumen.auth import Identity
 from lumen.api.errors import BadRequest, NotFound, Unavailable
 from lumen.api.schemas import (
     BatchStatusView,
@@ -38,7 +39,7 @@ from lumen.config import AppConfig
 from lumen.ingest import ExportFormatError, IngestWorker, parse_export, stage_conversations
 from lumen.ingest.contracts import ImportPlan, StagedConversation
 from lumen.operational.repositories import OperationalStore
-from lumen.api.deps import get_config, get_ops, get_worker
+from lumen.api.deps import get_config, get_ops, get_worker, require_identity
 from lumen.providers.errors import ProviderError
 
 logger = logging.getLogger(__name__)
@@ -62,6 +63,7 @@ MAX_HISTORY = 200
 )
 async def upload_file(
     file: UploadFile = File(..., description="A chat export, as JSON"),
+    identity: Identity = Depends(require_identity),
     ops: OperationalStore = Depends(get_ops),
     worker: IngestWorker = Depends(get_worker),
     config: AppConfig = Depends(get_config),
@@ -85,6 +87,7 @@ async def upload_file(
         ops=ops,
         worker=worker,
         config=config,
+        identity=identity,
     )
 
 
@@ -97,6 +100,7 @@ async def upload_file(
 def upload_json(
     payload: Any = Body(..., description="A conversation object, or a list of them"),
     filename: str = Query("", description="What to call this in the history"),
+    identity: Identity = Depends(require_identity),
     ops: OperationalStore = Depends(get_ops),
     worker: IngestWorker = Depends(get_worker),
     config: AppConfig = Depends(get_config),
@@ -108,7 +112,12 @@ def upload_json(
     respect to the upload except that the JSON has already been decoded.
     """
     return _accept(
-        payload, filename=filename, ops=ops, worker=worker, config=config
+        payload,
+        filename=filename,
+        ops=ops,
+        worker=worker,
+        config=config,
+        identity=identity,
     )
 
 
@@ -121,11 +130,12 @@ def list_imports(
     limit: int = Query(50, ge=1, le=MAX_HISTORY, description="How many to return"),
     ops: OperationalStore = Depends(get_ops),
     config: AppConfig = Depends(get_config),
+    identity: Identity = Depends(require_identity),
 ) -> list[ImportView]:
     """Past imports, newest first."""
     return [
         ImportView.of(record)
-        for record in ops.imports.list_recent(config.user_id, limit=limit)
+        for record in ops.imports.list_recent(identity.user_id, limit=limit)
     ]
 
 
@@ -166,6 +176,7 @@ def _accept(
     ops: OperationalStore,
     worker: IngestWorker,
     config: AppConfig,
+    identity: Identity,
 ) -> UploadReceipt:
     """
     Read a file, store what it held, and queue the work.
@@ -180,7 +191,7 @@ def _accept(
     plan = _parse(payload, filename, config)
     batch_id = f"batch_{uuid.uuid4().hex[:12]}"
     staged = stage_conversations(
-        plan, ops=ops, user_id=config.user_id, batch_id=batch_id
+        plan, ops=ops, user_id=identity.user_id, batch_id=batch_id
     )
 
     queued = [item for item in staged if not item.already_imported]

@@ -373,7 +373,7 @@ def the_real_databases_are_out_of_reach(tmp_path_factory, monkeypatch):
     only decides where "unspecified" points.
     """
     root = tmp_path_factory.mktemp("lumen-test-stores")
-    monkeypatch.setenv("LUMEN_GRAPH_DB_PATH", str(root / "graph.db"))
+    monkeypatch.setenv("LUMEN_GRAPH_DB_ROOT", str(root / "graphs"))
     monkeypatch.setenv("LUMEN_OPS_DB_URL", f"sqlite:///{root / 'ops.db'}")
     monkeypatch.setenv("LUMEN_VECTOR_LOCATION", ":memory:")
 
@@ -706,6 +706,61 @@ def vector_store():
     provider.init_collection()
     yield provider
     provider.close()
+
+
+def registry_for(graph=None, vectors=None):
+    """
+    A registry that hands out these stores, whoever asks for them.
+
+    Most tests are about something other than isolation — how a turn is read,
+    what a report counts — and for those, one graph shared by everybody is
+    exactly right. Isolation itself is proved in its own file against real
+    per-person directories.
+
+    Lets a test go on saying "here is the graph" while the code under test
+    says "give me this person's graph", which is the only difference the
+    store registry made to any of them.
+    """
+    from lumen.config import AppConfig
+    from lumen.stores import StoreRegistry
+    from lumen.stores.contracts import UserStores
+
+    class _Fixed(StoreRegistry):
+        def _open(self, key):
+            return UserStores(user_id=key, graph=graph, vectors=vectors)
+
+        def _check(self, stores):
+            """Nothing to check — these were handed in already open."""
+
+    return _Fixed(AppConfig())
+
+
+@pytest.fixture
+def store_registry(graph_store, vector_store, tmp_path):
+    """
+    A registry handing out the test stores, whoever asks.
+
+    Every person gets the same graph and index here, which is exactly what a
+    test wants: the isolation itself is proved in its own file, against real
+    per-person directories, and everything else only needs a registry-shaped
+    thing to borrow from.
+    """
+    from lumen.config import AppConfig, GraphConfig
+    from lumen.stores import StoreRegistry
+
+    class _Shared(StoreRegistry):
+        def _open(self, key):
+            from lumen.stores.contracts import UserStores
+
+            return UserStores(user_id=key, graph=graph_store, vectors=vector_store)
+
+        def _check(self, stores):
+            """Nothing to check — these were handed in already open."""
+
+    registry = _Shared(
+        AppConfig(graph=GraphConfig(db_root=str(tmp_path / "graphs")))
+    )
+    yield registry
 
 
 @pytest.fixture
@@ -1560,7 +1615,7 @@ def reconciliation_outcome(sample_pattern, sample_decision_audit):
 
 
 @pytest.fixture
-def api_client(graph_store, ops_store):
+def api_client(graph_store, vector_store, ops_store):
     """A client for the web API, wired to the test databases."""
     from fastapi.testclient import TestClient
 
@@ -1579,7 +1634,7 @@ def api_client(graph_store, ops_store):
     # without one — so the route can be exercised without a stand-in model
     # having to answer for it.
     reporter = MacroextractionService(
-        config=AppConfig(), graph=graph_store, ops=ops_store
+        config=AppConfig(), stores=registry_for(graph_store), ops=ops_store
     )
     reporter._models = {ModelRole.THINKING: None, ModelRole.LIGHTWEIGHT: None}
     app.dependency_overrides[get_reporter] = lambda: reporter
@@ -1589,7 +1644,7 @@ def api_client(graph_store, ops_store):
     # which would open a second pair against the configured paths — is
     # skipped rather than run and thrown away. The event bus comes with them:
     # it is made at startup too, and publishing to nobody costs nothing.
-    app.state.graph = graph_store
+    app.state.stores = registry_for(graph_store, vector_store)
     app.state.ops = ops_store
     app.state.events = EventBus()
 
@@ -1692,7 +1747,7 @@ def make_formulator():
     def _make(graph, *, script=None, config=None, llm=None):
         formulator = QueryFormulator(
             llm=llm or FakeLLMProvider(script if script is not None else []),
-            graph=graph,
+            stores=registry_for(graph),
             config=config,
             runner=runner,
         )
@@ -1889,8 +1944,7 @@ def make_retriever(graph_store, vector_store, embedder):
 
     def _make(*, llm=None, config=None, graph=None, vectors=None, embed=None):
         retriever = ConversationalRetriever(
-            graph=graph or graph_store,
-            vectors=vectors or vector_store,
+            stores=registry_for(graph or graph_store, vectors or vector_store),
             embedder=embed or embedder,
             llm=llm or FakeLLMProvider([]),
             config=config,
@@ -2371,8 +2425,7 @@ def reviewer(graph_store, ops_store, vector_store, embedder):
 
     return ReviewService(
         config=AppConfig(),
-        graph=graph_store,
+        stores=registry_for(graph_store, vector_store),
         ops=ops_store,
-        open_vectors=lambda: vector_store,
         open_embedder=lambda: embedder,
     )

@@ -14,6 +14,8 @@ from datetime import UTC, date, datetime
 
 import pytest
 
+from lumen.tests.conftest import registry_for
+
 from lumen.config import AppConfig
 from lumen.erasure.contracts import ErasureRefused
 from lumen.erasure.service import ErasureService
@@ -28,7 +30,9 @@ def maintenance_client(api_client, graph_store, vector_store, ops_store):
     from lumen.api.deps import get_eraser
 
     service = ErasureService(
-        config=AppConfig(), graph=graph_store, vectors=vector_store, ops=ops_store
+        config=AppConfig(),
+        stores=registry_for(graph_store, vector_store),
+        ops=ops_store,
     )
     api_client.app.dependency_overrides[get_eraser] = lambda: service
     api_client.app.state.eraser = service

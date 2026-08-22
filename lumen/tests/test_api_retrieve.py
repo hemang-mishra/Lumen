@@ -13,6 +13,8 @@ from __future__ import annotations
 import json
 
 import pytest
+
+from lumen.tests.conftest import registry_for
 from fastapi.testclient import TestClient
 
 from lumen.api.deps import get_formulator, get_graph, get_ops, get_retriever
@@ -56,11 +58,11 @@ def retrieve_client(graph_store, ops_store, vector_store, embedder):
 
     def _make(readings=(), inventions=("an earlier note",)):
         formulator = QueryFormulator(
-            llm=FakeLLMProvider(list(readings)), graph=graph_store
+            llm=FakeLLMProvider(list(readings)),
+            stores=registry_for(graph_store),
         )
         retriever = ConversationalRetriever(
-            graph=graph_store,
-            vectors=vector_store,
+            stores=registry_for(graph_store, vector_store),
             embedder=embedder,
             llm=FakeLLMProvider({"ITEMS:": invented(inventions)}),
         )
@@ -246,7 +248,7 @@ class TestWhenNothingCanSearch:
             def get(self):
                 raise ProviderError("no embedder configured")
 
-        formulator = QueryFormulator(llm=FakeLLMProvider([]), graph=graph_store)
+        formulator = QueryFormulator(llm=FakeLLMProvider([]), stores=registry_for(graph_store))
         app = create_app()
         app.dependency_overrides[get_graph] = lambda: graph_store
         app.dependency_overrides[get_ops] = lambda: ops_store
@@ -268,7 +270,7 @@ class TestWhenNothingCanSearch:
     def test_a_deployment_that_cannot_search_at_all_refuses(
         self, graph_store, ops_store
     ):
-        formulator = QueryFormulator(llm=FakeLLMProvider([]), graph=graph_store)
+        formulator = QueryFormulator(llm=FakeLLMProvider([]), stores=registry_for(graph_store))
         app = create_app()
         app.dependency_overrides[get_graph] = lambda: graph_store
         app.dependency_overrides[get_ops] = lambda: ops_store

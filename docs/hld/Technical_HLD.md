@@ -21,7 +21,7 @@ The fundamental insight: **the pipeline is the product**. The value of Lumen is 
 
 ```
 ┌──────────────────────────────────────────────────────────────────────────────┐
-│                           CLIENT LAYER (Next.js)                             │
+│                        CLIENT LAYER (React, static)                          │
 │   Daily Chat  │  Past Days  │  Graph Explorer  │  HITL Queue  │  Reports     │
 └───────────────────────────────┬──────────────────────────────────────────────┘
                                 │ HTTPS / WebSocket
@@ -141,16 +141,26 @@ The orchestrator defines task contracts as Pydantic models. The queue is a trans
 
 ### 2.6 Frontend
 
+*Amended in Goal 23.* This table was written when a JavaScript server was going to sit
+between the browser and FastAPI. DEC-2 in `docs/frontend/Requirements.md` removed that
+server, and every screen in Lumen is one person's private history behind a sign-in, so
+there is nothing a server could usefully render ahead of time either. What was left of
+Next.js was a build tool, and a simpler one does that job with nothing to run in
+production. shadcn/ui went the same way for a different reason: it brings its own
+vocabulary of colour names, and `Design_Language.md` DL-10 requires ours.
+
 | Layer | Choice | Rationale |
 |---|---|---|
-| Framework | **Next.js 15 (App Router)** | Full-stack: API routes handle BFF logic, no separate Node server needed for personal. React Server Components for fast load. |
-| Language | **TypeScript** | Type-safe API contracts with backend (zod schemas shared or generated from Pydantic). |
-| UI Components | **shadcn/ui + Radix** | Accessible, unstyled primitives. Gives full design control without fighting a UI library. |
-| Styling | **Tailwind CSS** | Co-located with components, works perfectly with shadcn. |
-| Graph Visualization | **react-force-graph** (2D/3D) | WebGL-rendered force-directed graph for the Knowledge Graph Explorer. Handles thousands of nodes. |
-| State Management | **Zustand** | Minimal, no boilerplate. Session buffer state, HITL queue state. |
-| Real-time | **WebSockets (native Next.js + FastAPI)** | Streaming AI responses. Pipeline progress updates. |
-| Charts | **Recharts** | Pattern frequency trends, belief evolution over time. |
+| Framework | **React 19 + Vite** | A single-page app built to static files. No server tier: under DEC-2 the browser calls FastAPI directly, and there is no public page to pre-render. |
+| Routing | **React Router** | Routing only. Data is the query layer's job, so there is one mechanism for it rather than two. |
+| Language | **TypeScript** | Types generated from the service's own OpenAPI description (FR-XC1), with a check in both test suites that fails when the two disagree. |
+| UI Components | **Radix primitives, own components** | Accessible behaviour, no inherited styling. The components `Design_Language.md` names are written here so its rules can be enforced. |
+| Styling | **Tailwind CSS v4** | Every value comes from a CSS custom property, so a utility class and a hand-written rule reach for the same token. |
+| Graph Visualization | **react-force-graph** (2D) | Force-directed graph for the explorer, with a list-shaped form for phones (FR-S6-8). Goal 27. |
+| Server state | **TanStack Query** | Caching, background refresh, retry, and one call that empties every cached answer when the signed-in person changes (FR-XI6). |
+| Local state | **Zustand** | Theme choice, composer drafts, anything that is not the service's. |
+| Real-time | **WebSockets (FastAPI)** | Streaming replies, pipeline progress. Degrades to polling. |
+| Charts | **Recharts** | Pattern frequency trends, belief evolution over time. Goal 30. |
 
 ### 2.7 LLM & Embedding Providers
 
@@ -256,7 +266,7 @@ lumen/
 │   └── api.py        ← API request/response contracts
 ├── config.py         ← AppConfig (provider injection)
 ├── workers.py        ← RQ worker entrypoint
-└── frontend/         ← Next.js app
+└── frontend/         ← React app, its own build (see §7.1)
 ```
 
 ### 3.3 Production Topology
@@ -547,46 +557,40 @@ The formulation model is resolved through the `LIGHTWEIGHT` role but built with 
 
 ## 7. Frontend Architecture
 
-### 7.1 Page Structure (Next.js App Router)
+### 7.1 Page Structure
+
+*Amended in Goal 23,* which built this. The `app/api/` handlers are gone with the BFF
+(DEC-2), and the route groups became an ordinary router.
 
 ```
-app/
-├── (auth)/
-│   ├── login/              ← Continue with Google. The only public route.
-│   └── callback/           ← receives ?code&state, posts it to the API
-├── (app)/
-│   ├── layout.tsx          ← App shell: sidebar nav, session indicator
-│   ├── chat/
-│   │   └── page.tsx        ← TODAY's session (Conversational RAG Mode)
-│   ├── history/
-│   │   ├── page.tsx        ← Past days list
-│   │   └── [date]/
-│   │       └── page.tsx    ← Past day chat (read-only + query mode)
-│   ├── graph/
-│   │   └── page.tsx        ← Knowledge Graph Explorer (react-force-graph)
-│   ├── review/
-│   │   └── page.tsx        ← HITL Review Queue (one-tap decisions)
-│   ├── reports/
-│   │   ├── page.tsx        ← Report list
-│   │   └── [period]/
-│   │       └── page.tsx    ← Weekly/Monthly/Quarterly report
-│   └── settings/
-│       └── page.tsx        ← Provider config, sensitivity settings
-└── api/
-    ├── chat/route.ts       ← BFF: stream AI response
-    ├── ingest/route.ts     ← BFF: receive external log import
-    └── graph/route.ts      ← BFF: graph data for explorer
+frontend/
+├── openapi.json            ← the service's own description, committed
+├── src/
+│   ├── styles/             ← tokens (light base, dark override), density, base layer
+│   ├── api/                ← generated types, the client, the session, the cache
+│   ├── theme/              ← theme resolution, density resolution
+│   ├── components/         ← the primitives Design_Language.md names
+│   ├── patterns/           ← the record line, journal text
+│   ├── shell/              ← app shell, navigation, the one list of sections
+│   └── routes/             ← the router, and the kitchen sink
+└── e2e/                    ← journeys, in both themes and at 375px
 ```
 
-**The `(auth)` group is real** as of Goals 21–22. It was drawn here before anything backed
-it, and `docs/frontend/Requirements.md` correctly flagged it as a route with no system behind
-it. That is now settled the other way: Lumen is multi-user, sign-in is Google, and `(auth)`
-is the only route group reachable without a token. What each screen must do is S11 in that
-document; what the service must provide is `Auth_Architecture.md`.
+**Which sections exist is one list.** `src/shell/sections.ts` holds every section the
+product will have, each marked with whether it has been built and which goal builds it.
+Only built sections appear in the navigation, and only built sections get a route — so an
+unfinished screen cannot be reached by typing its address either. A goal that builds one
+flips a single mark.
 
-Everything under `(app)` requires an identity. Under DEC-2 in the frontend requirements
-there is no BFF to enforce that, so the enforcement is the API's own — a router-level default
-dependency, not a per-route decorator.
+**Sign-in is a route outside the shell** (S11, Goal 31), and everything else is inside it.
+Under DEC-2 there is no BFF to enforce that, so the enforcement is the API's own — a
+router-level default dependency, not a per-route decorator.
+
+**Sign-in was drawn here before anything backed it**, and
+`docs/frontend/Requirements.md` correctly flagged it as a route with no system behind it.
+That is settled the other way as of Goals 21–22: Lumen is multi-user, sign-in is Google,
+and `/login` is the only address reachable without a token. What that screen must do is
+S11 in that document; what the service must provide is `Auth_Architecture.md`.
 
 ### 7.2 Key UI Surfaces
 
@@ -599,7 +603,10 @@ dependency, not a per-route decorator.
 
 **Knowledge Graph Explorer**
 - Force-directed graph (react-force-graph)
-- Node types: color-coded (Belief = blue, Pattern = orange, Episode = gray, Event = green)
+- Node types: told apart by **label and glyph, never by colour** — *withdrawn in Goal 23*.
+  This line colour-coded four of the fifteen node tables, and had no answer for the other
+  eleven. `Design_Language.md` DL-16 replaces it with a rule that covers all of them:
+  colour says what condition something is in, never what kind of thing it is.
 - Click a node → detail panel with full YAML, evidence, linked nodes
 - Timeline scrubber: see the graph at any past date (uses `valid_from` timestamps)
 - Filter by domain, sensitivity tier, date range
@@ -711,10 +718,10 @@ Phase 0 (Now): Local personal
   All services as Python modules in one FastAPI process
   Kuzu (embedded) + Qdrant (local) + SQLite
   RQ workers run in separate terminal
-  Next.js dev server
+  Vite dev server, talking to FastAPI across origins
 
 Phase 1: Personal → packaged
-  Docker Compose: FastAPI + RQ + Redis + Qdrant + Next.js
+  Docker Compose: FastAPI + RQ + Redis + Qdrant, with the built front end served as files
   Kuzu still embedded (sufficient for single user)
   Deploy to personal cloud VM (Hetzner CX22 = €4/month)
 
@@ -731,7 +738,7 @@ Phase 3: Scale
   Pipeline Workers → Celery + Kafka
   Graph Service → Neo4j Aura
   Query Service → horizontal replicas behind load balancer
-  Add CDN (Cloudflare) in front of Next.js
+  Add CDN (Cloudflare) in front of the built front end
   Per-user CRITICAL tier: isolated Qdrant namespace, local processing option
 ```
 

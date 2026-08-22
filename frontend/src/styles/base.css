@@ -1,0 +1,134 @@
+/*
+ * The ground everything stands on: the reset, the page defaults, focus, and
+ * what happens when somebody has asked for less movement.
+ *
+ * Tailwind is loaded here too, and the block that follows it hands our tokens
+ * to it, so a utility class and a hand-written rule are reaching for the same
+ * value rather than two values that happen to match today.
+ */
+
+@import 'tailwindcss';
+@import './tokens.css';
+@import './density.css';
+
+@theme inline {
+  --color-canvas: var(--canvas);
+  --color-surface: var(--surface);
+  --color-surface-raised: var(--surface-raised);
+  --color-surface-sunken: var(--surface-sunken);
+  --color-border-hairline: var(--border-hairline);
+  --color-border-strong: var(--border);
+  --color-text: var(--text);
+  --color-text-secondary: var(--text-secondary);
+  --color-text-tertiary: var(--text-tertiary);
+  --color-accent: var(--accent);
+  --color-accent-contrast: var(--accent-contrast);
+  --color-accent-quiet: var(--accent-quiet);
+  --color-positive: var(--positive);
+  --color-caution: var(--caution);
+  --color-critical: var(--critical);
+  --color-info: var(--info);
+
+  --radius-chip: var(--radius-chip);
+  --radius-control: var(--radius-control);
+  --radius-card: var(--radius-card);
+  --radius-sheet: var(--radius-sheet);
+
+  --font-sans: var(--font-ui);
+  --font-mono: var(--font-mono);
+}
+
+/*
+ * Everything below is the base layer.
+ *
+ * The layer matters and is not decoration. Styles written outside a layer beat
+ * every layered style, whatever their specificity — so an unlayered
+ * `button { color: inherit }` silently overrides every text colour a component
+ * asks for. Inside the base layer the ordinary order applies again and a
+ * component's own colour wins.
+ */
+@layer base {
+  *,
+  *::before,
+  *::after {
+    box-sizing: border-box;
+  }
+
+  html,
+  body,
+  #root {
+    height: 100%;
+  }
+
+  body {
+    margin: 0;
+    background: var(--canvas);
+    color: var(--text);
+    font-family: var(--font-ui);
+    font-size: var(--type-body);
+    line-height: var(--type-body-line);
+    -webkit-font-smoothing: antialiased;
+    /* Nothing scrolls sideways at page level. Wide things scroll inside their
+     * own box instead, which is the only way a table survives a phone. */
+    overflow-x: hidden;
+  }
+
+  h1,
+  h2,
+  h3,
+  h4,
+  p,
+  figure,
+  blockquote,
+  dl,
+  dd {
+    margin: 0;
+  }
+
+  h1,
+  h2,
+  h3,
+  h4 {
+    font-weight: var(--weight-strong);
+    letter-spacing: var(--tracking-tight);
+  }
+
+  button,
+  input,
+  textarea,
+  select {
+    font: inherit;
+    color: inherit;
+  }
+
+  /* Focus is always visible, is never removed, and is never replaced by a
+   * change of colour alone. Somebody navigating by keyboard has no other way
+   * of knowing where they are. */
+  :focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
+    border-radius: var(--radius-chip);
+  }
+
+  :focus:not(:focus-visible) {
+    outline: none;
+  }
+
+  ::selection {
+    background: var(--accent-quiet);
+  }
+
+  /* Asked for less movement, everything arrives instantly. Streaming text is
+   * the exception and is handled where it lives — that is content turning up,
+   * not an animation. */
+  @media (prefers-reduced-motion: reduce) {
+    *,
+    *::before,
+    *::after {
+      animation-duration: 0s !important;
+      animation-iteration-count: 1 !important;
+      transition-duration: 0s !important;
+      scroll-behavior: auto !important;
+    }
+  }
+}

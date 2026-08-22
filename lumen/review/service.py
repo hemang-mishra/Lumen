@@ -20,7 +20,6 @@ from collections.abc import Callable
 from datetime import datetime, timedelta, timezone
 
 from lumen.config import AppConfig
-from lumen.graph.provider import GraphProvider
 from lumen.operational.enums import OPEN_HITL_STATUSES, HitlItemStatus
 from lumen.operational.repositories import (
     IllegalStateTransitionError,
@@ -44,7 +43,7 @@ from lumen.review.contracts import (
 )
 from lumen.schemas.enums import HitlResolutionChoice, ReconciliationAction
 from lumen.schemas.pipeline import FrozenProposal
-from lumen.vector.provider import VectorProvider
+from lumen.stores import StoreRegistry, UserStores
 
 logger = logging.getLogger(__name__)
 
@@ -88,28 +87,27 @@ class ReviewService:
         self,
         *,
         config: AppConfig,
-        graph: GraphProvider,
+        stores: StoreRegistry,
         ops: OperationalStore,
-        open_vectors: Callable[[], VectorProvider],
         open_embedder: Callable[[], EmbeddingProvider],
     ) -> None:
         """
         Args:
             config: Settings for this deployment.
-            graph: The writable graph. Never handed out.
-            ops: The operational store, holding the queue itself.
-            open_vectors: How to reach the search index, asked for only when
-                an answer creates a record that has to be findable. Taken as
-                a way of getting one rather than the thing itself because a
-                file-backed index takes a lock, and whoever already has it
-                open is who this must borrow from.
-            open_embedder: How to reach the embedding model, on the same
-                terms and for the same reason.
+            stores: Where a person's graph and search index are borrowed
+                from. Not a graph, because there is one per person and this
+                object serves all of them — which of them a call is about is
+                decided by the identifier that call was given.
+            ops: The operational store, holding the queue itself. Shared, and
+                already keyed by person on every row.
+            open_embedder: How to reach the embedding model, asked for only
+                when an answer creates a record that has to be findable.
+                Taken as a way of getting one rather than the thing itself,
+                since a deployment with no model still lists a queue.
         """
         self._config = config
-        self._graph = graph
+        self._stores = stores
         self._ops = ops
-        self._open_vectors = open_vectors
         self._open_embedder = open_embedder
         self._lock = threading.Lock()
 
@@ -126,12 +124,15 @@ class ReviewService:
         self.sweep(user_id)
         now = _now()
         items = self._ops.hitl.list_visible(user_id, now=now, limit=limit)
-        return QueueView(cards=self._cards_for(items, now=now), counts=self.counts(user_id))
+        with self._stores.lease(user_id) as stores:
+            drawn = self._cards_for(items, now=now, stores=stores)
+        return QueueView(cards=drawn, counts=self.counts(user_id))
 
     def get_card(self, user_id: str, item_id: str) -> QueueCard:
         """One question in full. Does no housekeeping — it only reads."""
         item = self._owned(user_id, item_id)
-        return self._cards_for([item], now=_now())[0]
+        with self._stores.lease(user_id) as stores:
+            return self._cards_for([item], now=_now(), stores=stores)[0]
 
     def counts(self, user_id: str) -> QueueCounts:
         """
@@ -177,9 +178,13 @@ class ReviewService:
                 [ResolutionChoice.APPROVE.value, ResolutionChoice.REJECT.value],
             )
 
-        with self._lock:
+        with self._lock, self._stores.lease(user_id) as stores:
             outcome = self._resolve_one(
-                user_id, item_id, choice, recorded_choice=recorded_choice
+                user_id,
+                item_id,
+                choice,
+                recorded_choice=recorded_choice,
+                stores=stores,
             )
 
         # Answering makes room, so whatever was parked behind this can come
@@ -244,9 +249,10 @@ class ReviewService:
                 "DISMISS", [ResolutionChoice.APPROVE.value, ResolutionChoice.REJECT.value]
             )
 
-        with self._lock:
+        with self._lock, self._stores.lease(user_id) as stores:
             return self._close_without_acting(
                 item,
+                stores=stores,
                 choice=ResolutionChoice.REJECT,
                 recorded_choice=HitlResolutionChoice.DISMISSED_UNANSWERABLE,
             )
@@ -255,6 +261,7 @@ class ReviewService:
         self,
         item: HitlQueueItemRecord,
         *,
+        stores: UserStores,
         choice: ResolutionChoice,
         recorded_choice: HitlResolutionChoice,
     ) -> ResolutionOutcome:
@@ -272,7 +279,7 @@ class ReviewService:
         not reentrant, so taking it again here deadlocks rather than failing
         in any way a reader would notice.
         """
-        self._graph.dismiss_decision(item.audit_node_id, at=_now())
+        stores.graph.dismiss_decision(item.audit_node_id, at=_now())
         self._ops.hitl.update_status(
             item.id,
             _settled_as(recorded_choice),
@@ -338,9 +345,10 @@ class ReviewService:
             if not self._is_provably_pointless(item):
                 continue
             try:
-                with self._lock:
+                with self._lock, self._stores.lease(user_id) as stores:
                     self._close_without_acting(
                         item,
+                        stores=stores,
                         choice=ResolutionChoice.REJECT,
                         recorded_choice=HitlResolutionChoice.DISMISSED_UNANSWERABLE,
                     )
@@ -368,12 +376,14 @@ class ReviewService:
         """
         item = self._owned(user_id, item_id)
         proposal = self._proposal_for(item)
-        return self._resolve_one(
-            user_id,
-            item_id,
-            cards.standing_alone_choice(proposal),
-            recorded_choice=HitlResolutionChoice.AUTO_BRANCH_AFTER_SNOOZE,
-        )
+        with self._stores.lease(user_id) as stores:
+            return self._resolve_one(
+                user_id,
+                item_id,
+                cards.standing_alone_choice(proposal),
+                recorded_choice=HitlResolutionChoice.AUTO_BRANCH_AFTER_SNOOZE,
+                stores=stores,
+            )
 
     # -- the work --------------------------------------------------------
 
@@ -384,6 +394,7 @@ class ReviewService:
         choice: ResolutionChoice,
         *,
         recorded_choice: HitlResolutionChoice | None,
+        stores: UserStores,
     ) -> ResolutionOutcome:
         """
         Work out one answer and write it.
@@ -410,18 +421,19 @@ class ReviewService:
         if choice in _REFUSALS and proposal.saying_no_means_doing_nothing:
             return self._close_without_acting(
                 item,
+                stores=stores,
                 choice=choice,
                 recorded_choice=recorded_choice or HitlResolutionChoice.DECLINED,
             )
 
         rows = cards.read_rows(
-            cards.wanted_node_ids([proposal]), graph=self._graph
+            cards.wanted_node_ids([proposal]), graph=stores.graph
         )
 
         plan = resolve.plan_resolution(
             proposal, choice, at=_now(), rows=rows, recorded_choice=recorded_choice
         )
-        report = self._write(plan.write_plan)
+        report = self._write(plan.write_plan, stores=stores)
 
         self._ops.hitl.update_status(
             item.id,
@@ -452,7 +464,7 @@ class ReviewService:
             writes_nothing=plan.writes_nothing,
         )
 
-    def _write(self, write_plan):
+    def _write(self, write_plan, *, stores: UserStores):
         """
         Save one answer's records, links and updates.
 
@@ -472,7 +484,7 @@ class ReviewService:
 
         try:
             return writing.commit(
-                write_plan, entries, graph=self._graph, vectors=self._open_vectors()
+                write_plan, entries, graph=stores.graph, vectors=stores.vectors
             )
         except writing.IndexWriteFailed as failure:
             logger.warning(
@@ -489,7 +501,11 @@ class ReviewService:
         return FrozenProposal.model_validate_json(payload)
 
     def _cards_for(
-        self, items: list[HitlQueueItemRecord], *, now: datetime
+        self,
+        items: list[HitlQueueItemRecord],
+        *,
+        now: datetime,
+        stores: UserStores,
     ) -> list[QueueCard]:
         """
         Build a page of cards, reading the graph once for the whole page.
@@ -521,9 +537,9 @@ class ReviewService:
         wanted = sorted(
             {*cards.wanted_node_ids(proposals), *cards.wanted_for_items(items)}
         )
-        rows = cards.read_rows(wanted, graph=self._graph)
+        rows = cards.read_rows(wanted, graph=stores.graph)
         summaries = cards.read_episode_summaries(
-            (item.episode_id or "" for item in items), graph=self._graph
+            (item.episode_id or "" for item in items), graph=stores.graph
         )
         built = {
             item.id: cards.build_card(

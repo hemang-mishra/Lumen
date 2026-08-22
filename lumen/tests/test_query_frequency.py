@@ -15,6 +15,8 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 
+from lumen.tests.conftest import registry_for
+
 from lumen.config import ScoringConfig
 from lumen.query.assembly.contracts import AssembledContext, ContextItem
 from lumen.query.frequency import QueryHitRecorder
@@ -51,7 +53,7 @@ def session():
 @pytest.fixture
 def recorder(graph_store):
     """The recorder, writing to a real graph."""
-    return QueryHitRecorder(graph_store, config=ScoringConfig())
+    return QueryHitRecorder(registry_for(graph_store), config=ScoringConfig())
 
 
 class TestWhatCounts:

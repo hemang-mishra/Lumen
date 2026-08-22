@@ -19,7 +19,7 @@ from dataclasses import dataclass, replace
 
 from lumen.api.resources import LazySearchStack
 from lumen.config import AppConfig
-from lumen.graph.kuzu_impl import KuzuGraphProvider
+from lumen.stores import StoreRegistry
 from lumen.operational.migrator import upgrade_to_head
 from lumen.operational.sqlalchemy_impl import build_operational_store
 from lumen.providers.errors import ProviderError
@@ -34,6 +34,7 @@ from lumen.query.chat import (
 )
 from lumen.query.conversation import ConversationStore
 from lumen.query.formulation import QueryFormulator
+from lumen.query.alerts import ShadowAlertReader
 from lumen.query.frequency import QueryHitRecorder
 from lumen.query.memory import ConversationMemory
 from lumen.query.prompting import PersonaStore, PromptComposer
@@ -80,14 +81,14 @@ def build_runner(config: AppConfig | None = None) -> Iterator[ChatRunner]:
     """
     settings = config or AppConfig()
 
-    graph = KuzuGraphProvider(settings.graph.db_path)
-    graph.init_schema()
+    # The command line has no request to carry an identity, so it uses the
+    # configured default — the one person this machine belongs to. Everything
+    # below asks the registry for their stores exactly as the service does.
+    stores = StoreRegistry(settings)
     store = build_operational_store(settings)
     upgrade_to_head(store.engine)
 
-    search = LazySearchStack(
-        config=settings, graph=graph, reader=graph, worker=None
-    )
+    search = LazySearchStack(config=settings, stores=stores, worker=None)
     sessions = SessionRegistry(settings.query)
     memory = ConversationMemory(
         store=ConversationStore(store.buffers),
@@ -105,7 +106,7 @@ def build_runner(config: AppConfig | None = None) -> Iterator[ChatRunner]:
         llm=get_llm_provider(
             ModelRole.LIGHTWEIGHT, replace(settings, providers=one_retry)
         ),
-        graph=graph,
+        stores=stores,
         config=settings.query,
     )
 
@@ -120,13 +121,14 @@ def build_runner(config: AppConfig | None = None) -> Iterator[ChatRunner]:
         speech=_quiet(lambda: get_speech_provider(settings))
         if settings.chat.voice_enabled
         else None,
-        hits=QueryHitRecorder(graph, config=settings.scoring),
+        hits=QueryHitRecorder(stores, config=settings.scoring),
+        alerts=ShadowAlertReader(stores, config=settings.macro),
         config=settings.chat,
     )
 
     runner = ChatRunner(
         engine=engine,
-        _closers=(graph.close, store.close, search.close, formulator.close),
+        _closers=(stores.close, store.close, search.close, formulator.close),
     )
     try:
         yield runner

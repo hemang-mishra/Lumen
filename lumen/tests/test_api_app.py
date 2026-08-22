@@ -29,10 +29,10 @@ class TestBuildingTheApplication:
         assert callable(module.create_app)
 
     def test_two_can_exist_with_different_settings(self, tmp_path):
-        first = create_app(AppConfig(graph=GraphConfig(db_path=str(tmp_path / "a"))))
-        second = create_app(AppConfig(graph=GraphConfig(db_path=str(tmp_path / "b"))))
+        first = create_app(AppConfig(graph=GraphConfig(db_root=str(tmp_path / "a"))))
+        second = create_app(AppConfig(graph=GraphConfig(db_root=str(tmp_path / "b"))))
 
-        assert first.state.config.graph.db_path != second.state.config.graph.db_path
+        assert first.state.config.graph.db_root != second.state.config.graph.db_root
 
     def test_building_it_reads_no_files_of_its_own(self, tmp_path, monkeypatch):
         # create_app has no side effects on purpose. A .env read here would
@@ -41,7 +41,7 @@ class TestBuildingTheApplication:
         read: list[object] = []
         monkeypatch.setattr("lumen.env.load_env", lambda *a, **k: read.append(1))
 
-        create_app(AppConfig(graph=GraphConfig(db_path=str(tmp_path / "a"))))
+        create_app(AppConfig(graph=GraphConfig(db_root=str(tmp_path / "a"))))
 
         assert read == []
 
@@ -134,7 +134,7 @@ class TestTheTestPages:
         monkeypatch.setattr(
             module.Path, "is_dir", lambda self: False
         )
-        app = create_app(AppConfig(graph=GraphConfig(db_path=str(tmp_path / "g"))))
+        app = create_app(AppConfig(graph=GraphConfig(db_root=str(tmp_path / "g"))))
 
         assert not [route for route in app.routes if getattr(route, "name", "") == "ui"]
 
@@ -144,19 +144,22 @@ class TestStartingAndStopping:
         from fastapi.testclient import TestClient
 
         config = AppConfig(
-            graph=GraphConfig(db_path=str(tmp_path / "graph")),
+            graph=GraphConfig(db_root=str(tmp_path / "graph")),
             operational=OperationalConfig(db_url=f"sqlite:///{tmp_path / 'ops.db'}"),
         )
         app = create_app(config)
 
         with TestClient(app) as client:
             assert client.get("/health").json()["status"] == "ok"
-            provider = app.state.graph
-            assert Path(config.graph.db_path).exists()
+            stores = app.state.stores
+            with stores.lease(config.default_user_id) as held:
+                assert Path(config.graph.db_root).exists()
+                assert held.graph.conn is not None
+            assert stores.open_count == 1
 
-        # The graph is an embedded database holding a file lock. Leaving it
-        # open would collide with a pipeline run started afterwards.
-        assert provider.conn is None
+        # A graph is an embedded database holding a file lock. Leaving any of
+        # them open would collide with a pipeline run started afterwards.
+        assert stores.open_count == 0
 
 
 class TestTheSchemaTheServiceStartsWith:
@@ -173,7 +176,7 @@ class TestTheSchemaTheServiceStartsWith:
 
     def _config(self, tmp_path) -> AppConfig:
         return AppConfig(
-            graph=GraphConfig(db_path=str(tmp_path / "graph")),
+            graph=GraphConfig(db_root=str(tmp_path / "graph")),
             operational=OperationalConfig(db_url=f"sqlite:///{tmp_path / 'ops.db'}"),
         )
 
@@ -244,11 +247,12 @@ class TestHealth:
     ):
         # A service that is running but cannot reach its databases is a
         # different problem from one that is down, and they are fixed
-        # differently.
-        def refuse():
-            raise RuntimeError("the database is gone")
-
-        monkeypatch.setattr(api_client.app.state.graph, "count_by_type", refuse)
+        # differently. The graph half is about the place everybody's graphs
+        # live: this route answers before anyone has signed in, so there is
+        # no one person's history to probe.
+        monkeypatch.setattr(
+            "lumen.api.main._graph_root_reachable", lambda settings: False
+        )
 
         body = api_client.get("/health").json()
 
@@ -259,7 +263,7 @@ class TestHealth:
 
 class TestWhenSomethingGoesWrong:
     def test_an_unexpected_failure_does_not_leak_what_happened(
-        self, api_client, monkeypatch
+        self, api_client, graph_store, monkeypatch
     ):
         # A stack trace or a database error handed back leaks the shape of
         # the store and, in a system holding somebody's private history,
@@ -267,7 +271,7 @@ class TestWhenSomethingGoesWrong:
         def explode():
             raise RuntimeError("secret detail about the storage layer")
 
-        monkeypatch.setattr(api_client.app.state.graph, "count_by_type", explode)
+        monkeypatch.setattr(graph_store, "count_by_type", explode)
 
         response = api_client.get("/graph/stats")
 
@@ -401,6 +405,20 @@ class TestTheApiCannotWrite:
         #     walks every year of somebody's history and costs real time, and
         #     behind a GET a browser or a crawler could start one by
         #     accident. It writes nothing.
+        #
+        #   /auth/google/callback — the one unauthenticated write in the
+        #     system, and the only one there can be: it is how somebody who
+        #     has proved nothing yet becomes somebody. It writes a user row
+        #     and a session, and nothing else in the system, and it is rate
+        #     limited for exactly that reason.
+        #
+        #   /auth/refresh — exchanges a session for a newer one. A POST
+        #     because it changes which token is live, and the only endpoint
+        #     that reads the renewable cookie.
+        #
+        #   /auth/logout — ends this session. A state change, so not a GET:
+        #     a link that signed somebody out by being fetched would be a
+        #     nuisance a third party could trigger.
         spec = api_client.get("/openapi.json").json()
 
         posts = {
@@ -423,6 +441,9 @@ class TestTheApiCannotWrite:
             "/hitl/sweep",
             "/maintenance/erasure",
             "/maintenance/proof-chains",
+            "/auth/google/callback",
+            "/auth/refresh",
+            "/auth/logout",
         }
 
     def test_the_upload_routes_cannot_reach_the_graph_themselves(self):

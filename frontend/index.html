@@ -1,0 +1,40 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <title>Lumen</title>
+    <!--
+      The theme is settled before anything is drawn.
+
+      This runs before the stylesheet and before the app, because any later
+      and the first paint happens in the wrong theme and then corrects itself
+      — a flash of white on a dark morning, which is exactly the thing people
+      notice and nothing else about the app can make up for.
+
+      It is deliberately tiny and deliberately duplicated: the same key and
+      the same rule exist in the app's theme code, and a test asserts the two
+      still agree.
+    -->
+    <script>
+      (function () {
+        try {
+          var chosen = localStorage.getItem('lumen.theme') || 'system';
+          var dark =
+            chosen === 'dark' ||
+            (chosen === 'system' &&
+              window.matchMedia('(prefers-color-scheme: dark)').matches);
+          var resolved = dark ? 'dark' : 'light';
+          document.documentElement.setAttribute('data-theme', resolved);
+          document.documentElement.style.colorScheme = resolved;
+        } catch (e) {
+          document.documentElement.setAttribute('data-theme', 'light');
+        }
+      })();
+    </script>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>

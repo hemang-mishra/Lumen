@@ -185,7 +185,7 @@ class ChatEngine:
             recollection=recollection,
             now=at,
             persona=self._persona_for(user_id),
-            alert=self._alert_for(at),
+            alert=self._alert_for(user_id, at),
         )
 
         yield _what_was_gathered(signal, bundle, prompt, recollection)
@@ -210,7 +210,7 @@ class ChatEngine:
             return None
         return self._personas.resolve(user_id)
 
-    def _alert_for(self, at: datetime) -> str | None:
+    def _alert_for(self, user_id: str, at: datetime) -> str | None:
         """
         Whether anything appears to be shifting right now, if anybody is looking.
 
@@ -221,7 +221,7 @@ class ChatEngine:
         """
         if self._alerts is None:
             return None
-        return self._alerts.current(at)
+        return self._alerts.current(user_id, at)
 
     # ------------------------------------------------------------------
     # Writing the reply

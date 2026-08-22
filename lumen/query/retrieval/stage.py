@@ -43,6 +43,7 @@ from lumen.query.retrieval.contracts import (
     consulted_nothing,
 )
 from lumen.query.session import ChatSession, LateArrival
+from lumen.stores import StoreRegistry, UserStores
 from lumen.schemas.enums import EmotionalRegister, RetrievalOutcome, RetrievalPass
 from lumen.schemas.query import RetrievalSignal
 from lumen.vector.provider import VectorProvider
@@ -67,16 +68,14 @@ class ConversationalRetriever:
     def __init__(
         self,
         *,
-        graph: ReadOnlyGraph,
-        vectors: VectorProvider,
+        stores: StoreRegistry,
         embedder: EmbeddingProvider,
         llm: LLMProvider,
         config: QueryConfig | None = None,
         scoring: ScoringConfig | None = None,
         runner: DeadlineRunner | None = None,
     ) -> None:
-        self._graph = graph
-        self._vectors = vectors
+        self._stores = stores
         self._embedder = embedder
         self._llm = llm
         self._config = config or QueryConfig()
@@ -111,8 +110,30 @@ class ConversationalRetriever:
         weighting = Weighting.at(now, config=self._scoring)
         turn_text = _turn_text(session, signal.turn_index)
         carried = self._collect_carried(session, signal.turn_index)
+
+        # Borrowed once for the whole turn rather than per search. Three
+        # searches run side by side and the continuity check runs after them,
+        # and all four have to be looking at the same person's history — a
+        # second lease could be answered with a reopened handle if the first
+        # had been given back in between.
+        with self._stores.lease(session.user_id) as stores:
+            return self._against(
+                stores, signal, session, turn_text, carried, weighting, started
+            )
+
+    def _against(
+        self,
+        stores: UserStores,
+        signal: RetrievalSignal,
+        session: ChatSession,
+        turn_text: str,
+        carried: list[RetrievedNode],
+        weighting: Weighting,
+        started: float,
+    ) -> RetrievalBundle:
+        """The turn's three searches, against one person's stores."""
         semantic_attempt, structural_attempt = self._run_searches(
-            signal, turn_text, session, weighting
+            signal, turn_text, session, weighting, stores
         )
 
         found_a: PassAResult = (
@@ -152,7 +173,12 @@ class ConversationalRetriever:
             cap=self._config.conversational_candidate_cap,
         )
 
-        self._remember(kept, session=session, turn_index=signal.turn_index)
+        self._remember(
+            kept,
+            session=session,
+            turn_index=signal.turn_index,
+            vectors=stores.vectors,
+        )
 
         reports = (
             _report(
@@ -269,6 +295,7 @@ class ConversationalRetriever:
         turn_text: str,
         session: ChatSession,
         weighting: Weighting,
+        stores: UserStores,
     ) -> tuple[Attempt, Attempt]:
         """
         Run the meaning-based search and the anchor lookups side by side.
@@ -283,8 +310,8 @@ class ConversationalRetriever:
                 SEMANTIC: lambda: semantic.find_by_resemblance(
                     turn_text,
                     signal.retrieval_triggers,
-                    graph=self._graph,
-                    vectors=self._vectors,
+                    graph=stores.graph,
+                    vectors=stores.vectors,
                     embedder=self._embedder,
                     llm=self._llm,
                     config=self._config,
@@ -292,7 +319,7 @@ class ConversationalRetriever:
                 ),
                 STRUCTURAL: lambda: structural.find_by_anchors(
                     signal.retrieval_triggers,
-                    graph=self._graph,
+                    graph=stores.graph,
                     config=self._config,
                     weighting=weighting,
                 ),
@@ -321,6 +348,7 @@ class ConversationalRetriever:
         *,
         session: ChatSession,
         turn_index: int,
+        vectors: VectorProvider,
     ) -> None:
         """
         Put this turn's keepers into today's thread and let go of the stale.
@@ -338,15 +366,19 @@ class ConversationalRetriever:
         )
         if fresh:
             buffer.remember(
-                continuity.to_entries(fresh, vectors=self._stored_vectors(fresh)),
+                continuity.to_entries(
+                    fresh, vectors=self._stored_vectors(fresh, vectors)
+                ),
                 turn_index=turn_index,
             )
         buffer.evict_stale(turn_index)
 
-    def _stored_vectors(self, nodes: list[RetrievedNode]) -> dict[str, list[float]]:
+    def _stored_vectors(
+        self, nodes: list[RetrievedNode], vectors: VectorProvider
+    ) -> dict[str, list[float]]:
         """Where these records sit in the index, as far as it can say."""
         try:
-            return self._vectors.get_vectors([node.node_id for node in nodes])
+            return vectors.get_vectors([node.node_id for node in nodes])
         except Exception as exc:  # noqa: BLE001 — a weaker thread beats a failed turn
             logger.warning(
                 "could not read where these records sit in the index, so "

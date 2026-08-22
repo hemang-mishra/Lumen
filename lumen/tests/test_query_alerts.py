@@ -18,6 +18,8 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 
+from lumen.tests.conftest import registry_for
+
 from lumen.config import ChatConfig, MacroConfig
 from lumen.query.alerts import ShadowAlertReader
 from lumen.query.assembly import block
@@ -27,6 +29,9 @@ from lumen.schemas.enums import EmotionalRegister, ReportType
 from lumen.schemas.query import RetrievalSignal
 
 NOW = datetime(2026, 8, 20, 12, tzinfo=UTC)
+
+# Whose history the alert is about. There is one per person now.
+USER = "usr_local"
 
 
 @pytest.fixture
@@ -72,25 +77,25 @@ class TestWhenThereIsSomethingToSay:
     def test_a_recent_alert_comes_back_as_one_line(self, graph_store, shadow_report):
         shadow_report()
 
-        alert = ShadowAlertReader(graph_store).current(NOW)
+        alert = ShadowAlertReader(registry_for(graph_store)).current(USER, NOW)
 
         assert alert is not None
         assert "three beliefs about work moved together" in alert
 
     def test_nothing_at_all_is_the_common_answer(self, graph_store):
-        assert ShadowAlertReader(graph_store).current(NOW) is None
+        assert ShadowAlertReader(registry_for(graph_store)).current(USER, NOW) is None
 
     def test_a_scan_that_found_nothing_says_nothing(self, graph_store, shadow_report):
         shadow_report(detected=False)
 
-        assert ShadowAlertReader(graph_store).current(NOW) is None
+        assert ShadowAlertReader(registry_for(graph_store)).current(USER, NOW) is None
 
     def test_an_alert_with_no_words_in_it_says_nothing(
         self, graph_store, shadow_report
     ):
         shadow_report(summary="   ")
 
-        assert ShadowAlertReader(graph_store).current(NOW) is None
+        assert ShadowAlertReader(registry_for(graph_store)).current(USER, NOW) is None
 
 
 class TestWhenItHasStopped_BeingNews:
@@ -99,17 +104,15 @@ class TestWhenItHasStopped_BeingNews:
         # it had lost track of when things happened.
         shadow_report(hours_ago=200)
 
-        assert ShadowAlertReader(graph_store).current(NOW) is None
+        assert ShadowAlertReader(registry_for(graph_store)).current(USER, NOW) is None
 
     def test_the_window_comes_from_the_settings(self, graph_store, shadow_report):
         shadow_report(hours_ago=30)
 
-        near = ShadowAlertReader(
-            graph_store, config=MacroConfig(shadow_repeat_hours=48)
-        ).current(NOW)
-        far = ShadowAlertReader(
-            graph_store, config=MacroConfig(shadow_repeat_hours=12)
-        ).current(NOW)
+        near = ShadowAlertReader(registry_for(graph_store), config=MacroConfig(shadow_repeat_hours=48)
+        ).current(USER, NOW)
+        far = ShadowAlertReader(registry_for(graph_store), config=MacroConfig(shadow_repeat_hours=12)
+        ).current(USER, NOW)
 
         assert near is not None
         assert far is None
@@ -121,7 +124,7 @@ class TestWhenTheStoreMisbehaves:
             def find_reports(self, **kwargs):
                 raise RuntimeError("the graph is unreachable")
 
-        assert ShadowAlertReader(Refuses()).current(NOW) is None
+        assert ShadowAlertReader(Refuses()).current(USER, NOW) is None
 
     def test_an_unreadable_body_costs_the_alert_and_not_the_turn(
         self, graph_store, shadow_report
@@ -142,7 +145,7 @@ class TestWhenTheStoreMisbehaves:
             },
         )
 
-        assert ShadowAlertReader(graph_store).current(NOW) is None
+        assert ShadowAlertReader(registry_for(graph_store)).current(USER, NOW) is None
 
 
 class TestReadingStoredThingsBack:
@@ -167,7 +170,7 @@ class TestReadingStoredThingsBack:
             },
         )
 
-        assert ShadowAlertReader(graph_store).current(NOW) is None
+        assert ShadowAlertReader(registry_for(graph_store)).current(USER, NOW) is None
 
     def test_a_body_that_is_already_a_document_is_read_as_one(self):
         # A different store could hand these back parsed rather than as text.

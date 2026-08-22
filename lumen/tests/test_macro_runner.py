@@ -20,12 +20,17 @@ from datetime import datetime, timezone
 from lumen.config import AppConfig, MacroConfig
 from lumen.pipeline.macroextraction import runner, windows
 from lumen.providers.fake import FakeLLMProvider
+from lumen.tests.conftest import registry_for
 from lumen.schemas.enums import (
     MacroRunStatus,
     ModelRole,
     NarrativeStatus,
     ReportType,
 )
+
+# Whose reports these are. There is a graph per person now, so every call
+# to the service says which one it is about.
+USER = "local"
 
 UTC = timezone.utc
 
@@ -293,11 +298,11 @@ class TestTheServiceThatRoutesUse:
 
         seed_month("ep_1", day=4)
         service = MacroextractionService(
-            config=AppConfig(), graph=graph_store, ops=ops_store
+            config=AppConfig(), stores=registry_for(graph_store), ops=ops_store
         )
         service._models = {ModelRole.THINKING: a_model()}
 
-        outcome = service.run(may())
+        outcome = service.run(USER, may())
 
         assert outcome.status is MacroRunStatus.WRITTEN
         # Nothing on the surface hands back a store to write through.
@@ -317,10 +322,12 @@ class TestTheServiceThatRoutesUse:
             raise ProviderError("no credential")
 
         monkeypatch.setattr(service_module, "get_llm_provider", refuse)
-        service = MacroextractionService(config=AppConfig(), graph=graph_store)
+        service = MacroextractionService(
+            config=AppConfig(), stores=registry_for(graph_store)
+        )
 
-        service.run(may())
-        service.run(may())
+        service.run(USER, may())
+        service.run(USER, may())
 
         assert attempts.count(ModelRole.THINKING) == 1
 
@@ -333,14 +340,14 @@ class TestTheServiceCatchingUp:
 
         seed_month("ep_1", day=10, month=6)
         service = MacroextractionService(
-            config=AppConfig(), graph=graph_store, ops=ops_store
+            config=AppConfig(), stores=registry_for(graph_store), ops=ops_store
         )
         service._models = {
             ModelRole.THINKING: a_model(),
             ModelRole.LIGHTWEIGHT: None,
         }
 
-        outcomes = service.run_due(datetime(2026, 7, 4, tzinfo=UTC))
+        outcomes = service.run_due(USER, datetime(2026, 7, 4, tzinfo=UTC))
 
         assert any(outcome.wrote_something for outcome in outcomes)
         assert any(
@@ -352,9 +359,11 @@ class TestTheServiceCatchingUp:
     ):
         from lumen.pipeline.macroextraction.service import MacroextractionService
 
-        service = MacroextractionService(config=AppConfig(), graph=graph_store)
+        service = MacroextractionService(
+            config=AppConfig(), stores=registry_for(graph_store)
+        )
 
-        due = service.due(datetime(2026, 7, 4, tzinfo=UTC))
+        due = service.due(USER, datetime(2026, 7, 4, tzinfo=UTC))
 
         assert due
         assert graph_store.find_reports() == []
@@ -362,9 +371,11 @@ class TestTheServiceCatchingUp:
     def test_it_can_be_asked_for_the_two_day_scan_on_its_own(self, graph_store):
         from lumen.pipeline.macroextraction.service import MacroextractionService
 
-        service = MacroextractionService(config=AppConfig(), graph=graph_store)
+        service = MacroextractionService(
+            config=AppConfig(), stores=registry_for(graph_store)
+        )
         service._models = {ModelRole.LIGHTWEIGHT: None}
 
-        outcome = service.run_shadow(datetime(2026, 5, 20, 12, tzinfo=UTC))
+        outcome = service.run_shadow(USER, datetime(2026, 5, 20, 12, tzinfo=UTC))
 
         assert outcome.status is MacroRunStatus.NOT_DETECTED

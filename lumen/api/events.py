@@ -46,6 +46,15 @@ logger = logging.getLogger(__name__)
 # anything live, and the point of the thing is live.
 LISTENER_BACKLOG = 100
 
+# What the clock announces when one of its passes actually did something.
+# Named here, next to the bus that carries them, for the same reason the
+# worker names its own: a browser matches on the exact string.
+JOB_RAN = "job_ran"
+JOB_FAILED = "job_failed"
+
+# Everything the scheduled work can announce.
+SCHEDULER_EVENTS: tuple[str, ...] = (JOB_RAN, JOB_FAILED)
+
 
 class Event(BaseModel):
     """

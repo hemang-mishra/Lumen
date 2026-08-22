@@ -18,7 +18,8 @@ from __future__ import annotations
 
 from fastapi import APIRouter, Depends, Query
 
-from lumen.api.deps import get_config, get_reviewer
+from lumen.api.deps import get_config, get_reviewer, require_identity
+from lumen.auth import Identity
 from lumen.api.errors import BadRequest, Conflict, NotFound
 from lumen.api.schemas import ReviewCountView, ReviewResolveRequest
 from lumen.config import AppConfig
@@ -49,6 +50,7 @@ def list_queue(
     reviewer: ReviewService = Depends(get_reviewer),
     config: AppConfig = Depends(get_config),
     limit: int = Query(default=20, ge=1, le=MAX_LIMIT),
+    identity: Identity = Depends(require_identity),
 ) -> QueueView:
     """
     Everything waiting for an answer, in the order to ask.
@@ -57,13 +59,14 @@ def list_queue(
     has waited longest. Opening the queue also runs its housekeeping, so the
     list is correct rather than merely recent.
     """
-    return reviewer.list_queue(config.user_id, limit=limit)
+    return reviewer.list_queue(identity.user_id, limit=limit)
 
 
 @router.get("/count", response_model=ReviewCountView)
 def queue_count(
     reviewer: ReviewService = Depends(get_reviewer),
     config: AppConfig = Depends(get_config),
+    identity: Identity = Depends(require_identity),
 ) -> ReviewCountView:
     """
     How much is waiting, and how long the oldest has waited.
@@ -72,7 +75,7 @@ def queue_count(
     and the queue is not. It runs no housekeeping: a number displayed in a
     corner should not settle anything on somebody's behalf.
     """
-    return ReviewCountView.of(reviewer.counts(config.user_id))
+    return ReviewCountView.of(reviewer.counts(identity.user_id))
 
 
 @router.get("/{item_id}", response_model=QueueCard)
@@ -80,10 +83,11 @@ def get_card(
     item_id: str,
     reviewer: ReviewService = Depends(get_reviewer),
     config: AppConfig = Depends(get_config),
+    identity: Identity = Depends(require_identity),
 ) -> QueueCard:
     """One question in full, with every answer it offers."""
     try:
-        return reviewer.get_card(config.user_id, item_id)
+        return reviewer.get_card(identity.user_id, item_id)
     except RecordNotFoundError as exc:
         raise NotFound("review item", item_id) from exc
 
@@ -94,6 +98,7 @@ def resolve_item(
     request: ReviewResolveRequest,
     reviewer: ReviewService = Depends(get_reviewer),
     config: AppConfig = Depends(get_config),
+    identity: Identity = Depends(require_identity),
 ) -> ResolutionOutcome:
     """
     Answer one question, and write what was held back.
@@ -105,7 +110,7 @@ def resolve_item(
     conflict means.
     """
     try:
-        return reviewer.resolve(config.user_id, item_id, request.choice)
+        return reviewer.resolve(identity.user_id, item_id, request.choice)
     except RecordNotFoundError as exc:
         raise NotFound("review item", item_id) from exc
     except MissingProposal as exc:
@@ -123,6 +128,7 @@ def dismiss_item(
     item_id: str,
     reviewer: ReviewService = Depends(get_reviewer),
     config: AppConfig = Depends(get_config),
+    identity: Identity = Depends(require_identity),
 ) -> ResolutionOutcome:
     """
     Withdraw a question that can no longer be answered.
@@ -134,7 +140,7 @@ def dismiss_item(
     should never be quietly dropped.
     """
     try:
-        return reviewer.dismiss(config.user_id, item_id)
+        return reviewer.dismiss(identity.user_id, item_id)
     except RecordNotFoundError as exc:
         raise NotFound("review item", item_id) from exc
     except ChoiceNotOffered as exc:
@@ -148,6 +154,7 @@ def snooze_item(
     item_id: str,
     reviewer: ReviewService = Depends(get_reviewer),
     config: AppConfig = Depends(get_config),
+    identity: Identity = Depends(require_identity),
 ) -> QueueCard:
     """
     Put one question off, and hide it while it waits.
@@ -156,7 +163,7 @@ def snooze_item(
     when it will return, and the date it would settle itself.
     """
     try:
-        return reviewer.snooze(config.user_id, item_id)
+        return reviewer.snooze(identity.user_id, item_id)
     except RecordNotFoundError as exc:
         raise NotFound("review item", item_id) from exc
     except IllegalStateTransitionError as exc:
@@ -167,6 +174,7 @@ def snooze_item(
 def sweep(
     reviewer: ReviewService = Depends(get_reviewer),
     config: AppConfig = Depends(get_config),
+    identity: Identity = Depends(require_identity),
 ) -> SweepReport:
     """
     Run the housekeeping now.
@@ -176,7 +184,7 @@ def sweep(
     and what it let in, because a pass that changes somebody's history
     without being asked has to be able to say what it did.
     """
-    return reviewer.sweep(config.user_id)
+    return reviewer.sweep(identity.user_id)
 
 
 __all__ = ["router"]

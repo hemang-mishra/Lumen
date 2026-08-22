@@ -12,6 +12,8 @@ from __future__ import annotations
 import json
 
 import pytest
+
+from lumen.tests.conftest import registry_for
 from fastapi.testclient import TestClient
 
 from lumen.api.deps import (
@@ -58,11 +60,11 @@ def prompt_client(graph_store, ops_store, vector_store, embedder):
 
     def _make(readings=(), invention="an earlier note about the same thing"):
         formulator = QueryFormulator(
-            llm=FakeLLMProvider(list(readings)), graph=graph_store
+            llm=FakeLLMProvider(list(readings)),
+            stores=registry_for(graph_store),
         )
         retriever = ConversationalRetriever(
-            graph=graph_store,
-            vectors=vector_store,
+            stores=registry_for(graph_store, vector_store),
             embedder=embedder,
             llm=FakeLLMProvider({"ITEMS:": invented(invention)}),
         )

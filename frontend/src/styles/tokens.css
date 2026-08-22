@@ -1,0 +1,218 @@
+/*
+ * Every colour, size, corner, shadow and duration in the app, named once.
+ *
+ * Two rules hold this file together, and both are checked by tests rather
+ * than trusted.
+ *
+ * Names describe a role, never an appearance. A component asks for "the
+ * raised surface", not for a particular grey, which is what lets the two
+ * themes achieve "raised" in completely different ways — lighter in dark,
+ * white with a shadow in light.
+ *
+ * Light is the base definition of every name and dark only redefines them.
+ * Nothing may exist solely in the dark block. That single rule is what stops
+ * the light theme quietly rotting while everyone develops in the dark one.
+ */
+
+:root {
+  /* ---- surfaces -------------------------------------------------------
+   * Near-neutral with the faintest warm tint. A warm tint is the one that
+   * survives at high lightness; the cool version of this ramp reads clinical.
+   */
+  --canvas: #fbfaf9;
+  --surface: #ffffff;
+  --surface-raised: #ffffff;
+  --surface-sunken: #f3f1ef;
+
+  --border-hairline: rgba(0, 0, 0, 0.07);
+  --border: rgba(0, 0, 0, 0.13);
+
+  /* ---- text -----------------------------------------------------------
+   * Three levels of loudness. Tertiary is for ids and timestamps — quiet,
+   * but still readable: an id nobody can read is not quiet, it is missing,
+   * and it has to clear the contrast floor like everything else.
+   */
+  --text: #1c1d20;
+  --text-secondary: #5c5f66;
+  --text-tertiary: #686c73;
+
+  /* ---- accent ---------------------------------------------------------
+   * One accent, spent in three places at most: the primary action, the
+   * current navigation item, and the focus ring.
+   */
+  --accent: #4a5bd4;
+  --accent-contrast: #ffffff;
+  --accent-quiet: rgba(74, 91, 212, 0.1);
+
+  /* ---- meaning --------------------------------------------------------
+   * Four states, not eleven. These say what condition something is in, never
+   * what kind of thing it is, and never without a word beside them.
+   */
+  --positive: #1a7048;
+  --caution: #965300;
+  --critical: #b3261e;
+  --info: var(--accent);
+
+  --positive-quiet: rgba(26, 112, 72, 0.1);
+  --caution-quiet: rgba(150, 83, 0, 0.1);
+  --critical-quiet: rgba(179, 38, 30, 0.1);
+
+  /* ---- the one interaction mechanism ----------------------------------
+   * A translucent layer over whatever surface is underneath, rather than a
+   * hover colour per component. This is what keeps hundreds of controls
+   * looking like one system.
+   */
+  --state-hover: rgba(0, 0, 0, 0.04);
+  --state-press: rgba(0, 0, 0, 0.08);
+  --state-disabled-opacity: 0.38;
+
+  /* What the page is dimmed with while something sits over it. */
+  --scrim: rgba(0, 0, 0, 0.4);
+
+  /* ---- corners --------------------------------------------------------- */
+  --radius-chip: 6px;
+  --radius-control: 10px;
+  --radius-card: 14px;
+  --radius-sheet: 20px;
+  --radius-pill: 999px;
+
+  /* ---- elevation -------------------------------------------------------
+   * Two shadows, both soft, neither coloured. In light they carry the sense
+   * of a raised surface entirely.
+   */
+  --shadow-1: 0 1px 2px rgba(0, 0, 0, 0.04), 0 2px 8px rgba(0, 0, 0, 0.04);
+  --shadow-2: 0 2px 6px rgba(0, 0, 0, 0.06), 0 12px 32px rgba(0, 0, 0, 0.1);
+
+  /* ---- space ----------------------------------------------------------
+   * A 4px base. Nothing in the app uses a spacing value that is not here.
+   */
+  --space-0: 0px;
+  --space-2: 2px;
+  --space-4: 4px;
+  --space-8: 8px;
+  --space-12: 12px;
+  --space-16: 16px;
+  --space-20: 20px;
+  --space-24: 24px;
+  --space-32: 32px;
+  --space-40: 40px;
+  --space-56: 56px;
+  --space-72: 72px;
+  --space-96: 96px;
+
+  /* ---- type -----------------------------------------------------------
+   * Six sizes and nothing between them. The system font, so there is nothing
+   * to download and nothing to flash, and it reads as native on the phone
+   * where most of the writing happens.
+   */
+  --font-ui: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, system-ui, sans-serif;
+  --font-mono: ui-monospace, SFMono-Regular, Menlo, monospace;
+
+  --type-meta: 12px;
+  --type-meta-line: 1.4;
+  --type-dense: 13px;
+  --type-dense-line: 1.45;
+  --type-body: 15px;
+  --type-body-line: 1.5;
+  --type-reading: 17px;
+  --type-reading-line: 1.7;
+  --type-title: 20px;
+  --type-title-line: 1.35;
+  --type-page: 24px;
+  --type-page-line: 1.25;
+
+  --weight-normal: 400;
+  --weight-medium: 500;
+  --weight-strong: 600;
+
+  --tracking-tight: -0.01em;
+  --tracking-normal: 0;
+
+  /* ---- motion ---------------------------------------------------------
+   * Three durations. Nothing overshoots, nothing bounces, nothing springs.
+   */
+  --dur-micro: 120ms;
+  --dur-standard: 180ms;
+  --dur-large: 260ms;
+  --ease-enter: cubic-bezier(0.2, 0, 0, 1);
+  --ease-exit: cubic-bezier(0.3, 0, 0.8, 0.15);
+
+  /* ---- layout ---------------------------------------------------------
+   * Two content widths: one for reading, one for inspecting. Nothing runs
+   * the full width of a wide monitor.
+   */
+  --width-reading: 720px;
+  --width-inspect: 1200px;
+  --measure-reading: 68ch;
+  --gutter: var(--space-16);
+
+  /* ---- density --------------------------------------------------------
+   * Set here so every name exists at the root; the density file overrides
+   * them on a container.
+   */
+  --control-height: 44px;
+  --card-padding: var(--space-16);
+  --row-padding: var(--space-12);
+  --density-text: var(--type-body);
+  --density-line: var(--type-body-line);
+}
+
+/*
+ * Dark. Every name below already exists above; this block introduces none.
+ *
+ * Elevation works the other way round here: a raised surface is lighter
+ * rather than shadowed, because shadows do not read on a dark ground and
+ * faking them produces the muddy halo that makes dark themes look cheap.
+ * The tint leans very slightly cool, which is the direction that survives at
+ * low lightness.
+ */
+:root[data-theme='dark'] {
+  --canvas: #131416;
+  --surface: #1b1d20;
+  --surface-raised: #24262a;
+  --surface-sunken: #0e0f11;
+
+  --border-hairline: rgba(255, 255, 255, 0.07);
+  --border: rgba(255, 255, 255, 0.13);
+
+  --text: #e7e8ea;
+  --text-secondary: #9ba0a8;
+  --text-tertiary: #8b9098;
+
+  --accent: #a8b6f8;
+  --accent-contrast: #191b22;
+  --accent-quiet: rgba(168, 182, 248, 0.14);
+
+  --positive: #7fc79b;
+  --caution: #e0b071;
+  --critical: #f2b8b5;
+  --info: var(--accent);
+
+  --positive-quiet: rgba(127, 199, 155, 0.14);
+  --caution-quiet: rgba(224, 176, 113, 0.14);
+  --critical-quiet: rgba(242, 184, 181, 0.14);
+
+  --state-hover: rgba(255, 255, 255, 0.06);
+  --state-press: rgba(255, 255, 255, 0.1);
+
+  --scrim: rgba(0, 0, 0, 0.6);
+
+  --shadow-1: none;
+  --shadow-2: 0 8px 32px rgba(0, 0, 0, 0.5);
+}
+
+/*
+ * Wider screens get more room around the content. The content itself does
+ * not change, only the space around it.
+ */
+@media (min-width: 768px) {
+  :root {
+    --gutter: var(--space-24);
+  }
+}
+
+@media (min-width: 1200px) {
+  :root {
+    --gutter: var(--space-32);
+  }
+}

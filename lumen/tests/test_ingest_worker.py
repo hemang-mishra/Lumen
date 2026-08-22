@@ -21,7 +21,7 @@ import pytest
 from lumen.config import AppConfig
 from lumen.ingest.contracts import ImportPlan, ParsedConversation, ParsedMessage
 from lumen.ingest.loader import stage_conversations
-from lumen.ingest.worker import IngestResources, IngestWorker
+from lumen.ingest.worker import IngestModels, IngestWorker
 from lumen.operational.enums import ImportStatus
 from lumen.operational.schemas import ImportRecord
 from lumen.providers.errors import ProviderError
@@ -75,7 +75,9 @@ def imported_conversation(ops_store):
 
 
 @pytest.fixture
-def scripted_worker(ops_store, graph_store, vector_store, embedder, full_run_providers):
+def scripted_worker(
+    ops_store, graph_store, vector_store, embedder, full_run_providers, store_registry
+):
     """
     A worker wired to real stores and stand-in models.
 
@@ -102,18 +104,13 @@ def scripted_worker(ops_store, graph_store, vector_store, embedder, full_run_pro
                 **(overrides or {}),
             }
         )
-        resources = IngestResources(
-            graph=resource_overrides.get("graph", graph_store),
-            vectors=vector_store,
-            embedder=embedder,
-            lightweight=light,
-            thinking=deep,
-        )
         return IngestWorker(
             config=AppConfig(),
             ops=ops_store,
-            graph=graph_store,
-            resources=resources,
+            stores=store_registry,
+            resources=IngestModels(
+                embedder=embedder, lightweight=light, thinking=deep
+            ),
         )
 
     return _build
@@ -385,30 +382,28 @@ class TestReadiness:
         assert scripted_worker().ensure_ready() is not None
 
     def test_a_worker_with_no_model_configured_says_so(
-        self, ops_store, graph_store, monkeypatch
+        self, ops_store, store_registry, monkeypatch
     ):
         # The point of asking before staging: "no model is configured" is a
         # refusal to accept the upload, not something discovered four
         # minutes into a run.
         monkeypatch.setenv("LUMEN_LIGHTWEIGHT_PROVIDER", "no_such_provider")
         worker = IngestWorker(
-            config=AppConfig(), ops=ops_store, graph=graph_store, resources=None
+            config=AppConfig(), ops=ops_store, stores=store_registry, resources=None
         )
 
         with pytest.raises(ProviderError):
             worker.ensure_ready()
 
-    def test_resources_are_only_built_once(self, ops_store, graph_store, monkeypatch):
+    def test_models_are_only_built_once(self, ops_store, store_registry, monkeypatch):
         built: list[int] = []
 
-        def count(config, graph):
+        def count(config):
             built.append(1)
-            return IngestResources(
-                graph=graph, vectors=None, embedder=None, lightweight=None, thinking=None
-            )
+            return IngestModels(embedder=None, lightweight=None, thinking=None)
 
-        monkeypatch.setattr("lumen.ingest.worker.build_resources", count)
-        worker = IngestWorker(config=AppConfig(), ops=ops_store, graph=graph_store)
+        monkeypatch.setattr("lumen.ingest.worker.build_models", count)
+        worker = IngestWorker(config=AppConfig(), ops=ops_store, stores=store_registry)
 
         worker.ensure_ready()
         worker.ensure_ready()

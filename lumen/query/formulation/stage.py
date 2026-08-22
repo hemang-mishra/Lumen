@@ -45,6 +45,7 @@ from lumen.query.formulation.grounding import (
 )
 from lumen.query.formulation.prompts import SYSTEM_INSTRUCTION, build_prompt
 from lumen.query.session import ChatSession
+from lumen.stores import StoreRegistry
 from lumen.schemas.enums import Domain, EmotionalRegister, FormulationPath
 from lumen.schemas.query import ChatTurn, RetrievalSignal, RetrievalTrigger
 
@@ -96,12 +97,12 @@ class QueryFormulator:
         self,
         *,
         llm: LLMProvider,
-        graph: ReadOnlyGraph,
+        stores: StoreRegistry,
         config: QueryConfig | None = None,
         runner: DeadlineRunner | None = None,
     ) -> None:
         self._llm = llm
-        self._graph = graph
+        self._stores = stores
         self._config = config or QueryConfig()
         self._owns_runner = runner is None
         self._runner = runner or DeadlineRunner(
@@ -185,7 +186,7 @@ class QueryFormulator:
 
         try:
             reading = self._runner.run(
-                lambda: self._reading(turn, history, known),
+                lambda: self._reading(turn, history, known, session.user_id),
                 timeout_seconds=self._config.formulation_timeout_seconds,
             )
         except DeadlineExceeded:
@@ -217,6 +218,7 @@ class QueryFormulator:
         turn: ChatTurn,
         history: list[ChatTurn],
         known_eras: tuple[str, ...] | None,
+        user_id: str,
     ) -> Reading | None:
         """
         The whole of the work, on one thread, inside one budget.
@@ -225,9 +227,24 @@ class QueryFormulator:
         names it may have to fetch are handed back rather than cached here,
         so that only a reading the turn actually used is remembered for the
         rest of the day.
+
+        The graph is borrowed for the length of this rather than held, since
+        which graph it is depends on who is talking — and the whole point of
+        a store per person is that this object cannot know that in advance.
         """
+        with self._stores.lease(user_id) as stores:
+            return self._read_against(turn, history, known_eras, stores.graph)
+
+    def _read_against(
+        self,
+        turn: ChatTurn,
+        history: list[ChatTurn],
+        known_eras: tuple[str, ...] | None,
+        graph: ReadOnlyGraph,
+    ) -> Reading | None:
+        """The reading itself, against one person's graph."""
         fetched = (
-            era_vocabulary(self._graph, config=self._config)
+            era_vocabulary(graph, config=self._config)
             if known_eras is None
             else None
         )
@@ -260,7 +277,7 @@ class QueryFormulator:
             return None
 
         context = GroundingContext(
-            graph=self._graph,
+            graph=graph,
             eras=eras or (),
             keyword_limit=self._config.max_keywords_per_trigger,
         )

@@ -27,13 +27,8 @@ import threading
 from dataclasses import replace
 
 from lumen.config import AppConfig
-from lumen.graph.provider import GraphProvider, ReadOnlyGraph
-from lumen.ingest.worker import (
-    IngestResources,
-    IngestWorker,
-    build_resources,
-    open_index,
-)
+from lumen.ingest.worker import IngestModels, IngestWorker, build_models
+from lumen.stores import StoreRegistry
 from lumen.providers.factory import get_llm_provider
 from lumen.providers.protocols import EmbeddingProvider
 from lumen.query import ConversationalRetriever
@@ -47,38 +42,37 @@ class LazySearchStack:
     """
     Builds the conversational retriever the first time somebody asks for it.
 
-    Holds a lock because two requests can arrive together on the first call,
-    and building two index handles for one folder is exactly the thing this
-    class exists to prevent.
+    Built late because it needs models, and every other route in this service
+    reads two local databases and needs none — a deployment with nothing
+    configured still starts and still serves the graph.
+
+    It used to exist mostly to stop two handles being opened on one search
+    index. That is the store registry's problem now, and what is left here is
+    a retriever and the models it holds.
     """
 
     def __init__(
         self,
         *,
         config: AppConfig,
-        graph: GraphProvider,
-        reader: ReadOnlyGraph,
+        stores: StoreRegistry,
         worker: IngestWorker | None = None,
     ) -> None:
         """
         Args:
             config: Settings for this deployment.
-            graph: The writable graph, needed only because opening the
-                shared resources borrows it. Nothing here ever writes.
-            reader: What the retriever is actually given — every question,
-                none of the writes.
-            worker: The importer, when this deployment has one. Its index
-                and embedder are borrowed rather than opened again.
+            stores: Where a person's graph and search index come from. The
+                retriever is given the registry rather than a store, because
+                which store a turn is about depends on who is talking.
+            worker: The importer, when this deployment has one. Its models are
+                borrowed rather than built twice.
         """
         self._config = config
-        self._graph = graph
-        self._reader = reader
+        self._stores = stores
         self._worker = worker
         self._lock = threading.Lock()
         self._retriever: ConversationalRetriever | None = None
-        self._owned: IngestResources | None = None
-        # An index opened on its own, for callers that need no model.
-        self._index: VectorProvider | None = None
+        self._owned: IngestModels | None = None
 
     def get(self) -> ConversationalRetriever:
         """
@@ -96,85 +90,40 @@ class LazySearchStack:
                 logger.info("the conversational search stack is open")
             return self._retriever
 
-    def vectors(self) -> VectorProvider:
-        """
-        The search index, opened if this is the first thing to want it.
-
-        Handed out so anything else needing to write to the index borrows
-        this one rather than opening its own. A file-backed index takes a
-        lock, so a second handle on the same folder inside one process is
-        refused outright.
-        """
-        with self._lock:
-            return self._shared_resources().vectors
-
-    def index(self) -> VectorProvider:
-        """
-        The search index alone, without needing a model configured.
-
-        The difference from `vectors` matters for exactly one caller.
-        Erasing somebody's data has to delete their positions in the index,
-        and deleting needs nothing that writing needs — so a deployment whose
-        model credentials have expired must still be able to do it.
-
-        Where an importer exists it is still asked first. It owns the index
-        on a deployment that has one, and a second handle on a file-backed
-        index inside one process is refused.
-        """
-        with self._lock:
-            if self._worker is not None:
-                return self._worker.ensure_ready().vectors
-            if self._owned is not None:
-                return self._owned.vectors
-            if self._index is None:
-                self._index = open_index(self._config)
-            return self._index
-
     def embedder(self) -> EmbeddingProvider:
-        """The embedding model, borrowed from the same shared resources."""
+        """The embedding model, borrowed from the importer where there is one."""
         with self._lock:
-            return self._shared_resources().embedder
+            return self._models().embedder
 
     def close(self) -> None:
-        """Release the thread pool, and the index if this opened its own."""
+        """Release the thread pool. The stores are the registry's to close."""
         with self._lock:
             if self._retriever is not None:
                 self._retriever.close()
                 self._retriever = None
-            if self._owned is not None:
-                self._owned.close()
-                self._owned = None
-            if self._index is not None:
-                self._index.close()
-                self._index = None
 
     def _build(self) -> ConversationalRetriever:
-        """Open what is missing, borrow what is not, and wire it together."""
-        shared = self._shared_resources()
+        """Wire the retriever to the registry and this deployment's models."""
         return ConversationalRetriever(
-            graph=self._reader,
-            vectors=shared.vectors,
-            embedder=shared.embedder,
+            stores=self._stores,
+            embedder=self._models().embedder,
             llm=self._model_without_retries(),
             config=self._config.query,
             scoring=self._config.scoring,
         )
 
-    def _shared_resources(self) -> IngestResources:
+    def _models(self) -> IngestModels:
         """
-        The index and embedder, borrowed from the importer where there is one.
+        The models, borrowed from the importer where there is one.
 
-        Sharing is not an optimisation. A file-backed index takes a lock, so
-        a second handle on the same folder inside one process is refused —
-        and two handles on the same collection would be two views of one
-        thing with no reason to agree.
+        Sharing them is only an economy — they are stateless clients. The
+        thing that genuinely could not be opened twice was the search index,
+        and that is the store registry's problem now.
         """
         if self._worker is not None:
             return self._worker.ensure_ready()
         if self._owned is None:
-            # Handing over any index already opened on its own, since a
-            # second handle on a file-backed one would be refused.
-            self._owned = build_resources(self._config, self._graph, self._index)
+            self._owned = build_models(self._config)
         return self._owned
 
     def _model_without_retries(self):
@@ -185,41 +134,32 @@ class LazySearchStack:
         )
 
 
-__all__ = ["LazySearchStack"]
-
 
 class LazyEraser:
     """
-    Builds the thing that forgets, the first time somebody asks it to.
+    Holds the thing that forgets.
 
-    Built late for one reason: erasing touches the search index, and opening
-    the index needs an embedding model configured. Building this at startup
-    would mean a deployment with no model refusing to start, when everything
-    it can actually do — reading the graph, listing what was erased before —
-    needs no model at all.
+    Nothing lazy is left in it. It was built late because erasing needed the
+    search index and opening the index needed a model configured; stores now
+    come from the registry, which needs no model at all, so this exists only
+    to keep the shape the routes already expect.
     """
 
-    def __init__(
-        self, *, config: AppConfig, graph, ops, search: LazySearchStack
-    ) -> None:
+    def __init__(self, *, config: AppConfig, stores, ops) -> None:
         self._config = config
-        self._graph = graph
+        self._stores = stores
         self._ops = ops
-        self._search = search
         self._lock = threading.Lock()
         self._service = None
 
     def get(self):
-        """The erasure service, opening the index if this is the first ask."""
+        """The erasure service."""
         from lumen.erasure import ErasureService
 
         with self._lock:
             if self._service is None:
                 self._service = ErasureService(
-                    config=self._config,
-                    graph=self._graph,
-                    vectors=self._search.index(),
-                    ops=self._ops,
+                    config=self._config, stores=self._stores, ops=self._ops
                 )
             return self._service
 
@@ -248,7 +188,7 @@ class LazyChatStack:
         memory,
         sessions,
         personas=None,
-        graph=None,
+        stores=None,
     ) -> None:
         self._config = config
         self._search = search
@@ -257,7 +197,7 @@ class LazyChatStack:
         self._memory = memory
         self._sessions = sessions
         self._personas = personas
-        self._graph = graph
+        self._stores = stores
         self._lock = threading.Lock()
         self._engine = None
         self._llm = None
@@ -287,6 +227,7 @@ class LazyChatStack:
                     speech=self._voice(),
                     personas=self._personas,
                     hits=self._hit_recorder(),
+                    alerts=self._alert_reader(),
                     config=self._config.chat,
                 )
             return self._engine
@@ -295,15 +236,40 @@ class LazyChatStack:
         """
         The thing that counts which records a turn used, where there is one.
 
-        Nothing when no writable graph was handed in. Counting is a
-        convenience and a deployment reading a graph it cannot write to
-        should still be able to hold a conversation.
+        Nothing when no registry was handed in. Counting is a convenience,
+        and a deployment that cannot write should still hold a conversation.
         """
         from lumen.query.frequency import QueryHitRecorder
 
-        if self._graph is None:
+        if self._stores is None:
             return None
-        return QueryHitRecorder(self._graph, config=self._config.scoring)
+        return QueryHitRecorder(self._stores, config=self._config.scoring)
+
+    def _alert_reader(self):
+        """
+        The thing that notices somebody's beliefs moving, where there is one.
+
+        Nothing without a registry, for the same reason as the counter: it
+        reads a history, and which history depends on who is talking.
+        """
+        from lumen.query.alerts import ShadowAlertReader
+
+        if self._stores is None:
+            return None
+        return ShadowAlertReader(self._stores, config=self._config.macro)
+
+    def _alert_reader(self):
+        """
+        The thing that notices somebody's beliefs moving, where there is one.
+
+        Nothing without a registry, for the same reason as the counter: it
+        reads a history, and which history depends on who is talking.
+        """
+        from lumen.query.alerts import ShadowAlertReader
+
+        if self._stores is None:
+            return None
+        return ShadowAlertReader(self._stores, config=self._config.macro)
 
     def listener(self):
         """

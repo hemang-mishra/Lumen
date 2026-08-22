@@ -1386,3 +1386,82 @@ class EventListView(BaseModel):
     events: list[EventView]
     count: int
     listeners: int = 0
+
+
+# ---------------------------------------------------------------------------
+# Identity — who is asking
+# ---------------------------------------------------------------------------
+
+
+class SignInStartView(BaseModel):
+    """
+    Where to send somebody to sign in.
+
+    Only the URL. The two secrets that go with it are set as cookies the
+    browser cannot read, because their whole purpose is to prove that the
+    person who comes back is the one who left.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    authorization_url: str
+
+
+class SignInCallbackRequest(BaseModel):
+    """
+    What the browser brings back from the sign-in provider.
+
+    The state is sent here as well as held in a cookie, because comparing the
+    two is what proves this is the same flow — a value that only ever
+    travelled one way would prove nothing.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    code: str = Field(min_length=1)
+    state: str = Field(min_length=1)
+
+
+class SessionView(BaseModel):
+    """
+    A new session.
+
+    The access token is in the body because it belongs in memory, never in
+    storage a script can read. The renewable half is not here at all — it is
+    a cookie the browser cannot see.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    access_token: str
+    expires_in: int
+    token_type: str = "Bearer"
+    user: "UserView"
+
+
+class UserView(BaseModel):
+    """
+    Somebody, as they are shown to themselves.
+
+    Everything here can change without waiting for a token to expire, which
+    is exactly why none of it is in the token.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    user_id: str
+    email: str
+    display_name: str = ""
+    avatar_url: str | None = None
+    status: str = "ACTIVE"
+    created_at: datetime | None = None
+    last_seen_at: datetime | None = None
+
+
+class SignedOutView(BaseModel):
+    """Confirmation that a session has ended."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    signed_out: bool = True
+    sessions_ended: int = 1

@@ -105,6 +105,27 @@ class VectorProvider(Protocol):
         """
         ...
 
+    def iter_points(
+        self, *, batch: int = 200, after: str | None = None
+    ) -> tuple[list[tuple[str, list[float], dict[str, Any]]], str | None]:
+        """
+        Read stored points back out, a page at a time.
+
+        Exists for one job: moving a collection. There is no rename, and
+        reaching into the storage layout to move files would tie this to one
+        vendor's on-disk shape — which is the thing having a Protocol at all
+        is meant to prevent. So a collection is copied through the same door
+        everything else uses.
+
+        Comes back as (points, cursor). A cursor of None means that was the
+        last page.
+
+        The vectors are the normalised form, which is what a cosine
+        collection stores and all it uses — copying them into another cosine
+        collection preserves every distance anybody will ever measure.
+        """
+        ...
+
     def close(self) -> None:
         """Release database resources."""
         ...
