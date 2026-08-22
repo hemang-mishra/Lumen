@@ -62,6 +62,18 @@ def _connection_for(location: str) -> dict[str, str]:
     return {"path": location}
 
 
+def open_client(location: str):
+    """
+    One connection to a search index, for sharing between collections.
+
+    Exists because a file-backed index refuses a second connection to the
+    same folder. Anything that needs several collections at once — a
+    collection per person — opens one of these and hands it to each provider,
+    so the connection has a single owner and a single close.
+    """
+    return qdrant_client.QdrantClient(**_connection_for(location))
+
+
 class QdrantVectorProvider(VectorProvider):
     """
     Qdrant implementation of the VectorProvider Protocol.
@@ -83,6 +95,7 @@ class QdrantVectorProvider(VectorProvider):
         location: str = ":memory:",
         collection_name: str = "lumen_nodes",
         vector_size: int = 768,
+        client: Any | None = None,
     ) -> None:
         """
         Initialize the Qdrant client.
@@ -97,11 +110,23 @@ class QdrantVectorProvider(VectorProvider):
 
             collection_name: Name of the Qdrant collection.
             vector_size: Dimensionality of dense vectors (768 for text-embedding-004).
+            client: An already-open connection to share, when there is one.
+
+                This is what makes a collection per person possible. A
+                file-backed store allows exactly one connection to a storage
+                folder — a second is refused outright, the same way the graph
+                refuses a second handle on a directory — so several people's
+                collections cannot each open their own. They share one
+                connection and differ only in which collection they name.
+
+                A shared connection is never closed by a provider using it.
+                Whoever opened it closes it.
         """
         self.location = location
         self.collection_name = collection_name
         self.vector_size = vector_size
-        self.client = qdrant_client.QdrantClient(**_connection_for(location))
+        self._owns_client = client is None
+        self.client = client or qdrant_client.QdrantClient(**_connection_for(location))
         logger.info(
             "QdrantVectorProvider initialized (location=%s, collection=%s, dim=%d)",
             location, collection_name, vector_size,
@@ -114,11 +139,17 @@ class QdrantVectorProvider(VectorProvider):
         self.close()
 
     def close(self) -> None:
-        """Release Qdrant client resources."""
-        if hasattr(self, "client") and self.client is not None:
+        """
+        Release the connection, if this provider is the one that opened it.
+
+        A borrowed connection is left alone. Several people's collections
+        share one, and closing it because one of them is finished would take
+        the others down with it.
+        """
+        if self._owns_client and getattr(self, "client", None) is not None:
             self.client.close()
             self.client = None  # type: ignore[assignment]
-        logger.info("QdrantVectorProvider closed for %s", self.location)
+            logger.info("QdrantVectorProvider closed for %s", self.location)
 
     # ------------------------------------------------------------------
     # Collection Initialization
@@ -277,6 +308,37 @@ class QdrantVectorProvider(VectorProvider):
         )
         logger.info("Deleted %d vectors from %s", present, self.collection_name)
         return present
+
+    def iter_points(
+        self, *, batch: int = 200, after: str | None = None
+    ) -> tuple[list[tuple[str, list[float], dict[str, Any]]], str | None]:
+        """
+        Read stored points back out, a page at a time.
+
+        The node's real name comes from the payload rather than from the
+        point id, which cannot be reversed — the derivation only runs one
+        way. A point with no name in its payload is skipped: it was not
+        written by this system and copying it would put something
+        unaccounted for into somebody's collection.
+        """
+        points, cursor = self.client.scroll(
+            collection_name=self.collection_name,
+            limit=max(int(batch), 1),
+            offset=after,
+            with_vectors=True,
+            with_payload=True,
+        )
+
+        found: list[tuple[str, list[float], dict[str, Any]]] = []
+        for point in points:
+            payload = dict(point.payload or {})
+            name = payload.get("node_id")
+            vector = point.vector
+            if not name or not isinstance(vector, list):
+                continue
+            found.append((str(name), [float(value) for value in vector], payload))
+
+        return found, (str(cursor) if cursor is not None else None)
 
     def get_vectors(self, node_ids: list[str]) -> dict[str, list[float]]:
         """

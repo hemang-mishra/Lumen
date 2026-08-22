@@ -34,11 +34,10 @@ from lumen.erasure.contracts import (
 )
 from lumen.erasure.runner import ErasureRunner
 from lumen.erasure.targets import ENTRY_SCOPE_LIMITS, GraphTargets
-from lumen.graph.provider import GraphProvider
 from lumen.operational.enums import ErasureScope
 from lumen.operational.repositories import OperationalStore
 from lumen.operational.schemas import StoredErasureAudit
-from lumen.vector.provider import VectorProvider
+from lumen.stores import StoreRegistry
 
 logger = logging.getLogger(__name__)
 
@@ -56,19 +55,12 @@ class ErasureService:
         self,
         *,
         config: AppConfig,
-        graph: GraphProvider,
-        vectors: VectorProvider,
+        stores: StoreRegistry,
         ops: OperationalStore,
     ) -> None:
         self._config = config
-        self._graph = graph
+        self._stores = stores
         self._ops = ops
-        self._targets = GraphTargets(
-            graph, batch_size=config.maintenance.erasure_batch_size
-        )
-        self._runner = ErasureRunner(
-            graph=graph, vectors=vectors, ops=ops, config=config.maintenance
-        )
         self._lock = threading.Lock()
 
     def preview(self, request: ErasureRequest) -> ErasurePlan:
@@ -79,22 +71,25 @@ class ErasureService:
         whether to go ahead should not have to type the word that means yes
         in order to find out what yes would mean.
         """
-        if request.scope is ErasureScope.ENTRY:
-            found = self._entry_records(str(request.entry_id))
-            return ErasurePlan(
-                scope=request.scope,
-                entry_id=request.entry_id,
-                records_by_kind=self._targets.count_by_kind(found),
-                total_records=len(found),
-                vectors=len(found),
-                conversations=1,
-                not_reached=ENTRY_SCOPE_LIMITS,
-            )
+        with self._stores.lease(request.user_id) as stores:
+            targets = self._targets(stores)
 
-        by_kind: dict[str, int] = {}
-        for table, page in self._targets.everything():
-            by_kind[table] = by_kind.get(table, 0) + len(page)
-        total = sum(by_kind.values())
+            if request.scope is ErasureScope.ENTRY:
+                found = targets.for_entry(str(request.entry_id))
+                return ErasurePlan(
+                    scope=request.scope,
+                    entry_id=request.entry_id,
+                    records_by_kind=targets.count_by_kind(found),
+                    total_records=len(found),
+                    vectors=len(found),
+                    conversations=1,
+                    not_reached=ENTRY_SCOPE_LIMITS,
+                )
+
+            by_kind: dict[str, int] = {}
+            for table, page in targets.everything():
+                by_kind[table] = by_kind.get(table, 0) + len(page)
+            total = sum(by_kind.values())
 
         return ErasurePlan(
             scope=request.scope,
@@ -131,9 +126,14 @@ class ErasureService:
                     "initiated_by": request.initiated_by.value,
                 },
             )
-            return self._runner.run(
-                request, entry_ids=entry_ids, at=at or _now()
-            )
+            with self._stores.lease(request.user_id) as stores:
+                runner = ErasureRunner(
+                    graph=stores.graph,
+                    vectors=stores.vectors,
+                    ops=self._ops,
+                    config=self._config.maintenance,
+                )
+                return runner.run(request, entry_ids=entry_ids, at=at or _now())
         finally:
             self._lock.release()
 
@@ -165,16 +165,23 @@ class ErasureService:
             return self._conversations(request.user_id)
 
         entry_id = str(request.entry_id)
-        if not self._entry_records(entry_id):
+        if not self._entry_records(request.user_id, entry_id):
             raise ErasureRefused(
                 f"nothing was ever written from an entry called {entry_id!r}, "
                 "so there is nothing to erase"
             )
         return [entry_id]
 
-    def _entry_records(self, entry_id: str) -> list[str]:
-        """The graph records one entry produced."""
-        return self._targets.for_entry(entry_id)
+    def _targets(self, stores) -> GraphTargets:
+        """A reader over one person's graph, for working out what is covered."""
+        return GraphTargets(
+            stores.graph, batch_size=self._config.maintenance.erasure_batch_size
+        )
+
+    def _entry_records(self, user_id: str, entry_id: str) -> list[str]:
+        """The graph records one entry produced, in this person's history."""
+        with self._stores.lease(user_id) as stores:
+            return self._targets(stores).for_entry(entry_id)
 
     def _conversations(self, user_id: str) -> list[str]:
         """

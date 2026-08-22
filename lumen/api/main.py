@@ -25,6 +25,8 @@ arriving mid-import from landing inside an uncommitted transaction.
 
 from __future__ import annotations
 
+import os
+
 import logging
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
@@ -37,7 +39,7 @@ from fastapi.staticfiles import StaticFiles
 
 from lumen.api.deps import get_graph, get_ops, require_identity
 from lumen.api.errors import register_error_handlers
-from lumen.api.events import EventBus
+from lumen.api.events import JOB_FAILED, JOB_RAN, EventBus
 from lumen.api.resources import LazyChatStack, LazyEraser, LazySearchStack
 from lumen.api.routes import (
     auth as auth_routes,
@@ -56,9 +58,9 @@ from lumen.api.schemas import HealthView
 from lumen.config import AppConfig
 from lumen.env import load_env
 from lumen.scheduling import Scheduler
+from lumen.stores import StoreRegistry
 from lumen.scheduling.jobs import ReportsDue, ReviewSweep, ShadowScan
 from lumen.scheduling.watcher import DecayedConversationWatcher
-from lumen.graph.kuzu_impl import KuzuGraphProvider
 from lumen.graph.provider import ReadOnlyGraph
 from lumen.ingest import IngestWorker
 from lumen.observability.logging import configure_logging
@@ -137,7 +139,6 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
 
     @app.get("/health", response_model=HealthView, tags=["health"])
     def health(
-        store: ReadOnlyGraph = Depends(get_graph),
         ops: OperationalStore = Depends(get_ops),
     ) -> HealthView:
         """
@@ -146,8 +147,12 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
         Reported separately because a service that is running but cannot
         reach its databases is a different problem from one that is down,
         and the two are fixed differently.
+
+        The graph half asks about the place everybody's graphs live rather
+        than opening one, because this route is answered before anybody has
+        signed in and there is no one person whose history to probe.
         """
-        graph_ok = _answers(lambda: store.count_by_type())
+        graph_ok = _graph_root_reachable(settings)
         ops_ok = _answers(lambda: ops.jobs.get_job("health-probe"))
         return HealthView(
             status="ok" if graph_ok and ops_ok else "degraded",
@@ -179,6 +184,23 @@ def create_configured_app() -> FastAPI:
     return create_app()
 
 
+def _graph_root_reachable(settings: AppConfig) -> bool:
+    """
+    Whether the place per-person graphs live can be read and written.
+
+    A liveness check, not a query. There is no single graph any more, so what
+    is worth reporting is whether the storage underneath everybody is there —
+    a missing or read-only directory is the failure that would stop every
+    person at once.
+    """
+    root = Path(settings.graph.db_root)
+    try:
+        root.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        return False
+    return os.access(root, os.R_OK | os.W_OK)
+
+
 def _lifespan_for(settings: AppConfig):
     """
     Open both stores when the application starts and close them when it stops.
@@ -200,29 +222,26 @@ def _lifespan_for(settings: AppConfig):
         # nobody listening is the ordinary state and costs nothing.
         events = EventBus(history=settings.scheduler.event_history)
 
-        provider = KuzuGraphProvider(settings.graph.db_path)
-        provider.init_schema()
+        # One registry for the process, because everybody working on one
+        # person's graph has to hold the same handle — a second on the same
+        # directory is refused, not slow.
+        stores = StoreRegistry(settings)
         store = build_operational_store(settings)
         _bring_the_schema_up_to_date(store)
-        formulator = _build_formulator(settings, provider)
-        worker = _build_worker(settings, store, provider, events)
-        search = LazySearchStack(
-            config=settings, graph=provider, reader=provider, worker=worker
-        )
+        formulator = _build_formulator(settings, stores)
+        worker = _build_worker(settings, store, stores, events)
+        search = LazySearchStack(config=settings, stores=stores, worker=worker)
 
-        app.state.graph = provider
+        app.state.stores = stores
         app.state.ops = store
         app.state.reporter = MacroextractionService(
-            config=settings, graph=provider, ops=store
+            config=settings, stores=stores, ops=store
         )
-        app.state.eraser = LazyEraser(
-            config=settings, graph=provider, ops=store, search=search
-        )
+        app.state.eraser = LazyEraser(config=settings, stores=stores, ops=store)
         app.state.reviewer = ReviewService(
             config=settings,
-            graph=provider,
+            stores=stores,
             ops=store,
-            open_vectors=search.vectors,
             open_embedder=search.embedder,
         )
         app.state.formulator = formulator
@@ -244,7 +263,7 @@ def _lifespan_for(settings: AppConfig):
             memory=app.state.memory,
             sessions=app.state.sessions,
             personas=app.state.personas,
-            graph=provider,
+            stores=stores,
         )
         app.state.events = events
         app.state.auth = _build_auth(settings, store)
@@ -260,7 +279,7 @@ def _lifespan_for(settings: AppConfig):
         app.state.scheduler = scheduler
         scheduler.start()
 
-        logger.info("api ready", extra={"graph_path": settings.graph.db_path})
+        logger.info("api ready", extra={"graph_root": settings.graph.db_root})
 
         try:
             yield
@@ -283,7 +302,7 @@ def _lifespan_for(settings: AppConfig):
                 worker.stop()
             if formulator is not None:
                 formulator.close()
-            provider.close()
+            stores.close()
             store.close()
             logger.info("api stopped")
 
@@ -385,9 +404,9 @@ def _announce(events: EventBus, report) -> None:
     """
     for outcome in report.outcomes:
         if outcome.worked:
-            events.publish("job_ran", job=outcome.name, did=outcome.did)
+            events.publish(JOB_RAN, job=outcome.name, did=outcome.did)
         elif outcome.failure is not None:
-            events.publish("job_failed", job=outcome.name, reason=outcome.failure)
+            events.publish(JOB_FAILED, job=outcome.name, reason=outcome.failure)
 
 
 def _bring_the_schema_up_to_date(store) -> None:
@@ -431,15 +450,16 @@ def _bring_the_schema_up_to_date(store) -> None:
 
 
 def _build_worker(
-    settings: AppConfig, ops, graph, events: EventBus
+    settings: AppConfig, ops, stores, events: EventBus
 ) -> IngestWorker | None:
     """
     The importer, sharing the graph the rest of the application reads.
 
-    Sharing is not an optimisation. Kuzu is embedded and takes a file lock,
-    so a second provider on the same path inside this process would simply
-    be refused; the provider serialises access internally so that the read
-    routes and this thread cannot collide.
+    It is given the registry rather than a graph, because a run cannot know
+    whose graph it needs until it reads the job. Sharing the registry is not
+    an optimisation: an embedded graph takes a file lock per directory, so
+    everybody working on one person's graph has to hold the same handle, and
+    the registry is what guarantees that.
 
     Its models are deliberately *not* built here. A missing credential would
     otherwise stop the service from starting, when every other thing it does
@@ -454,7 +474,7 @@ def _build_worker(
     worker = IngestWorker(
         config=settings,
         ops=ops,
-        graph=graph,
+        stores=stores,
         announce=lambda kind, payload: events.publish(kind, **payload),
     )
     worker.start()
@@ -477,7 +497,7 @@ def _warn_about_vectors_that_will_not_survive(settings: AppConfig) -> None:
             "the search index is in memory while the graph is on disk, so "
             "anything imported will become unfindable by meaning after a "
             "restart; set LUMEN_VECTOR_LOCATION to a path to keep it",
-            extra={"graph_path": settings.graph.db_path},
+            extra={"graph_root": settings.graph.db_root},
         )
 
 
@@ -502,7 +522,7 @@ def _mount_ui(app: FastAPI) -> None:
 
 
 def _build_formulator(
-    settings: AppConfig, graph: ReadOnlyGraph
+    settings: AppConfig, stores: StoreRegistry
 ) -> QueryFormulator | None:
     """
     The turn reader, with its model held to a single retry.
@@ -538,7 +558,7 @@ def _build_formulator(
             exc_info=True,
         )
         return None
-    return QueryFormulator(llm=llm, graph=graph, config=settings.query)
+    return QueryFormulator(llm=llm, stores=stores, config=settings.query)
 
 
 def _summariser(settings: AppConfig):

@@ -49,7 +49,7 @@ def a_reading() -> str:
 def offline(tmp_path):
     """Settings with every model pointed at a stand-in and nothing on a network."""
     return AppConfig(
-        graph=GraphConfig(db_path=str(tmp_path / "graph.db")),
+        graph=GraphConfig(db_root=str(tmp_path / "graph.db")),
         operational=OperationalConfig(db_url=f"sqlite:///{tmp_path}/ops.db"),
         vector=VectorConfig(location=":memory:"),
         chat=ChatConfig(),

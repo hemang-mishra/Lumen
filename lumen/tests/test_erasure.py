@@ -16,6 +16,8 @@ from datetime import UTC, date, datetime
 
 import pytest
 
+from lumen.tests.conftest import registry_for
+
 from lumen.config import AppConfig, MaintenanceConfig, OperationalConfig
 from lumen.erasure.contracts import ErasureRefused, ErasureRequest
 from lumen.erasure.runner import ErasureRunner
@@ -111,7 +113,9 @@ def service(graph_store, vector_store, ops_store, ops_config):
     """The erasure service over the real stores."""
     config = AppConfig(operational=ops_config, default_user_id=USER)
     return ErasureService(
-        config=config, graph=graph_store, vectors=vector_store, ops=ops_store
+        config=config,
+        stores=registry_for(graph_store, vector_store),
+        ops=ops_store,
     )
 
 

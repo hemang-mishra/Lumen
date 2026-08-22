@@ -17,6 +17,8 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 
+from lumen.tests.conftest import registry_for
+
 from lumen.config import AppConfig, ChatConfig, QueryConfig
 from lumen.providers.errors import ProviderError
 from lumen.providers.fake import FakeLLMProvider, FakeSpeechProvider
@@ -106,7 +108,7 @@ def build(ops_store):
         return ChatEngine(
             formulator=QueryFormulator(
                 llm=FakeLLMProvider(readings or [a_reading()] * 20),
-                graph=NoGraph(),
+                stores=registry_for(NoGraph()),
                 config=QueryConfig(),
             ),
             retriever=retriever or NothingFound(),

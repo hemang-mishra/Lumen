@@ -5,16 +5,11 @@ The adversarial half of this goal. Everything else tests that a signed-in
 person gets in; this tests that getting in is not the same as getting
 everything.
 
-**What this can and cannot check today, stated plainly.** The operational
-database has been keyed by user since it was built, so conversations, jobs,
-imports, the review queue and settings are genuinely separate and are tested
-that way here. The graph and the search index carry no notion of a user at
-all: there is one graph, and every signed-in person shares it. That is
-correct for the single-user deployment this is, and it is the reason a second
-person must not be invited before per-user stores land.
-
-The tests below are therefore split by which of those two halves they are
-about, and the graph ones assert what is true rather than what will be.
+Both halves are real now. The operational database has been keyed by person
+since it was built, and since per-user stores there is a graph and a search
+collection each as well — so "somebody else's identifier" is not a filter
+somebody might forget, it is a directory this request was never given a
+handle to.
 """
 
 from __future__ import annotations
@@ -34,22 +29,30 @@ NOW = datetime(2026, 8, 20, 12, tzinfo=timezone.utc)
 
 
 @pytest.fixture
-def two_people(graph_store, ops_store, vector_store, monkeypatch):
+def two_people(ops_store, monkeypatch, tmp_path):
     """An application with two accounts and a token for each."""
     private, _ = keymod.generate()
     monkeypatch.setenv("LUMEN_JWT_PRIVATE_KEY", private)
     monkeypatch.delenv("LUMEN_JWT_PUBLIC_KEYS", raising=False)
 
-    from lumen.api.deps import get_graph, get_ops
+    from lumen.api.deps import get_ops
     from lumen.api.events import EventBus
     from lumen.api.main import create_app
     from lumen.auth.google import GoogleIdentityProvider
+    from lumen.config import GraphConfig, VectorConfig
+    from lumen.stores import StoreRegistry
 
-    settings = AppConfig(auth=AuthConfig(enabled=True))
+    # Real per-person stores on disk, because the thing being tested is
+    # whether they are actually separate. A shared stand-in would pass every
+    # test in this file while proving nothing.
+    settings = AppConfig(
+        auth=AuthConfig(enabled=True),
+        graph=GraphConfig(db_root=str(tmp_path / "graphs")),
+        vector=VectorConfig(location=str(tmp_path / "vectors"), vector_size=768),
+    )
     app = create_app(settings)
-    app.dependency_overrides[get_graph] = lambda: graph_store
     app.dependency_overrides[get_ops] = lambda: ops_store
-    app.state.graph = graph_store
+    app.state.stores = StoreRegistry(settings)
     app.state.ops = ops_store
     app.state.events = EventBus()
     app.state.config = settings
@@ -75,13 +78,12 @@ def two_people(graph_store, ops_store, vector_store, monkeypatch):
     personas = PersonaStore(settings=ops_store.settings)
     reviewer = ReviewService(
         config=settings,
-        graph=graph_store,
+        stores=app.state.stores,
         ops=ops_store,
-        open_vectors=lambda: vector_store,
         open_embedder=lambda: None,
     )
     eraser = ErasureService(
-        config=settings, graph=graph_store, vectors=vector_store, ops=ops_store
+        config=settings, stores=app.state.stores, ops=ops_store
     )
     memory = ConversationMemory(
         store=ConversationStore(ops_store.buffers),
@@ -114,7 +116,8 @@ def two_people(graph_store, ops_store, vector_store, monkeypatch):
             "headers": {"Authorization": f"Bearer {token}"},
         }
 
-    return TestClient(app, raise_server_exceptions=False), people
+    yield TestClient(app, raise_server_exceptions=False), people
+    app.state.stores.close()
 
 
 def a_conversation(ops_store, user_id: str, session_id: str, said: str) -> None:
@@ -256,16 +259,86 @@ class TestTheOperationalHalf:
 
 
 class TestTheGraphHalf:
-    def test_one_graph_is_shared_and_this_is_known(self, two_people, seed_pattern):
-        # Asserted rather than glossed over. There is one graph until
-        # per-user stores land, and a test that pretended otherwise would be
-        # the most dangerous kind of passing test.
+    def test_a_record_belongs_to_one_person_s_graph(self, two_people):
         client, people = two_people
-        seed_pattern("pat_1", name="something either of them could see")
+        _write_a_lesson(client, people["alice"], "alice's private lesson")
 
-        mine = client.get("/graph/nodes/pat_1", headers=people["alice"]["headers"])
-        theirs = client.get("/graph/nodes/pat_1", headers=people["bob"]["headers"])
+        mine = client.get("/graph/nodes/les_1", headers=people["alice"]["headers"])
+        theirs = client.get("/graph/nodes/les_1", headers=people["bob"]["headers"])
 
         assert mine.status_code == 200
-        assert theirs.status_code == 200
-        assert mine.json() == theirs.json()
+        assert theirs.status_code == 404
+
+    def test_somebody_else_s_history_does_not_even_show_up_in_a_count(
+        self, two_people
+    ):
+        client, people = two_people
+        _write_a_lesson(client, people["alice"], "alice's private lesson")
+
+        mine = client.get("/graph/stats", headers=people["alice"]["headers"]).json()
+        theirs = client.get("/graph/stats", headers=people["bob"]["headers"]).json()
+
+        assert mine["total"] == 1
+        assert theirs["total"] == 0
+
+    def test_every_read_endpoint_refuses_the_other_person_s_identifiers(
+        self, two_people
+    ):
+        # The adversarial one, and the point of the whole goal. Every read in
+        # the graph surface, asked with somebody else's identifier.
+        client, people = two_people
+        _write_a_lesson(client, people["alice"], "alice's private lesson")
+        theirs = people["bob"]["headers"]
+
+        paths = [
+            "/graph/nodes/les_1",
+            "/graph/nodes/les_1/neighbors",
+            "/graph/nodes/les_1/versions",
+            "/graph/nodes/les_1/decisions",
+        ]
+        leaked = [
+            path
+            for path in paths
+            if "alice's private lesson" in client.get(path, headers=theirs).text
+        ]
+
+        assert leaked == []
+
+    def test_listing_records_shows_only_your_own(self, two_people):
+        client, people = two_people
+        _write_a_lesson(client, people["alice"], "alice's private lesson")
+
+        listing = client.get(
+            "/graph/nodes", params={"type": "LessonNode"}, headers=people["bob"]["headers"]
+        )
+
+        assert listing.json()["nodes"] == []
+
+    def test_writing_as_one_person_never_reaches_the_other(self, two_people):
+        client, people = two_people
+        _write_a_lesson(client, people["alice"], "alice's")
+        _write_a_lesson(client, people["bob"], "bob's")
+
+        for name, expected in (("alice", "alice's"), ("bob", "bob's")):
+            answer = client.get(
+                "/graph/nodes/les_1", headers=people[name]["headers"]
+            ).json()
+            assert answer["properties"]["lesson_statement"] == expected
+
+
+def _write_a_lesson(client, person, statement: str) -> None:
+    """Put one lesson into this person's own graph."""
+    with client.app.state.stores.lease(person["user"].user_id) as stores:
+        stores.graph.write_node(
+            "LessonNode",
+            {
+                "node_id": "les_1",
+                "created_at": "2026-08-20T00:00:00+00:00",
+                "valid_from": "2026-08-20T00:00:00+00:00",
+                "lesson_statement": statement,
+                "domain": "EMOTIONAL",
+                "signal_strength": "HIGH",
+                "lesson_confidence": 0.9,
+                "status": "ACTIVE",
+            },
+        )

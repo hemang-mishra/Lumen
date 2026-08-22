@@ -19,7 +19,7 @@ from datetime import date, datetime, timezone
 
 from fastapi import APIRouter, Depends, Query
 
-from lumen.api.deps import get_config, get_graph, get_reporter
+from lumen.api.deps import get_config, get_graph, get_reporter, require_identity
 from lumen.api.errors import BadRequest, NotFound
 from lumen.api.schemas import (
     ReportDetailView,
@@ -29,6 +29,7 @@ from lumen.api.schemas import (
     ReportRunRequest,
     ReportRunView,
 )
+from lumen.auth.contracts import Identity
 from lumen.config import AppConfig
 from lumen.graph.provider import ReadOnlyGraph
 from lumen.pipeline.macroextraction import windows
@@ -70,6 +71,7 @@ def list_reports(
 @router.get("/due", response_model=list[ReportDueView])
 def due_reports(
     reporter: MacroextractionService = Depends(get_reporter),
+    identity: Identity = Depends(require_identity),
 ) -> list[ReportDueView]:
     """
     Which periods a schedule would build if it woke up now.
@@ -84,7 +86,7 @@ def due_reports(
             period_start=window.period_start,
             period_end=window.period_end,
         )
-        for window in reporter.due(datetime.now(timezone.utc))
+        for window in reporter.due(identity.user_id, datetime.now(timezone.utc))
     ]
 
 
@@ -118,6 +120,7 @@ def run_report(
     request: ReportRunRequest,
     reporter: MacroextractionService = Depends(get_reporter),
     config: AppConfig = Depends(get_config),
+    identity: Identity = Depends(require_identity),
 ) -> ReportRunView:
     """
     Build one report now, without waiting for a schedule.
@@ -133,9 +136,10 @@ def run_report(
     report_type = ReportType(request.report_type)
 
     if report_type is ReportType.SHADOW:
-        outcome = reporter.run_shadow(now)
+        outcome = reporter.run_shadow(identity.user_id, now)
     else:
         outcome = reporter.run(
+            identity.user_id,
             _window_for(report_type, request.period_start, config),
             force=request.force,
         )

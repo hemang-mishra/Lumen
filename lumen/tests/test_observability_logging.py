@@ -252,7 +252,7 @@ class TestTheSuiteStaysOutOfTheRealLogFile:
 
         app = create_app(
             AppConfig(
-                graph=GraphConfig(db_path=str(tmp_path / "graph")),
+                graph=GraphConfig(db_root=str(tmp_path / "graph")),
                 operational=OperationalConfig(db_url=f"sqlite:///{tmp_path / 'o.db'}"),
             )
         )

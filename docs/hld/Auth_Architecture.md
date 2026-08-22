@@ -1,14 +1,13 @@
 # Identity, Authentication & Multi-User Architecture
 
-**Status:** Goal 21 is **built**; Goal 22 (per-user stores) is not. Authentication,
-identity and enforcement exist and are tested; isolation of the graph and the search index
-does not, which means **every signed-in person still shares one graph**. That is correct for
-the single-user deployment this is, and it is the reason a second person must not be invited
-before Goal 22 lands.
+**Status:** Goals 21 and 22 are **built**. Authentication, identity, enforcement and
+isolation all exist and are tested: every person has their own graph directory and their own
+search collection, resolved from who is asking, and the adversarial test that asks every read
+surface for somebody else's identifiers gets nothing back.
 
 This document says *what* must exist and *why it is shaped this way*;
-`implementation/Master_Plan.md` says *when*, and `Goal_21_Plan.md` says what was actually
-built and where it diverged.
+`implementation/Master_Plan.md` says *when*, and `Goal_21_Plan.md` and `Goal_22_Plan.md` say
+what was actually built and where it diverged.
 
 Lumen today is a single-user system in the only sense that matters: `AppConfig.user_id` is
 an environment variable that defaults to `"local"`, every route reads it, and every request
@@ -237,6 +236,10 @@ Three rules make that enforceable rather than aspirational:
 
 ## 6. Isolation: one store per person
 
+**Built in Goal 22.** What follows is the reasoning it was built from; the divergences are
+in `Goal_22_Plan.md`, and the largest is that the search index turned out to allow only one
+*connection* per process even though it allows many collections on it.
+
 This is the decision with consequences, so here is the alternative it was chosen over.
 
 The other option is a shared graph and a shared collection with `user_id` on every record,
@@ -289,11 +292,21 @@ why nothing has broken. Under per-user stores they must be coordinated per user 
 globally, and a deployment that runs the worker as a separate process must not open the same
 user's directory in both. This is a Goal 22 requirement, not a footnote.
 
+*Goal 22 sharpened it as described and did not remove it.* Coordination is now per person —
+the registry lends one handle per user and counts who is holding it — so two people can be
+written at once and one person cannot be written twice. The lock is still a lock inside one
+process. Two processes would still collide, and the first deployment that runs the worker
+separately needs something both can see. That is named here rather than half-built.
+
 **A per-user store needs creating, and creation can fail halfway.** A user whose graph
 directory exists but whose Qdrant collection does not is a user for whom every write
 succeeds and nothing is ever findable — the exact failure Goal 13b already caught once at
 the collection-width level. Provisioning is therefore explicit, ordered, idempotent, and
 verified at first use, not implied by the first write.
+
+*Built as described.* Provisioning makes the graph first and the collection second, so an
+interruption leaves the shape that is detectable rather than the shape that is silent, and
+the check at first use raises rather than serving an empty history.
 
 ### 6.2 The existing data
 
@@ -302,6 +315,11 @@ in it. Goal 22 must adopt it, not strand it: a documented one-time migration tha
 the first `users` row, links it to a Google identity, and moves the existing database
 directory and collection to that user's key. This is easy to forget until the moment it is
 expensive, so it ships as a tested command rather than as instructions in a README.
+
+*Built as `python -m lumen.stores.adopt --user <id>`.* It moves the graph, copies the search
+entries through the provider interface rather than by touching files, refuses rather than
+merges if the destination already holds a history, and reports "nothing to do" when it has
+already run — so an operator who cannot remember whether it ran can find out by running it.
 
 ---
 
@@ -381,13 +399,19 @@ management UI beyond sign-out.
 
 ## 10. Open questions
 
-**OQ-A1 — Where does the pipeline get its identity?** A background extraction run has no
-request. It reads `user_id` from `pipeline_jobs`, which is correct, but the store registry
-it will use is currently reached through application state. Goal 22 must decide whether the
-worker resolves stores per job or holds one user's handles for the length of a run.
+**OQ-A1 — Where does the pipeline get its identity?** **Answered in Goal 22: per job, from
+the `user_id` the job already carries, through the same registry a request uses.** Holding
+one person's handles for the length of a run would have meant a second lease path with its
+own rules about when things are released, and two ways to get a store is how one of them
+ends up wrong. A job leases, works, and releases — which is also what lets a sweep run for
+everybody without pinning every person's database open at once.
 
-**OQ-A2 — Does the ingest worker stay in-process under multi-user?** The single-writer
-constraint (§6.1) is satisfied today by accident of topology rather than by design.
+**OQ-A2 — Does the ingest worker stay in-process under multi-user?** **Answered in Goal 22:
+yes, for now, and the constraint is now per person rather than global.** Two people can be
+written at the same time; one person cannot be written by two processes. The lock lives
+inside one process, so nothing here makes a separate worker safe — the deployment that first
+wants one needs a lock both processes can see, and that belongs with the deployment that
+needs it rather than being guessed at now.
 
 **OQ-A3 — What happens to a signed-in session when a user is suspended mid-conversation?**
 **Answered in Goal 21: a conversation re-checks at each turn boundary.** Every frame would

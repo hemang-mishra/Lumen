@@ -31,7 +31,7 @@ import logging
 from datetime import datetime
 
 from lumen.config import ScoringConfig
-from lumen.graph.provider import GraphProvider
+from lumen.stores import StoreRegistry
 from lumen.query.assembly.contracts import AssembledContext
 from lumen.query.session import ChatSession
 
@@ -42,16 +42,20 @@ class QueryHitRecorder:
     """
     Notes which records a turn actually used.
 
-    An object rather than a function because it holds the graph it writes to
-    and the settings that can switch it off, and because the thing that calls
-    it — the conversation — should be able to be handed one that does nothing
-    without knowing that is what it got.
+    An object rather than a function because it holds the settings that can
+    switch it off and the registry it borrows a graph from, and because the
+    thing that calls it — the conversation — should be able to be handed one
+    that does nothing without knowing that is what it got.
+
+    Which graph is decided per turn, from whoever is talking. There is one
+    per person, so an object holding "the graph" would be counting somebody
+    else's records.
     """
 
     def __init__(
-        self, graph: GraphProvider, *, config: ScoringConfig | None = None
+        self, stores: StoreRegistry, *, config: ScoringConfig | None = None
     ) -> None:
-        self._graph = graph
+        self._stores = stores
         self._config = config or ScoringConfig()
 
     def note(
@@ -72,7 +76,8 @@ class QueryHitRecorder:
             return 0
 
         try:
-            counted = self._graph.record_query_hits(fresh, at=at)
+            with self._stores.lease(session.user_id) as stores:
+                counted = stores.graph.record_query_hits(fresh, at=at)
         except Exception:
             logger.warning(
                 "the records this turn used could not be counted, so their "

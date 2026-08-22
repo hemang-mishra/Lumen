@@ -18,6 +18,8 @@ from datetime import UTC, datetime
 
 import pytest
 
+from lumen.tests.conftest import registry_for
+
 from lumen.config import AppConfig, ChatConfig, QueryConfig
 from lumen.providers.fake import FakeLLMProvider
 from lumen.query.chat import (
@@ -83,12 +85,11 @@ def talk_to_lumen(graph_store, vector_store, ops_store, a_week_of_history):
         return ChatEngine(
             formulator=QueryFormulator(
                 llm=FakeLLMProvider(readings or [a_reading()] * 10),
-                graph=graph_store,
+                stores=registry_for(graph_store),
                 config=QueryConfig(),
             ),
             retriever=ConversationalRetriever(
-                graph=graph_store,
-                vectors=vector_store,
+                stores=registry_for(graph_store, vector_store),
                 embedder=a_week_of_history,
                 llm=FakeLLMProvider(
                     searches or [a_search("comparing myself to everyone else")] * 10

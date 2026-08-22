@@ -13,6 +13,8 @@ import json
 from datetime import date, datetime
 
 import pytest
+
+from lumen.tests.conftest import registry_for
 from fastapi.testclient import TestClient
 
 from lumen.api.main import create_app
@@ -77,7 +79,7 @@ class ReadyStack:
         self._engine = ChatEngine(
             formulator=QueryFormulator(
                 llm=FakeLLMProvider([a_reading()] * 30),
-                graph=NoGraph(),
+                stores=registry_for(NoGraph()),
                 config=QueryConfig(),
             ),
             retriever=NothingFound(),

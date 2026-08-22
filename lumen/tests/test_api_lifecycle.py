@@ -18,7 +18,7 @@ from datetime import UTC, date, datetime, timedelta
 import pytest
 
 from lumen.config import AppConfig, OperationalConfig, SchedulerConfig
-from lumen.ingest.worker import IngestResources, IngestWorker
+from lumen.ingest.worker import IngestModels, IngestWorker
 from lumen.operational.enums import BufferSource, BufferStatus
 from lumen.operational.schemas import BufferMessageRecord, SessionBufferRecord
 from lumen.scheduling import Scheduler
@@ -31,7 +31,9 @@ USER = "local"
 
 
 @pytest.fixture
-def a_whole_evening(graph_store, vector_store, ops_store, ops_config, tmp_path):
+def a_whole_evening(
+    graph_store, vector_store, ops_store, ops_config, tmp_path, store_registry
+):
     """
     Everything the gateway wires together, pointed at temporary stores.
 
@@ -46,10 +48,8 @@ def a_whole_evening(graph_store, vector_store, ops_store, ops_config, tmp_path):
     worker = IngestWorker(
         config=AppConfig(operational=ops_config, default_user_id=USER),
         ops=ops_store,
-        graph=graph_store,
-        resources=IngestResources(
-            graph=graph_store,
-            vectors=vector_store,
+        stores=store_registry,
+        resources=IngestModels(
             embedder=build_embedder(768),
             lightweight=lightweight,
             thinking=thinking,

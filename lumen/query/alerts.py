@@ -24,7 +24,7 @@ import logging
 from datetime import datetime, timedelta
 
 from lumen.config import MacroConfig
-from lumen.graph.provider import ReadOnlyGraph
+from lumen.stores import StoreRegistry
 from lumen.graph.queries import tidy_row
 from lumen.graph.rows import as_utc, read_moment
 from lumen.schemas.enums import ReportType
@@ -42,17 +42,18 @@ class ShadowAlertReader:
     """
     Finds the most recent alert worth mentioning, if there is one.
 
-    Holds a reader and nothing else. Every failure comes back as "no alert",
-    because a turn is not worth refusing over a notification.
+    Holds the registry and nothing else, because which history to look in
+    depends on who is talking. Every failure comes back as "no alert" — a
+    turn is not worth refusing over a notification.
     """
 
     def __init__(
-        self, graph: ReadOnlyGraph, *, config: MacroConfig | None = None
+        self, stores: StoreRegistry, *, config: MacroConfig | None = None
     ) -> None:
-        self._graph = graph
+        self._stores = stores
         self._config = config or MacroConfig()
 
-    def current(self, now: datetime) -> str | None:
+    def current(self, user_id: str, now: datetime) -> str | None:
         """
         The alert to mention on this turn, or nothing.
 
@@ -60,9 +61,10 @@ class ShadowAlertReader:
         most conversations happen when nothing is shifting.
         """
         try:
-            rows = self._graph.find_reports(
-                report_type=ReportType.SHADOW.value, limit=1
-            )
+            with self._stores.lease(user_id) as stores:
+                rows = stores.graph.find_reports(
+                    report_type=ReportType.SHADOW.value, limit=1
+                )
         except Exception:
             logger.warning("could not check for alerts", exc_info=True)
             return None

@@ -1,12 +1,13 @@
 """
 The one search stack a running process holds open.
 
-Two things here are worth pinning down. The index is opened once and shared,
-because a file-backed one takes a lock and a second handle on the same folder
-is simply refused — so a service that both imports and answers conversations
-has to borrow rather than open. And nothing is built until something asks,
-because a deployment with no model configured must still start and still
-serve every route that needs none.
+What is worth pinning down here is that nothing is built until something
+asks, because a deployment with no model configured must still start and
+still serve every route that needs none.
+
+It used to be about sharing the search index as well. That is the store
+registry's job now — there is a collection per person and one connection
+between them — so what is left here is a retriever and the models it holds.
 """
 
 from __future__ import annotations
@@ -15,29 +16,27 @@ import pytest
 
 from lumen.api.resources import LazySearchStack
 from lumen.config import AppConfig, ProviderConfig
-from lumen.ingest.worker import IngestResources
+from lumen.ingest.worker import IngestModels
 from lumen.providers.errors import ProviderError
 from lumen.providers.fake import FakeEmbeddingProvider, FakeLLMProvider
 
 
 class StubWorker:
-    """An importer that hands over resources it already opened."""
+    """An importer that hands over the models it already opened."""
 
-    def __init__(self, resources: IngestResources) -> None:
+    def __init__(self, resources: IngestModels) -> None:
         self._resources = resources
         self.asked = 0
 
-    def ensure_ready(self) -> IngestResources:
+    def ensure_ready(self) -> IngestModels:
         self.asked += 1
         return self._resources
 
 
 @pytest.fixture
-def borrowed(graph_store, vector_store):
+def borrowed():
     """What an importer would already have open."""
-    return IngestResources(
-        graph=graph_store,
-        vectors=vector_store,
+    return IngestModels(
         embedder=FakeEmbeddingProvider(dimensions=768),
         lightweight=FakeLLMProvider([]),
         thinking=FakeLLMProvider([]),
@@ -45,7 +44,7 @@ def borrowed(graph_store, vector_store):
 
 
 @pytest.fixture
-def stack(graph_store, borrowed, monkeypatch):
+def stack(store_registry, borrowed, monkeypatch):
     """A stack over a stubbed importer and a model that always resolves."""
 
     # "Nothing passed" has to mean "give me an importer", while an explicit
@@ -60,8 +59,7 @@ def stack(graph_store, borrowed, monkeypatch):
         )
         return LazySearchStack(
             config=config or AppConfig(),
-            graph=graph_store,
-            reader=graph_store,
+            stores=store_registry,
             worker=StubWorker(borrowed) if worker is unset else worker,
         )
 
@@ -95,37 +93,40 @@ class TestBuildingOnDemand:
         assert worker.asked == 1
 
 
-class TestSharingTheIndex:
-    def test_the_importer_s_index_is_borrowed_rather_than_opened_again(
-        self, stack, borrowed, vector_store
+class TestSharingTheModels:
+    def test_the_importer_s_models_are_borrowed_rather_than_built_again(
+        self, stack, borrowed
     ):
-        # Not an optimisation. A file-backed index takes a lock, so a second
-        # handle on the same folder in one process is refused outright.
-        retriever = stack(StubWorker(borrowed)).get()
+        # Only an economy now — they are stateless clients. The thing that
+        # genuinely could not be opened twice was the search index, and that
+        # is the store registry's problem.
+        worker = StubWorker(borrowed)
 
-        assert retriever._vectors is vector_store
+        stack(worker).get()
 
-    def test_a_deployment_with_no_importer_opens_its_own(
-        self, stack, graph_store, monkeypatch, borrowed
+        assert worker.asked == 1
+
+    def test_a_deployment_with_no_importer_builds_its_own(
+        self, stack, monkeypatch, borrowed
     ):
-        opened = []
+        built = []
 
-        def _open(config, graph, vectors=None):
-            opened.append(graph)
+        def _build(config):
+            built.append(1)
             return borrowed
 
-        monkeypatch.setattr("lumen.api.resources.build_resources", _open)
+        monkeypatch.setattr("lumen.api.resources.build_models", _build)
         held = stack(worker=None)
 
         held.get()
 
-        assert opened == [graph_store]
+        assert built == [1]
 
-    def test_it_opens_its_own_only_once(self, stack, monkeypatch, borrowed):
+    def test_it_builds_its_own_only_once(self, stack, monkeypatch, borrowed):
         calls = []
         monkeypatch.setattr(
-            "lumen.api.resources.build_resources",
-            lambda config, graph, vectors=None: (calls.append(1), borrowed)[1],
+            "lumen.api.resources.build_models",
+            lambda config: (calls.append(1), borrowed)[1],
         )
         held = stack(worker=None)
 
@@ -134,34 +135,29 @@ class TestSharingTheIndex:
 
         assert len(calls) == 1
 
+    def test_the_retriever_is_given_the_registry_rather_than_a_store(
+        self, stack, borrowed, store_registry
+    ):
+        # The whole of how one turn is about one person: which store it reads
+        # is decided per turn, from who is talking.
+        retriever = stack(StubWorker(borrowed)).get()
+
+        assert retriever._stores is store_registry
+
 
 class TestClosing:
-    def test_what_it_opened_itself_is_closed(self, stack, monkeypatch, borrowed):
-        closed = []
-        monkeypatch.setattr(borrowed, "close", lambda: closed.append(True))
-        monkeypatch.setattr(
-            "lumen.api.resources.build_resources",
-            lambda config, graph, vectors=None: borrowed,
-        )
-        held = stack(worker=None)
-        held.get()
-
-        held.close()
-
-        assert closed == [True]
-
-    def test_what_it_borrowed_is_left_alone(self, stack, borrowed, monkeypatch):
-        # The importer is still using it and is responsible for shutting it
-        # down; closing it here would pull it out from under a running
-        # import.
-        closed = []
-        monkeypatch.setattr(borrowed, "close", lambda: closed.append(True))
+    def test_the_stores_are_not_this_object_s_to_close(
+        self, stack, borrowed, store_registry
+    ):
+        # They belong to the registry, which closes them when the process
+        # stops. Closing them here would pull a graph out from under whoever
+        # else is holding it.
         held = stack(StubWorker(borrowed))
         held.get()
 
         held.close()
 
-        assert closed == []
+        assert store_registry.open_count == 0
 
     def test_closing_twice_is_harmless(self, stack, borrowed):
         held = stack(StubWorker(borrowed))
@@ -176,7 +172,7 @@ class TestClosing:
 
 class TestWhenNothingIsConfigured:
     def test_a_missing_model_is_raised_rather_than_swallowed(
-        self, graph_store, borrowed, monkeypatch
+        self, store_registry, borrowed, monkeypatch
     ):
         # An empty list of records would read as "this person has no
         # history", which is the one answer that must never be given by
@@ -187,8 +183,7 @@ class TestWhenNothingIsConfigured:
         monkeypatch.setattr("lumen.api.resources.get_llm_provider", refuse)
         held = LazySearchStack(
             config=AppConfig(),
-            graph=graph_store,
-            reader=graph_store,
+            stores=store_registry,
             worker=StubWorker(borrowed),
         )
 
@@ -196,7 +191,7 @@ class TestWhenNothingIsConfigured:
             held.get()
 
     def test_the_model_it_builds_does_not_retry(
-        self, graph_store, borrowed, monkeypatch
+        self, store_registry, borrowed, monkeypatch
     ):
         # Every other call in Lumen retries with backoff, which is right for
         # work nobody is waiting on. A call inside a three-second budget that
@@ -210,8 +205,7 @@ class TestWhenNothingIsConfigured:
         monkeypatch.setattr("lumen.api.resources.get_llm_provider", record)
         LazySearchStack(
             config=AppConfig(),
-            graph=graph_store,
-            reader=graph_store,
+            stores=store_registry,
             worker=StubWorker(borrowed),
         ).get()
 

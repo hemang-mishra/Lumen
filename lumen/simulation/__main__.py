@@ -9,7 +9,7 @@ prints what it left behind.
     uv run python -m lumen.simulation
 
 Afterwards the same graph can be browsed through the read API. It writes to
-whatever `LUMEN_GRAPH_DB_PATH` and `LUMEN_OPS_DB_URL` point at, so pointing
+whatever `LUMEN_GRAPH_DB_ROOT` and `LUMEN_OPS_DB_URL` point at, so pointing
 those somewhere temporary is the difference between a scratch graph and
 adding five imaginary days to a real history.
 """
@@ -20,12 +20,11 @@ import logging
 import sys
 
 from lumen.config import AppConfig
-from lumen.graph.kuzu_impl import KuzuGraphProvider
 from lumen.observability.logging import configure_logging
 from lumen.operational.sqlalchemy_impl import build_operational_store
 from lumen.simulation.corpus import CORPUS
 from lumen.simulation.runner import simulate_days
-from lumen.vector.qdrant_impl import QdrantVectorProvider
+from lumen.stores import StoreRegistry
 
 logger = logging.getLogger(__name__)
 
@@ -35,23 +34,25 @@ def main() -> int:
     settings = AppConfig()
     configure_logging(settings.observability)
 
-    graph = KuzuGraphProvider(settings.graph.db_path)
-    graph.init_schema()
-    vectors = QdrantVectorProvider(
-        location=settings.vector.location, vector_size=settings.vector.vector_size
-    )
-    vectors.init_collection()
+    # Asking the registry rather than opening a graph by hand is what puts the
+    # corpus where the service will later look for it: under the default
+    # person, in the directory and collection their stores actually live in.
+    stores = StoreRegistry(settings)
     ops = build_operational_store(settings)
     ops.init_schema()
 
     try:
-        reports = simulate_days(
-            CORPUS, graph=graph, vectors=vectors, ops=ops, config=settings
-        )
-        _report(reports, graph)
+        with stores.lease(settings.default_user_id) as held:
+            reports = simulate_days(
+                CORPUS,
+                graph=held.graph,
+                vectors=held.vectors,
+                ops=ops,
+                config=settings,
+            )
+            _report(reports, held.graph)
     finally:
-        graph.close()
-        vectors.close()
+        stores.close()
         ops.close()
 
     return 0 if all(r.job_status == "COMPLETE" for r in reports) else 1

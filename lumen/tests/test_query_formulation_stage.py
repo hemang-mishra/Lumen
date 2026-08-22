@@ -14,6 +14,8 @@ import time
 
 import pytest
 
+from lumen.tests.conftest import registry_for
+
 from lumen.config import QueryConfig
 from lumen.providers.errors import ProviderError, ProviderTimeoutError
 from lumen.providers.fake import FakeLLMProvider
@@ -620,7 +622,9 @@ class TestTheDeadlineOnItsOwn:
     def test_a_reader_that_made_its_own_pool_closes_it(self):
         from lumen.query.formulation import QueryFormulator
 
-        formulator = QueryFormulator(llm=FakeLLMProvider([]), graph=StubGraph())
+        formulator = QueryFormulator(
+            llm=FakeLLMProvider([]), stores=registry_for(StubGraph())
+        )
         formulator.close()
 
         with pytest.raises(DeadlineExceeded):
@@ -632,7 +636,9 @@ class TestTheDeadlineOnItsOwn:
         runner = DeadlineRunner(max_workers=1, name="test")
         try:
             QueryFormulator(
-                llm=FakeLLMProvider([]), graph=StubGraph(), runner=runner
+                llm=FakeLLMProvider([]),
+                stores=registry_for(StubGraph()),
+                runner=runner
             ).close()
 
             assert runner.run(lambda: "still working", timeout_seconds=5) == (

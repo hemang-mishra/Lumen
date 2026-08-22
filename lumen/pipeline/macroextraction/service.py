@@ -19,7 +19,7 @@ import threading
 from datetime import datetime
 
 from lumen.config import AppConfig
-from lumen.graph.provider import GraphProvider
+from lumen.stores import StoreRegistry
 from lumen.operational.repositories import OperationalStore
 from lumen.pipeline.macroextraction import runner
 from lumen.pipeline.macroextraction.contracts import MacroWindow, ReportOutcome
@@ -49,47 +49,56 @@ class MacroextractionService:
         self,
         *,
         config: AppConfig,
-        graph: GraphProvider,
+        stores: StoreRegistry,
         ops: OperationalStore | None = None,
     ) -> None:
         self._config = config
-        self._graph = graph
+        self._stores = stores
         self._ops = ops
         self._lock = threading.Lock()
         self._models: dict[ModelRole, LLMProvider | None] = {}
 
-    def due(self, now: datetime) -> list[MacroWindow]:
-        """Which periods should have a report by now and do not."""
-        return runner.due_now(now, graph=self._graph, config=self._config)
+    def due(self, user_id: str, now: datetime) -> list[MacroWindow]:
+        """
+        Which of this person's periods should have a report by now and do not.
 
-    def run(self, window: MacroWindow, *, force: bool = False) -> ReportOutcome:
+        Takes the person because a report is about one person's history, and
+        there is a graph each. What used to be an object holding "the graph"
+        is now one that knows how to borrow the right one.
+        """
+        with self._stores.lease(user_id) as stores:
+            return runner.due_now(now, graph=stores.graph, config=self._config)
+
+    def run(
+        self, user_id: str, window: MacroWindow, *, force: bool = False
+    ) -> ReportOutcome:
         """Build one period's report, or say why it was not worth building."""
-        with self._lock:
+        with self._lock, self._stores.lease(user_id) as stores:
             return runner.run_report(
                 window,
-                graph=self._graph,
+                graph=stores.graph,
                 thinking=self._model(ModelRole.THINKING),
                 ops=self._ops,
                 config=self._config,
                 force=force,
             )
 
-    def run_shadow(self, now: datetime) -> ReportOutcome:
+    def run_shadow(self, user_id: str, now: datetime) -> ReportOutcome:
         """Look at the last couple of days and raise an alert if something moved."""
-        with self._lock:
+        with self._lock, self._stores.lease(user_id) as stores:
             return runner.run_shadow(
                 now,
-                graph=self._graph,
+                graph=stores.graph,
                 lightweight=self._model(ModelRole.LIGHTWEIGHT),
                 config=self._config,
             )
 
-    def run_due(self, now: datetime) -> list[ReportOutcome]:
+    def run_due(self, user_id: str, now: datetime) -> list[ReportOutcome]:
         """Catch up on everything owed, including the two-day scan."""
-        with self._lock:
+        with self._lock, self._stores.lease(user_id) as stores:
             return runner.run_due(
                 now,
-                graph=self._graph,
+                graph=stores.graph,
                 thinking=self._model(ModelRole.THINKING),
                 lightweight=self._model(ModelRole.LIGHTWEIGHT),
                 ops=self._ops,

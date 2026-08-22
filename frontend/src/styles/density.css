@@ -1,0 +1,29 @@
+/*
+ * Two densities, set on a container and inherited by everything inside it.
+ *
+ * Comfortable is the product: 44px controls, 15px text, room to breathe.
+ * Compact exists for one reason — a thirty-stage pipeline trace is unreadable
+ * at comfortable spacing, and there is no third option.
+ *
+ * Which one applies is decided in code, not here, and never by the person:
+ * writing surfaces are always comfortable, and inspecting surfaces are only
+ * compact on a device with a mouse. A phone showing a run trace stays
+ * comfortable, because a 32px target is not hittable with a thumb whatever is
+ * being displayed.
+ */
+
+[data-density='comfortable'] {
+  --control-height: 44px;
+  --card-padding: var(--space-16);
+  --row-padding: var(--space-12);
+  --density-text: var(--type-body);
+  --density-line: var(--type-body-line);
+}
+
+[data-density='compact'] {
+  --control-height: 32px;
+  --card-padding: var(--space-12);
+  --row-padding: var(--space-4);
+  --density-text: var(--type-dense);
+  --density-line: var(--type-dense-line);
+}

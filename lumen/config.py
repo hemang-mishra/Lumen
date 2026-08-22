@@ -97,7 +97,16 @@ def _env_bool(name: str, default: bool) -> Any:
 class GraphConfig:
     """Configuration for the Graph database provider."""
 
-    db_path: str = _env("LUMEN_GRAPH_DB_PATH", "./lumen_graph.db")
+    # Where everybody's graphs live. One directory per person underneath it,
+    # named from their identifier — which is what makes isolation structural
+    # rather than a condition every query has to remember.
+    db_root: str = _env("LUMEN_GRAPH_DB_ROOT", "./data/graphs")
+
+    # How many people's graphs may be open at once. A real ceiling: the graph
+    # is embedded and every open one costs file handles and memory. Past it,
+    # the least recently used idle graph is closed, and reopening costs
+    # milliseconds next time somebody needs it.
+    max_open_graphs: int = _env_int("LUMEN_MAX_OPEN_GRAPHS", 32)
 
 
 @dataclass(frozen=True)
@@ -1010,7 +1019,7 @@ class AppConfig:
     Top-level application config. All provider constructors read from this.
 
     Environment variables override defaults:
-      LUMEN_GRAPH_DB_PATH   — path for Kuzu database
+      LUMEN_GRAPH_DB_ROOT   — directory holding one Kuzu database per person
       LUMEN_VECTOR_LOCATION — ":memory:" or path for Qdrant
       LUMEN_USER_ID         — identifier for the single local user
       See ProviderConfig, OperationalConfig and ObservabilityConfig for the rest.

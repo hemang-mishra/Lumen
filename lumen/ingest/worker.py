@@ -30,18 +30,25 @@ from collections.abc import Callable
 from dataclasses import dataclass
 
 from lumen.config import AppConfig
-from lumen.graph.provider import GraphProvider
 from lumen.operational.enums import BufferStatus, ImportStatus
-from lumen.operational.repositories import OperationalStore
+from lumen.operational.repositories import OperationalStore, RecordNotFoundError
 from lumen.pipeline.orchestration import run_pipeline
 from lumen.providers.factory import get_embedding_provider, get_llm_provider
 from lumen.providers.protocols import EmbeddingProvider, LLMProvider
 from lumen.schemas.enums import ModelRole
 from lumen.schemas.pipeline import RunReport
-from lumen.vector.provider import VectorProvider
-from lumen.vector.qdrant_impl import QdrantVectorProvider
+from lumen.stores import StoreRegistry
 
 logger = logging.getLogger(__name__)
+
+# The two things a run tells anybody watching. Named here rather than typed
+# out at each call site, because a browser switches on these exact strings
+# and a typo in one of them is a message nothing ever reacts to.
+RUN_STARTED = "run_started"
+RUN_FINISHED = "run_finished"
+
+# Everything this worker can announce, for anyone who needs the whole list.
+WORKER_EVENTS: tuple[str, ...] = (RUN_STARTED, RUN_FINISHED)
 
 # Told to stop.
 _STOP = object()
@@ -70,76 +77,38 @@ class _Session:
 
 
 @dataclass
-class IngestResources:
+class IngestModels:
     """
-    Everything one pipeline run needs that is not the conversation itself.
+    The models one pipeline run needs.
 
-    Gathered into one object because they share a lifetime — they are built
-    together on the first import and closed together when the service stops
-    — and because handing a test one of these is how the whole worker gets
-    exercised without a model or a vector store anywhere in sight.
+    The stores used to be here too. They are not any more, because there is
+    a graph and a search collection per person and a run cannot know whose
+    it is until it reads the job — so the stores are borrowed for the length
+    of a run and the models, which belong to nobody, are kept.
 
     Attributes:
-        graph: The knowledge graph, writable. This is the same object the
-            read routes hold; see the note in `build_resources`.
-        vectors: The search index.
         embedder: Turns text into vectors.
         lightweight: The fast model, for cleaning and reading.
         thinking: The careful model, for deciding.
     """
 
-    graph: GraphProvider
-    vectors: VectorProvider
     embedder: EmbeddingProvider
     lightweight: LLMProvider
     thinking: LLMProvider
 
     def close(self) -> None:
         """
-        Release what this object opened.
+        Nothing to release.
 
-        The graph is not closed here. It was borrowed rather than opened —
-        whoever passed it in is still using it and is responsible for
-        shutting it down.
+        These are stateless clients, and the stores are not here any more —
+        a run borrows one person's graph and collection and gives them back,
+        so there is nothing of theirs left to shut.
         """
-        self.vectors.close()
 
 
-def open_index(config: AppConfig) -> VectorProvider:
+def build_models(config: AppConfig) -> IngestModels:
     """
-    Open the search index on its own, with no model involved.
-
-    Separate from the rest because deleting from the index needs nothing
-    that writing to it needs. Somebody erasing their data must be able to,
-    on a deployment whose model credentials have long since expired.
-    """
-    vectors = QdrantVectorProvider(
-        location=config.vector.location,
-        collection_name=config.vector.collection_name,
-        vector_size=config.vector.vector_size,
-    )
-    vectors.init_collection()
-    return vectors
-
-
-def build_resources(
-    config: AppConfig,
-    graph: GraphProvider,
-    vectors: VectorProvider | None = None,
-) -> IngestResources:
-    """
-    Open everything a run needs, except what is handed in already open.
-
-    The graph is passed in rather than opened because it cannot be opened
-    twice. Kuzu is embedded and takes a file lock, so a second provider on
-    the same path inside the same process would be refused. The service
-    opens exactly one and shares it; the provider serialises access
-    internally, so the routes reading from it and this thread writing to it
-    do not collide.
-
-    The index is optional for the same reason: a file-backed one takes a
-    lock too, so anything that has already opened one hands it over rather
-    than letting a second be opened underneath it.
+    Open the models a run needs.
 
     Raises:
         ProviderError: No model is configured, or the configured one cannot
@@ -147,15 +116,12 @@ def build_resources(
             reach a model has not failed halfway — it has not started, and
             the caller should be told that plainly.
     """
-    index = vectors or open_index(config)
-
-    return IngestResources(
-        graph=graph,
-        vectors=index,
+    return IngestModels(
         embedder=get_embedding_provider(config),
         lightweight=get_llm_provider(ModelRole.LIGHTWEIGHT, config),
         thinking=get_llm_provider(ModelRole.THINKING, config),
     )
+
 
 
 class IngestWorker:
@@ -171,16 +137,18 @@ class IngestWorker:
         *,
         config: AppConfig,
         ops: OperationalStore,
-        graph: GraphProvider,
-        resources: IngestResources | None = None,
+        stores: StoreRegistry,
+        resources: IngestModels | None = None,
         announce: Callable[[str, dict], None] | None = None,
     ) -> None:
         """
         Args:
             config: Settings for the run.
             ops: Where imports and job history are recorded.
-            graph: The shared, writable graph.
-            resources: Everything else a run needs. Supplied directly by
+            stores: Where a person's graph and search collection are
+                borrowed from. A run cannot know whose it is until it reads
+                the job, so this holds the registry rather than a store.
+            resources: The models a run needs. Supplied directly by
                 tests; built on first use otherwise, so that a service with
                 no model configured still starts and still serves every
                 route that does not need one.
@@ -190,7 +158,7 @@ class IngestWorker:
         """
         self._config = config
         self._ops = ops
-        self._graph = graph
+        self._stores = stores
         self._resources = resources
         self._announce = announce
         self._queue: queue.Queue = queue.Queue()
@@ -201,7 +169,7 @@ class IngestWorker:
     # Readiness
     # ------------------------------------------------------------------
 
-    def ensure_ready(self) -> IngestResources:
+    def ensure_ready(self) -> IngestModels:
         """
         Make sure a run could actually happen, and say so if it could not.
 
@@ -215,8 +183,8 @@ class IngestWorker:
         """
         with self._lock:
             if self._resources is None:
-                self._resources = build_resources(self._config, self._graph)
-                logger.info("ingest resources opened")
+                self._resources = build_models(self._config)
+                logger.info("ingest models opened")
             return self._resources
 
     # ------------------------------------------------------------------
@@ -319,21 +287,25 @@ class IngestWorker:
             return
 
         self._ops.imports.update_status(import_id, ImportStatus.RUNNING)
-        self._say("run_started", {"import_id": import_id, "source": "import"})
+        self._say(RUN_STARTED, {"import_id": import_id, "source": "import"})
 
         try:
-            resources = self.ensure_ready()
+            models = self.ensure_ready()
             event = self._ops.buffers.build_decay_event(record.session_id)
-            report = run_pipeline(
-                event,
-                graph=resources.graph,
-                vectors=resources.vectors,
-                embedder=resources.embedder,
-                lightweight=resources.lightweight,
-                thinking=resources.thinking,
-                ops=self._ops,
-                config=self._config,
-            )
+            # Borrowed once for the whole run. Asking again halfway could be
+            # answered with a reopened handle after an eviction, and the
+            # second half of an entry would be written somewhere else.
+            with self._stores.lease(record.user_id) as stores:
+                report = run_pipeline(
+                    event,
+                    graph=stores.graph,
+                    vectors=stores.vectors,
+                    embedder=models.embedder,
+                    lightweight=models.lightweight,
+                    thinking=models.thinking,
+                    ops=self._ops,
+                    config=self._config,
+                )
         except Exception as exc:
             # Deliberately broad. Anything at all that goes wrong belongs on
             # the import record where somebody will see it, and nothing is
@@ -363,7 +335,7 @@ class IngestWorker:
             },
         )
         self._say(
-            "run_finished",
+            RUN_FINISHED,
             {
                 "import_id": import_id,
                 "status": report.job_status,
@@ -386,27 +358,31 @@ class IngestWorker:
         does — leaving it there is how a conversation is never looked at
         again.
         """
-        self._say("run_started", {"session_id": session_id, "source": "conversation"})
+        self._say(RUN_STARTED, {"session_id": session_id, "source": "conversation"})
         try:
-            resources = self.ensure_ready()
+            models = self.ensure_ready()
+            buffer = self._ops.buffers.get_buffer(session_id)
+            if buffer is None:
+                raise RecordNotFoundError(f"no conversation with id {session_id!r}")
             event = self._ops.buffers.build_decay_event(session_id)
-            report = run_pipeline(
-                event,
-                graph=resources.graph,
-                vectors=resources.vectors,
-                embedder=resources.embedder,
-                lightweight=resources.lightweight,
-                thinking=resources.thinking,
-                ops=self._ops,
-                config=self._config,
-            )
+            with self._stores.lease(buffer.user_id) as stores:
+                report = run_pipeline(
+                    event,
+                    graph=stores.graph,
+                    vectors=stores.vectors,
+                    embedder=models.embedder,
+                    lightweight=models.lightweight,
+                    thinking=models.thinking,
+                    ops=self._ops,
+                    config=self._config,
+                )
         except Exception:
             logger.exception(
                 "a finished conversation could not be processed",
                 extra={"session_id": session_id},
             )
             self._release(session_id)
-            self._say("run_finished", {"session_id": session_id, "status": "FAILED"})
+            self._say(RUN_FINISHED, {"session_id": session_id, "status": "FAILED"})
             return
 
         logger.info(
@@ -419,7 +395,7 @@ class IngestWorker:
             },
         )
         self._say(
-            "run_finished",
+            RUN_FINISHED,
             {
                 "session_id": session_id,
                 "status": report.job_status,
@@ -462,7 +438,7 @@ class IngestWorker:
     def _fail(self, import_id: str, reason: str) -> None:
         """Record that an import will not be finishing, and why."""
         self._ops.imports.update_status(import_id, ImportStatus.FAILED, error=reason)
-        self._say("run_finished", {"import_id": import_id, "status": "FAILED"})
+        self._say(RUN_FINISHED, {"import_id": import_id, "status": "FAILED"})
 
     def __enter__(self) -> IngestWorker:
         self.start()

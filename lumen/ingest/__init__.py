@@ -29,7 +29,7 @@ from lumen.ingest.contracts import (
     StagedConversation,
 )
 from lumen.ingest.loader import stage_conversations
-from lumen.ingest.worker import IngestResources, IngestWorker, build_resources
+from lumen.ingest.worker import IngestModels, IngestWorker, build_models
 
 __all__ = [
     "ExportFormatError",
@@ -41,6 +41,6 @@ __all__ = [
     "StagedConversation",
     "stage_conversations",
     "IngestWorker",
-    "IngestResources",
-    "build_resources",
+    "IngestModels",
+    "build_models",
 ]

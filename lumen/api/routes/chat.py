@@ -341,4 +341,32 @@ def _who_is_talking(websocket: WebSocket) -> Identity:
     return get_identity(websocket)
 
 
-__all__ = ["router", "CHECK_EVERY_TURN", "WS_UNAUTHORISED"]
+def socket_frame_kinds() -> tuple[str, ...]:
+    """
+    Every kind of message this socket can send, in alphabetical order.
+
+    Read off the event classes themselves rather than written out by hand,
+    so a new kind of message is part of this list the moment it exists. The
+    front end is typed from this, and a list somebody has to remember to
+    update is a list that goes stale.
+    """
+    return tuple(sorted(_kinds_below(TurnEvent)))
+
+
+def _kinds_below(cls: type[TurnEvent]) -> set[str]:
+    """The kind each class in a family of events announces itself as."""
+    found: set[str] = set()
+    for child in cls.__subclasses__():
+        default = child.model_fields["kind"].default
+        if isinstance(default, str):
+            found.add(default)
+        found |= _kinds_below(child)
+    return found
+
+
+__all__ = [
+    "router",
+    "CHECK_EVERY_TURN",
+    "WS_UNAUTHORISED",
+    "socket_frame_kinds",
+]

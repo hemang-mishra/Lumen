@@ -193,13 +193,13 @@ class TestEnvironmentIsReadOnConstruction:
         assert ProviderConfig().thinking_model == "second"
 
     def test_the_other_config_objects_read_the_environment_too(self, monkeypatch):
-        monkeypatch.setenv("LUMEN_GRAPH_DB_PATH", "/tmp/graph.db")
+        monkeypatch.setenv("LUMEN_GRAPH_DB_ROOT", "/tmp/graphs")
         monkeypatch.setenv("LUMEN_VECTOR_SIZE", "1024")
         monkeypatch.setenv("LUMEN_OPS_DB_URL", "sqlite:///./other.db")
         monkeypatch.setenv("LUMEN_LOG_LEVEL", "DEBUG")
         monkeypatch.setenv("LUMEN_USER_ID", "someone")
 
-        assert GraphConfig().db_path == "/tmp/graph.db"
+        assert GraphConfig().db_root == "/tmp/graphs"
         assert VectorConfig().vector_size == 1024
         assert OperationalConfig().db_url == "sqlite:///./other.db"
         assert ObservabilityConfig().log_level == "DEBUG"

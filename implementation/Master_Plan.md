@@ -1103,7 +1103,7 @@ of the two.
   - *Result:* 4904 tests passing (213 new), **96%** coverage on `lumen/auth/`.
   - *Plan:* [`implementation/Goal_21_Plan.md`](file:///Users/hemangmishra/Projects/Lumen/implementation/Goal_21_Plan.md)
 
-- [ ] **Goal 22: Per-User Isolation (Tenancy)**
+- [x] **Goal 22: Per-User Isolation (Tenancy)** ✅
   - Implement a **store registry**: one Kuzu database directory and one Qdrant collection per
     user (DEC-A5), resolved from the authenticated identity, with LRU eviction bounded by
     `LUMEN_MAX_OPEN_GRAPHS` because Kuzu is embedded and takes an exclusive lock per handle.
@@ -1129,6 +1129,37 @@ of the two.
     endpoint in the API asked for the other user's identifiers, expecting 404 rather than a
     leak. Plus: registry eviction and reopen under concurrency, provisioning interrupted
     between graph and collection, and the migration run twice.
+  - **A constraint the plan had not found: the search index refuses a second connection.**
+    Qdrant in local mode locks its storage folder, so the second client raises rather than
+    waits — leasing a second person's stores while the first was held could never have
+    worked as planned. There is now **one connection and many collections**: the provider
+    takes an optional client and records whether it owns it, which is what stops the first
+    person's provider from closing the connection out from under everybody else.
+  - **A latent bug in the migration, found by running it.** The occupancy check that keeps
+    adoption from merging two histories called `iterdir()` on the destination. A graph is a
+    single file on this build, so pointed at the case it exists for it raised
+    `NotADirectoryError` and crashed mid-adoption instead of refusing. It now handles both
+    shapes, and treats anything empty as unoccupied so an interrupted run can be finished.
+  - *Amends Goal 11:* `/health` counted nodes in the graph. There is no graph to count before
+    anybody has signed in, which is exactly when a liveness probe is asked, so it now reports
+    whether the root everybody's graphs live under is readable and writable — the failure
+    that stops every person at once.
+  - *Amends Goals 17–20:* the recurring jobs take a `people` callable and run for everybody,
+    one person's stores held at a time. `MacroextractionService` takes a `user_id`, so
+    `/reports/run` writes into the caller's history rather than the configured default's.
+  - *Answers the two open questions this goal was for.* **OQ-A1:** a background run resolves
+    stores from the `user_id` it already carries, through the same registry a request uses —
+    there is one lease path, not a request one and a job one. **OQ-A2:** the single-writer
+    constraint is now per person rather than global, and still inside one process; two
+    people can be written at once, one person cannot be written by two processes. Named as
+    unsolved rather than half-built.
+  - *Docs amended:* `Auth_Architecture.md` — §6 marked built, OQ-A1 and OQ-A2 answered.
+  - *Result:* 4994 tests passing, **96%** coverage on `lumen/stores/`. Isolation demonstrated
+    live as well as in the suite: two signed-in people, one writes a lesson, she reads it
+    back `200`, he asks for the same identifier and gets `404`, `/graph/stats` totals 1 and
+    0. Adoption run for real: graph moved, entries copied, history readable, second run a
+    no-op.
+  - *Plan:* [`implementation/Goal_22_Plan.md`](file:///Users/hemangmishra/Projects/Lumen/implementation/Goal_22_Plan.md)
 
 ## Phase 7: Front End — Foundation & Inspection (Goals 23-27)
 **Objective:** Build the real front end, starting with the surfaces that make the pipeline
@@ -1155,32 +1186,53 @@ journeys, and **every journey runs in both themes and at 375px** — a screen th
 ever reviewed in dark at desktop width is not reviewed. Every surface gets an `axe` pass.
 This is an amendment to the project convention, not an exemption from it.
 
-- [ ] **Goal 23: Front-End Foundation & Design System**
-  - Scaffold `frontend/` — TypeScript, Tailwind, Radix primitives, its own build. No product
-    surface ships in this goal; the deliverable is the foundation everything else is built on,
-    which is what makes it worth its own goal rather than the first half of another.
-  - **Design tokens as the only styling mechanism** (DL-8…DL-10): the full light and dark
-    palettes, type scale, spacing, radii, elevation, motion and state layers. Light is the
-    base definition and dark redefines the same names, so light cannot rot.
-  - Theme switching — system, light, dark — persisted, with **no flash of the wrong theme on
-    load** (FR-XT3, FR-XT4). Both density modes (DL-40…DL-43), with compact never applying to
-    a touch screen.
-  - **A typed API client generated from the service's OpenAPI schema** (FR-XC1), with a check
-    that fails when the generated types and the running service disagree. Hand-written
-    request/response types are how two codebases drift.
-  - CORS on the FastAPI side and a configurable base URL on the client (FR-XC3) — required
-    rather than optional, since under DEC-2 the browser talks to the API cross-origin with
-    nothing in between.
-  - The primitives, each with its narrow-screen form designed at the same time: three buttons
-    (DL-44), inputs, outline chips (DL-45), the four-state list container (DL-46), the
-    table→card responsive table (DL-47), disclosure (DL-48), payload block (DL-49), one
-    overlay component that is a bottom sheet on mobile (DL-50), and the **record line**
-    (DL-52) — the pattern that answers "an id is not an answer" everywhere else in the app.
-  - The app shell: navigation that separates reflect from inspect (DEC-3, P2), a mobile
-    navigation form, and room for S7–S9 to arrive later without restructuring (FR-XL5).
-  - *Test:* A `/kitchen-sink` route rendering every primitive in every state, asserted in both
-    themes at both densities and at 375px — a foundation goal has nothing to demonstrate
-    otherwise. Plus `axe` on it, keyboard traversal, and a reduced-motion run.
+- [x] **Goal 23: Front-End Foundation & Design System** ✅
+  - Scaffolded `frontend/` beside `lumen/` — TypeScript, Tailwind v4, Radix primitives, its
+    own build and its own tests. No product surface ships in this goal.
+  - **The stack question the spec left open is answered: React + Vite, not Next.js.** DEC-2
+    removed the server tier Next.js was chosen for, and every screen is one person's private
+    history behind a sign-in, so nothing can usefully be pre-rendered either. shadcn/ui
+    dropped for the same kind of reason — it brings a competing vocabulary of colour names
+    and DL-10 requires ours. TanStack Query added for server state; Zustand keeps local
+    state. `Technical_HLD.md` §2.6, §7.1 and §7.2 amended to match.
+  - **Design tokens as the only styling mechanism**, with both rules enforced by tests rather
+    than by review: a colour defined only in the dark block fails, and a hex code or an
+    off-scale spacing value in any component fails. The palette's contrast is computed and
+    checked, including the case that keeps being got wrong — a coloured word on its own
+    faint tint.
+  - Theme switching — system, light, dark — persisted, with **no flash of the wrong theme**,
+    proven by reading the document before the app's own code has run. Both densities, with
+    compact never applying to a touch screen whatever is being displayed.
+  - **A typed client generated from the service's own OpenAPI description**, with the drift
+    check in two halves: `lumen/tests/test_api_openapi.py` fails if the committed schema no
+    longer describes the service, and `npm run types:check` fails if the generated types no
+    longer match the schema. A field renamed in Python breaks the Python suite, where the
+    person who renamed it is already looking. Websocket message names travel in the same
+    file under `x-lumen-socket-events`, read off the classes that send them.
+  - **Session handling built now, sign-in screen deferred to Goal 31** (explicit user
+    decision): the token in memory only, one renewal for however many requests fail at the
+    same moment, one sign-out rather than one per in-flight request, and the cache emptied
+    when the person changes. Exercised with sign-in switched off, which is what makes
+    FR-S11-8 a supported mode rather than dead code.
+  - The primitives, each with its narrow-screen form built in the same commit: three
+    buttons, inputs, chips, the four-state list container whose four sentences are required
+    by its type, the table→card table that cannot drop a column, disclosure, payload block,
+    the sheet-or-dialog, and the **record line**, whose type makes an id impossible as a
+    heading.
+  - The shell, with **one list of sections**: only built sections appear in the navigation
+    *and* only built sections get a route, so an unfinished screen cannot be reached by
+    typing its address. A later goal flips one mark.
+  - *Amends:* `Design_Language.md` DL-12 (the tertiary grey admitted it failed AA, which
+    contradicted FR-XA2 — darkened rather than excused) and DL-19 (the type scale collided
+    with the colour names; renamed `--type-*`). `Requirements.md` FR-XT1 (contradicted
+    FR-XT3 on the default theme; the app follows the device, dark stays the reference).
+    `Technical_HLD.md` §7.2's four node colours withdrawn — it coloured four of fifteen node
+    types and DL-16 already answers it with a rule.
+  - *Result:* 226 front-end tests and 25 browser journeys passing, 97.6% coverage with the
+    per-directory bar met; 5,027 Python tests passing. The accessibility pass caught a real
+    foundation bug — unlayered base styles beating every colour utility in the app, which
+    drew the primary button's label at 3:1.
+  - *Plan:* [`implementation/Goal_23_Plan.md`](file:///Users/hemangmishra/Projects/Lumen/implementation/Goal_23_Plan.md)
 
 - [ ] **Goal 24: Inspection Reads (API-3, API-4, API-5, API-8, API-9)**
   - A backend goal inside a front-end phase, in the manner of Goal 13b, and for the same

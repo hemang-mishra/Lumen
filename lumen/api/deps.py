@@ -22,7 +22,9 @@ the whole API at temporary databases by replacing a couple of functions.
 
 from __future__ import annotations
 
-from fastapi import Request, WebSocket
+from collections.abc import Iterator
+
+from fastapi import Depends, Request, WebSocket
 from starlette.requests import HTTPConnection
 
 from lumen.api.errors import Unavailable
@@ -31,6 +33,8 @@ from lumen.auth import AuthService, Identity
 from lumen.erasure import ErasureService
 from lumen.config import AppConfig
 from lumen.graph.provider import ReadOnlyGraph
+from lumen.stores import UserStores
+from lumen.vector.provider import VectorProvider
 from lumen.ingest import IngestWorker
 from lumen.operational.repositories import OperationalStore
 from lumen.pipeline.macroextraction.service import MacroextractionService
@@ -44,17 +48,6 @@ from lumen.query import (
     SessionRegistry,
 )
 from lumen.query.prompting import PersonaStore
-
-
-def get_graph(request: Request) -> ReadOnlyGraph:
-    """
-    The graph, to read from.
-
-    Typed as a reader on purpose. Adding a write endpoint would not merely
-    be poor judgement — the method is not on what this hands back, so it
-    would fail before it ran.
-    """
-    return request.app.state.graph
 
 
 def get_ops(request: Request) -> OperationalStore:
@@ -153,6 +146,41 @@ def get_identity(connection: HTTPConnection) -> Identity:
     identity = get_auth(connection).identify(_bearer(connection))
     connection.state.identity = identity
     return identity
+
+
+def get_stores(
+    connection: HTTPConnection, identity: Identity = Depends(get_identity)
+) -> Iterator[UserStores]:
+    """
+    This person's stores, borrowed for the length of the request.
+
+    The whole of how one person's history is kept out of another's. Nothing
+    above this opens a store of its own, so every query in the system is
+    about exactly one person because of which handle it was given rather than
+    because of what it remembered to say.
+
+    A generator, so the handle is given back however the request ends. A
+    failed request that kept somebody's graph open would eventually stop
+    anybody else's from being opened at all.
+    """
+    with connection.app.state.stores.lease(identity.user_id) as stores:
+        yield stores
+
+
+def get_graph(stores: UserStores = Depends(get_stores)) -> ReadOnlyGraph:
+    """
+    The graph, to read from.
+
+    Typed as a reader on purpose. Adding a write endpoint would not merely
+    be poor judgement — the method is not on what this hands back, so it
+    would fail before it ran.
+    """
+    return stores.graph
+
+
+def get_vectors(stores: UserStores = Depends(get_stores)) -> VectorProvider:
+    """This person's search index."""
+    return stores.vectors
 
 
 def require_identity(connection: HTTPConnection) -> Identity:

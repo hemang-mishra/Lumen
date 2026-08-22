@@ -11,6 +11,8 @@ from __future__ import annotations
 import json
 
 import pytest
+
+from lumen.tests.conftest import registry_for
 from fastapi.testclient import TestClient
 
 from lumen.api.deps import get_formulator, get_graph, get_ops
@@ -39,7 +41,8 @@ def query_client(graph_store, ops_store):
 
     def _build(script):
         formulator = QueryFormulator(
-            llm=FakeLLMProvider(list(script)), graph=graph_store
+            llm=FakeLLMProvider(list(script)),
+            stores=registry_for(graph_store),
         )
         app = create_app()
         app.dependency_overrides[get_graph] = lambda: graph_store
@@ -203,7 +206,7 @@ class TestWhenNoModelIsConfigured:
         monkeypatch.delenv("GOOGLE_API_KEY", raising=False)
         app = create_app(
             AppConfig(
-                graph=GraphConfig(db_path=str(tmp_path / "graph")),
+                graph=GraphConfig(db_root=str(tmp_path / "graph")),
                 operational=OperationalConfig(
                     db_url=f"sqlite:///{tmp_path / 'ops.db'}"
                 ),
@@ -283,7 +286,7 @@ class TestBuildingTheTurnReaderAtStartup:
 
         monkeypatch.setenv("GEMINI_API_KEY", "test-key")
         config = AppConfig(
-            graph=GraphConfig(db_path=str(tmp_path / "graph")),
+            graph=GraphConfig(db_root=str(tmp_path / "graph")),
             operational=OperationalConfig(db_url=f"sqlite:///{tmp_path / 'ops.db'}"),
             providers=ProviderConfig(lightweight_provider="fake"),
         )
@@ -309,7 +312,7 @@ class TestHandingTheReaderToARequest:
 
         from lumen.api.deps import get_formulator
 
-        reader = QueryFormulator(llm=FakeLLMProvider([]), graph=graph_store)
+        reader = QueryFormulator(llm=FakeLLMProvider([]), stores=registry_for(graph_store))
         try:
             request = SimpleNamespace(
                 app=SimpleNamespace(state=SimpleNamespace(formulator=reader))

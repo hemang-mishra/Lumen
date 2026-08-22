@@ -192,7 +192,7 @@ class TestTheCommand:
     ):
         # Phase three's whole point is being able to look at a real graph,
         # and until this there was no way to get anything into one.
-        monkeypatch.setenv("LUMEN_GRAPH_DB_PATH", str(tmp_path / "graph"))
+        monkeypatch.setenv("LUMEN_GRAPH_DB_ROOT", str(tmp_path / "graph"))
         monkeypatch.setenv("LUMEN_OPS_DB_URL", f"sqlite:///{tmp_path / 'ops.db'}")
         monkeypatch.setenv("LUMEN_VECTOR_LOCATION", ":memory:")
 
